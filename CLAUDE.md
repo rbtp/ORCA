@@ -23,9 +23,16 @@
 - **Fully portable, no hardcoded IPs (as of 2026-06-18)**: frontend builds with `VITE_API_URL` empty, so all `fetch()` calls resolve to relative `/api/...` paths against whatever host served the page; nginx proxies `/api/` to the backend by Docker service name (`orca-backend:8000`); CORS reads allowed origins from `CORS_ORIGINS` in `.env` (comma-separated, default `https://localhost`); TLS cert auto-generates on first boot for whatever IP/hostname the container has. Moving to a new server requires editing only `.env` (`CORS_ORIGINS`) and running `docker compose up --build` — no source changes.
 
 ## Current Task
-**Remote collection trigger switched from WinRM to SMB+Task Scheduler as default, with WinRM kept as opt-in fallback (2026-06-18). System is functional; awaiting next task.**
+**Documentation written (2026-07-14). System is functional; awaiting next task.**
 
 ## Progress Log
+- [x] Documentation (2026-07-14):
+  - Read entire codebase (all backend routes, frontend components, DB schema, Docker/nginx/entrypoint config)
+  - Generated `README.md` (project root) — feature summary, architecture diagram, tech stack table, quick start, air-gapped deployment, prerequisites, screenshots placeholder
+  - Generated `docs/USER_GUIDE.md` — full analyst usage: cases/assets, investigation config, remote deployment, evidence window, MITRE ATT&CK/verdict workflow, memory forensics, ClamAV, Grype, disk mount, IOC, reports, Tools menu, Options menu
+  - Generated `docs/ADMIN_GUIDE.md` — full deployment walkthrough, air-gapped install, env var reference, TLS management, DB backup/restore, updating, user management, troubleshooting (all known deployment issues documented)
+  - Generated `docs/API_REFERENCE.md` — all backend API endpoints grouped by route file with request/response shapes
+  - Updated `CLAUDE.md` current task
 - [x] Remote collection trigger — switch default from WinRM to SMB+Task Scheduler (2026-06-18):
   - Reason: target environment does not have WinRM (port 5985) enabled and it's not under our administrative control to enable; SMB+Task Scheduler needs only port 445 + admin credentials — the same prerequisites the original psexec path had, so no new target-side configuration is needed
   - `backend/vr_remote.py`: the single WinRM-only `run_remote_command()` from the prior pass was split into a thin dispatcher plus two private implementations: `_run_remote_command_smb_task()` (new — impacket `dcerpc.v5.tsch`/`transport` over `ncacn_np:{ip}[\pipe\atsvc]`; registers a throwaway scheduled task running `cmd.exe /c <command>`, calls `hSchRpcRun` to trigger it, sleeps 2s, then best-effort `hSchRpcDelete`s the task registration — fire-and-forget because `hSchRpcRun` only dispatches and returns without waiting for the spawned process to exit, and deleting the task registration afterward does not affect the already-launched process) and `_run_remote_command_winrm()` (the prior pass's here-string + `Start-Process` logic, unchanged, now opt-in only). `run_remote_command(..., transport="SMB_TASK")` dispatches on the new `transport` param (`"SMB_TASK"` default, `"WINRM"` opt-in), both returning the same `(returncode, stdout, stderr)` shape
