@@ -1,0 +1,71 @@
+:root {
+  --text-brightness: 1;
+}
+
+body, html, #root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background-color: #050505;
+  font-family: 'JetBrains Mono', monospace;
+  color: #e0e0e0;
+  overflow: hidden; /* Prevents the main body from double-scrolling */
+}
+
+/* --- ORCA CUSTOM SCROLLBARS --- */
+
+/* Width and Track */
+::-webkit-scrollbar {
+  width: 4px; /* Ultra-thin */
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: #050505;
+}
+
+/* Handle (Invisible by default) */
+::-webkit-scrollbar-thumb {
+  background: #111; 
+  border-radius: 0px;
+  transition: background 0.3s ease;
+}
+
+/* Handle on hover (Lights up green) */
+::-webkit-scrollbar-thumb:hover {
+  background: #00ff41;
+  box-shadow: 0 0 10px rgba(0, 255, 65, 0.5);
+}
+
+/* Firefox Support */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #111 #050505;
+}
+
+/* --- OPTIONAL: FADE-IN FOR WORKSPACE CONTENT --- */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.intel-detail-view {
+  animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* --- SYSTEM SCANLINE EFFECT (Subtle) --- */
+#root::before {
+  content: " ";
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  right: 0;
+  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+  z-index: 9999;
+  background-size: 100% 2px, 3px 100%;
+  pointer-events: none;
+  opacity: 0.1;
+}

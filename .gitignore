@@ -1,0 +1,52 @@
+# Environment secrets — never commit
+.env
+*.env
+
+# TLS certificates and keys
+orca.crt
+orca.key
+*.crt
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# Frontend build output
+frontend/dist/
+
+# Binaries (Velociraptor, ClamAV, Grype, Syft, psexec)
+backend/bin/
+
+# Logs
+*.log
+claude_logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker build artifacts
+*.tar
+
+# Temp / generated
+tmp/
+sandbox_*/

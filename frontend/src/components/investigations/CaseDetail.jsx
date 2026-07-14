@@ -1,0 +1,1417 @@
+import React, { useState, useEffect, useRef } from 'react';
+import NetworkMap from './NetworkMap';
+import AssetActionTab from './AssetActionTab';
+import EvidenceWindow from './EvidenceWindow';
+import { TimelineViewer } from './EvidenceWindow';
+import CollabNotificationTray from './CollabNotificationTray';
+import { useCollaboration } from './useCollaboration';
+
+export default function CaseDetail({
+  caseData, onBack, onRefresh,
+  memSummaries = {}, setMemSummaries,
+  avSummaries = {}, setAvSummaries,
+  vulnSummaries = {}, setVulnSummaries,
+  pkgData, setPkgData,
+  pkgProgress, setPkgProgress,
+  pkgExpanded, setPkgExpanded,
+  pkgGenerating, setPkgGenerating,
+  pkgCopied, setPkgCopied,
+  deployStatus, setDeployStatus,
+  deployRunning, setDeployRunning,
+  startProgressPolling, fetchPkgProgress,
+}) {
+  const [activeTab, setActiveTab] = useState(
+  'OVERVIEW'
+  );
+  const [notes, setNotes]                   = useState([]);
+  const [newNote, setNewNote]               = useState('');
+  const [noteType, setNoteType]             = useState('NOTE');
+  const [showAssetModal, setShowAssetModal] = useState(false);
+  const [editingConfig, setEditingConfig]   = useState(null);
+  const [configBuffer, setConfigBuffer]     = useState('');
+  const [completion, setCompletion]         = useState(null);
+
+  const [investigatingAssetId, setInvestigatingAssetId] = useState(null);
+  const [isEvidenceOpen, setIsEvidenceOpen]             = useState(false);
+  const [evidenceTacticList, setEvidenceTacticList]     = useState([]);
+  const [isFetchingTactics, setIsFetchingTactics]       = useState(false);
+
+  const [timelineAssetId, setTimelineAssetId]           = useState(null);
+  const [isTimelineOpen, setIsTimelineOpen]             = useState(false);
+  const [deleteTarget, setDeleteTarget]                 = useState(null);
+  const [deleteStep, setDeleteStep]                     = useState(0);
+  const [deleteMathAnswer, setDeleteMathAnswer]         = useState('');
+  const [deleteConfirmText, setDeleteConfirmText]       = useState('');
+  const [deleteMath, setDeleteMath]                     = useState({ a: 0, b: 0, op: '+' });
+
+  const [activeNodes, setActiveNodes]     = useState([]);
+  const [activeLinks, setActiveLinks]     = useState([]);
+  const [isMaximized, setIsMaximized]     = useState(false);
+  const [saveStatus, setSaveStatus]       = useState('READY');
+  const [linkForm, setLinkForm]           = useState(null);
+  const [assetModes, setAssetModes]       = useState({});
+  const [mountSessions, setMountSessions] = useState({});
+  const [mountExpanded, setMountExpanded] = useState({});
+  const [mountForms, setMountForms]       = useState({});
+  const [mountLoading, setMountLoading]   = useState({});
+
+  // Deploy state
+  const [deployOpen, setDeployOpen]           = useState(false);
+  const [deploySelected, setDeploySelected]   = useState(new Set());
+  const [deployCreds, setDeployCreds]         = useState({ username: '', password: '' });
+  const [deployShowPass, setDeployShowPass]   = useState(false);
+  const [psexecAvailable, setPsexecAvailable] = useState(null);
+  const deployAbortRef                        = useRef(false);
+  const autoSaveTimerRef                      = useRef(null);
+
+  // Triage state
+  const [triageCategories, setTriageCategories] = useState([]);
+  const [triageSelected, setTriageSelected]     = useState(new Set());
+  const [triageAssets, setTriageAssets]         = useState(new Set());
+  const [triageCreds, setTriageCreds]           = useState({ username: '', password: '', transport: 'SMB_PSEXEC', domain: '' });
+  const [triageShowPass, setTriageShowPass]     = useState(false);
+  const [triageRunning, setTriageRunning]       = useState(false);
+  const [triageStatus, setTriageStatus]         = useState({});
+  const triageAbortRef                          = useRef(false);
+  const [triageExpanded, setTriageExpanded]     = useState({});
+  const [triageTechStatus, setTriageTechStatus] = useState({});
+
+  const API_BASE = `${import.meta.env.VITE_API_URL}/api/mitre`;
+
+  const getAuthHeaders = () => ({
+    'Authorization': `Bearer ${localStorage.getItem('orca_token')}`,
+    'Content-Type': 'application/json',
+  });
+
+  const getCurrentUserRole = () => {
+    try {
+      const token = localStorage.getItem('orca_token');
+      if (!token) return 'analyst';
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      return payload.role || 'analyst';
+    } catch { return 'analyst'; }
+  };
+  const userRole = getCurrentUserRole();
+
+  const collab       = useCollaboration();
+  const currentAsset = caseData.assets?.find(a => String(a.id) === String(investigatingAssetId));
+  const caseName     = caseData.name || caseData.case_name;
+
+  useEffect(() => {
+    if (caseData.assets) {
+      setAssetModes(prev => {
+        const next = { ...prev };
+        caseData.assets.forEach(a => {
+          if (!next[String(a.id)]) next[String(a.id)] = a.analysis_mode || 'UNKNOWN';
+        });
+        return next;
+      });
+    }
+  }, [caseData.assets]);
+
+  const loadCompletion = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/completion`, { headers: getAuthHeaders() });
+      if (res.ok) setCompletion(await res.json());
+    } catch {}
+  };
+
+  useEffect(() => { loadCompletion(); }, [caseName]);
+
+  useEffect(() => {
+    if (deployOpen && psexecAvailable === null) {
+      fetch(`${import.meta.env.VITE_API_URL}/api/deploy/psexec-status`, { headers: getAuthHeaders() })
+        .then(r => r.json())
+        .then(d => setPsexecAvailable(d.available))
+        .catch(() => setPsexecAvailable(false));
+    }
+  }, [deployOpen]);
+
+  const handleInvestigateAsset = (id) => {
+    setIsEvidenceOpen(false);
+    setInvestigatingAssetId(null);
+    setTimeout(() => setInvestigatingAssetId(id), 0);
+  };
+
+  useEffect(() => {
+    if (!investigatingAssetId) return;
+    const identifier = caseName || caseData.country;
+    if (!identifier) { setEvidenceTacticList([]); setIsEvidenceOpen(true); return; }
+    setIsFetchingTactics(true);
+    fetch(`${API_BASE}/threat-profile/${encodeURIComponent(identifier)}?asset_id=${investigatingAssetId}`, { headers: getAuthHeaders() })
+      .then(r => r.json())
+      .then(data => { setEvidenceTacticList(Array.isArray(data) ? data : []); setIsEvidenceOpen(true); })
+      .catch(() => { setEvidenceTacticList([]); setIsEvidenceOpen(true); })
+      .finally(() => setIsFetchingTactics(false));
+  }, [investigatingAssetId]);
+
+  const handleCloseEvidence = () => {
+    if (investigatingAssetId) collab.releaseTechnique(investigatingAssetId, '__ALL__').catch(() => {});
+    setIsEvidenceOpen(false);
+    setInvestigatingAssetId(null);
+    setEvidenceTacticList([]);
+    loadCompletion();
+  };
+
+  const handleOpenTimeline = (id) => {
+    setTimelineAssetId(id);
+    setIsTimelineOpen(true);
+  };
+
+  const openDeleteAsset = (asset) => {
+    const ops = ['+', '-', '*'];
+    const op  = ops[Math.floor(Math.random() * ops.length)];
+    const a   = Math.floor(Math.random() * 20) + 5;
+    const b   = Math.floor(Math.random() * 10) + 2;
+    setDeleteMath({ a, b, op });
+    setDeleteMathAnswer('');
+    setDeleteConfirmText('');
+    setDeleteTarget(asset);
+    setDeleteStep(1);
+  };
+
+  const closeDelete = () => { setDeleteStep(0); setDeleteTarget(null); setDeleteMathAnswer(''); setDeleteConfirmText(''); };
+
+  const confirmDeleteAsset = async () => {
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/assets/${deleteTarget.id}`,
+        { method: 'DELETE', headers: getAuthHeaders() });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      closeDelete();
+      if (onRefresh) onRefresh();
+    } catch(e) { alert('DELETE FAILED: ' + e.message); }
+  };
+
+  const mathAnswer = () => {
+    const { a, b, op } = deleteMath;
+    return op === '+' ? a + b : op === '-' ? a - b : a * b;
+  };
+
+  useEffect(() => {
+    const rawMap = caseData.mapData || caseData.map_data;
+    if (rawMap) {
+      try {
+        const parsed = typeof rawMap === 'string' ? JSON.parse(rawMap) : rawMap;
+        if (parsed?.nodes) { setActiveNodes(parsed.nodes || []); setActiveLinks(parsed.links || []); }
+        else if (Array.isArray(parsed)) { setActiveNodes(parsed); setActiveLinks([]); }
+      } catch (e) { console.error('MAP_REHYDRATION_ERROR:', e); }
+    }
+  }, [caseData]);
+
+  useEffect(() => {
+    if (activeNodes.length === 0 && activeLinks.length === 0) return;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/map-sync`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ nodes: activeNodes, links: activeLinks }),
+      }).catch(() => {});
+    }, 2000);
+    return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); };
+  }, [activeNodes, activeLinks]);
+
+  const saveMapLayout = async () => {
+    setSaveStatus('SAVING...');
+    try {
+      const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/map-sync`, {
+        method: 'POST', headers: getAuthHeaders(),
+        body: JSON.stringify({ nodes: activeNodes || [], links: activeLinks || [] }),
+      });
+      if (res.ok) { setSaveStatus('SAVED_SUCCESSFULLY'); setTimeout(() => setSaveStatus('READY'), 2000); }
+      else setSaveStatus('ERROR');
+    } catch { setSaveStatus('ERROR'); }
+  };
+
+  useEffect(() => {
+    fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/notes/v2`, { headers: getAuthHeaders() })
+      .then(r => r.json()).then(setNotes).catch(() => setNotes([]));
+  }, [caseName]);
+
+  const handleAddNote = async () => {
+    if (!newNote.trim()) return;
+    const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/notes/v2`, {
+      method: 'POST', headers: getAuthHeaders(),
+      body: JSON.stringify({ text: newNote, note_type: noteType }),
+    });
+    if (res.ok) {
+      const d = await res.json();
+      setNotes(prev => [...prev, { text: newNote, time: d.time, type: noteType, author_initials: d.author_initials }]);
+      setNewNote('');
+    }
+  };
+
+  const [assetForm, setAssetForm] = useState({
+    hostname: '', ip: '', subnet: '255.255.255.0', gateway: '', mac: '',
+    type: 'Workstation', os: 'Windows', version: '10', formFactor: 'Laptop',
+    assetNotes: '', analysisMode: 'UNKNOWN',
+  });
+
+  const handleRegisterAsset = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets`, {
+        method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(assetForm),
+      });
+      if (res.ok) {
+        if (assetForm.analysisMode !== 'UNKNOWN') {
+          const assetsRes = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets`, { headers: getAuthHeaders() });
+          const assets = await assetsRes.json();
+          const newAsset = assets.find(a => a.hostname === assetForm.hostname);
+          if (newAsset) {
+            await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets/${newAsset.id}/mode`, {
+              method: 'PATCH', headers: getAuthHeaders(),
+              body: JSON.stringify({ analysis_mode: assetForm.analysisMode }),
+            });
+            setAssetModes(prev => ({ ...prev, [String(newAsset.id)]: assetForm.analysisMode }));
+          }
+        }
+        setShowAssetModal(false);
+        if (onRefresh) onRefresh();
+      }
+    } catch (err) { console.error(err); }
+  };
+
+  const loadMountSessions = async (assetId) => {
+    try {
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/${assetId}/mounts`, { headers: getAuthHeaders() });
+      if (r.ok) { const data = await r.json(); setMountSessions(prev => ({ ...prev, [String(assetId)]: data })); }
+    } catch {}
+  };
+
+  const handleMount = async (assetId) => {
+    const form = mountForms[String(assetId)] || {};
+    if (!form.imagePath) return;
+    setMountLoading(prev => ({ ...prev, [String(assetId)]: true }));
+    try {
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/mount`, {
+        method: 'POST', headers: getAuthHeaders(),
+        body: JSON.stringify({ asset_id: assetId, image_path: form.imagePath, drive_letter: form.driveLetter || null, provider: form.provider || 'auto', readonly: true }),
+      });
+      const d = await r.json();
+      if (r.ok) {
+        setAssetModes(prev => ({ ...prev, [String(assetId)]: 'DEAD_DISK_LOCAL' }));
+        if (d.drive_letter) setMountForms(prev => ({ ...prev, [String(assetId)]: { ...form, driveLetter: d.drive_letter } }));
+        await loadMountSessions(assetId);
+        if (onRefresh) onRefresh();
+      } else { alert('MOUNT_ERROR: ' + (d.detail || 'Unknown error')); }
+    } catch (e) { alert('MOUNT_ERROR: ' + e.message); }
+    finally { setMountLoading(prev => ({ ...prev, [String(assetId)]: false })); }
+  };
+
+  const handleDismount = async (assetId, mountId) => {
+    setMountLoading(prev => ({ ...prev, [String(assetId)]: true }));
+    try {
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/dismount?asset_id=${assetId}&mount_id=${mountId}`, { method: 'POST', headers: getAuthHeaders() });
+      const d = await r.json();
+      if (r.ok) { await loadMountSessions(assetId); }
+      else { alert('DISMOUNT_ERROR: ' + (d.detail || 'Unknown error')); }
+    } catch (e) { alert('DISMOUNT_ERROR: ' + e.message); }
+    finally { setMountLoading(prev => ({ ...prev, [String(assetId)]: false })); }
+  };
+
+  // ── Package handlers ───────────────────────────────────────────────────────
+
+  const handleGeneratePackage = async (assetId) => {
+    setPkgGenerating(prev => ({ ...prev, [String(assetId)]: true }));
+    try {
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/${assetId}/package`, { method: 'POST', headers: getAuthHeaders() });
+      if (!r.ok) { const e = await r.json(); alert(`PACKAGE_ERROR: ${e.detail || r.statusText}`); return; }
+      const data = await r.json();
+      setPkgData(prev => ({ ...prev, [String(assetId)]: data }));
+      startProgressPolling(assetId);
+    } catch (e) { alert(`PACKAGE_ERROR: ${e.message}`); }
+    finally { setPkgGenerating(prev => ({ ...prev, [String(assetId)]: false })); }
+  };
+
+  const handleRevokePackage = async (assetId) => {
+    const pkg = pkgData[String(assetId)];
+    if (!pkg?.token) return;
+    if (!window.confirm('Revoke this package token? The agent cannot submit further results.')) return;
+    try {
+      await fetch(`${import.meta.env.VITE_API_URL}/api/packages/${pkg.token}`, { method: 'DELETE', headers: getAuthHeaders() });
+      setPkgData(prev => { const n = { ...prev }; delete n[String(assetId)]; return n; });
+    } catch (e) { alert(`REVOKE_ERROR: ${e.message}`); }
+  };
+
+  const handleCopyOneliner = (assetId) => {
+    const pkg = pkgData[String(assetId)];
+    if (!pkg?.oneliner) return;
+    navigator.clipboard.writeText(pkg.oneliner).then(() => {
+      setPkgCopied(prev => ({ ...prev, [String(assetId)]: true }));
+      setTimeout(() => setPkgCopied(prev => ({ ...prev, [String(assetId)]: false })), 2000);
+    });
+  };
+
+  const pkgExpiresIn = (isoStr) => {
+    if (!isoStr) return '';
+    const diff = new Date(isoStr + 'Z') - new Date();
+    if (diff <= 0) return 'EXPIRED';
+    const h = Math.floor(diff / 3600000);
+    const m = Math.floor((diff % 3600000) / 60000);
+    return `${h}h ${m}m`;
+  };
+
+  // ── Deploy handlers ────────────────────────────────────────────────────────
+
+  const DEPLOY_PHASES = ['STAGING', 'CONNECTING', 'AUTHENTICATING', 'DEPLOYING', 'EXECUTING', 'COLLECTING'];
+
+  const phaseColor = (phase) => ({
+    STAGING: '#00bfff', CONNECTING: '#ffaa00', AUTHENTICATING: '#ffaa00', DEPLOYING: '#00bfff',
+    EXECUTING: '#00bfff', COLLECTING: '#00ff41', COMPLETE: '#00ff41', ERROR: '#ff4444'
+  }[phase] || '#777');
+
+  const phaseIndex = (phase) => DEPLOY_PHASES.indexOf(phase);
+
+  const toggleDeploySelect = (assetId) => {
+    setDeploySelected(prev => {
+      const next = new Set(prev);
+      next.has(assetId) ? next.delete(assetId) : next.add(assetId);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    const all = caseData.assets?.map(a => a.id) || [];
+    setDeploySelected(deploySelected.size === all.length ? new Set() : new Set(all));
+  };
+
+  const handleDeploy = async () => {
+    if (!deployCreds.username || !deployCreds.password) { alert('CREDENTIALS_REQUIRED'); return; }
+    if (deploySelected.size === 0) { alert('NO_TARGETS: Select at least one asset.'); return; }
+
+    setDeployRunning(true);
+    deployAbortRef.current = false;
+
+    const initial = {};
+    deploySelected.forEach(id => { initial[String(id)] = { phase: 'CONNECTING', message: 'Queued...', error: null }; });
+    setDeployStatus(initial);
+
+    const expanded = {};
+    deploySelected.forEach(id => { expanded[String(id)] = true; });
+    setPkgExpanded(prev => ({ ...prev, ...expanded }));
+
+    try {
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/deploy/bulk`, {
+        method: 'POST', headers: getAuthHeaders(),
+        body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password }),
+      });
+
+      if (!r.ok) { const e = await r.json(); alert(`DEPLOY_ERROR: ${e.detail || r.statusText}`); setDeployRunning(false); return; }
+
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        if (deployAbortRef.current) break;
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const update = JSON.parse(line);
+            setDeployStatus(prev => ({ ...prev, [String(update.asset_id)]: { phase: update.phase, message: update.message, error: update.error || null } }));
+            if (update.phase === 'COLLECTING') {
+              setPkgData(prev => ({
+                ...prev,
+                [String(update.asset_id)]: prev[String(update.asset_id)] || { technique_count: '?', oneliner: null, expires_at: null, token: null }
+              }));
+              startProgressPolling(update.asset_id);
+            }
+          } catch {}
+        }
+      }
+    } catch (e) { console.error('DEPLOY_STREAM_ERROR:', e); }
+
+    setDeployRunning(false);
+  };
+
+  const deployComplete = deploySelected.size > 0 && Array.from(deploySelected).every(id => {
+    const s = deployStatus[String(id)];
+    return s && (s.phase === 'COLLECTING' || s.phase === 'COMPLETE' || s.phase === 'ERROR');
+  });
+
+  // ── Triage handlers ────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if ((caseData.case_type || 'INVESTIGATION') !== 'INCIDENT_RESPONSE') return;
+    fetch(`${import.meta.env.VITE_API_URL}/api/deploy/triage-categories`, { headers: getAuthHeaders() })
+      .then(r => r.json())
+      .then(d => { setTriageCategories(d.categories || []); setTriageSelected(new Set(d.categories || [])); })
+      .catch(() => {});
+  }, []);
+
+  const toggleTriageCategory = (cat) => {
+    setTriageSelected(prev => { const n = new Set(prev); n.has(cat) ? n.delete(cat) : n.add(cat); return n; });
+  };
+  const toggleTriageAsset = (id) => {
+    setTriageAssets(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  };
+  const toggleAllTriageAssets = () => {
+    const all = caseData.assets?.map(a => a.id) || [];
+    setTriageAssets(triageAssets.size === all.length ? new Set() : new Set(all));
+  };
+
+  const handleTriage = async () => {
+    if (!deployCreds.username || !deployCreds.password) { alert('CREDENTIALS_REQUIRED'); return; }
+    if (deploySelected.size === 0) { alert('NO_TARGETS: Select at least one asset.'); return; }
+    if (triageSelected.size === 0) { alert('NO_CATEGORIES: Select at least one triage category.'); return; }
+    setTriageRunning(true);
+    triageAbortRef.current = false;
+    const initial = {};
+    deploySelected.forEach(id => { initial[String(id)] = { phase: 'STAGING', message: 'Queued...' }; });
+    setTriageStatus(initial);
+    try {
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/deploy/triage`, {
+        method: 'POST', headers: getAuthHeaders(),
+        body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password, categories: Array.from(triageSelected), transport: triageCreds.transport, domain: triageCreds.domain || null }),
+      });
+      if (!r.ok) { const e = await r.json(); alert(`TRIAGE_ERROR: ${e.detail || r.statusText}`); setTriageRunning(false); return; }
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        if (triageAbortRef.current) break;
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n'); buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const u = JSON.parse(line);
+            console.log('TRIAGE_STREAM:', u);
+            if (u.asset_id) {
+              setTriageStatus(prev => ({ ...prev, [String(u.asset_id)]: { phase: u.phase, message: u.message, error: u.error || null } }));
+              // capture per-technique status from message if it contains t_code info
+              try {
+                const inner = JSON.parse(u.message || '{}');
+                if (inner.t_code) {
+                  setTriageTechStatus(prev => ({
+                    ...prev,
+                    [String(u.asset_id)]: {
+                      ...((prev[String(u.asset_id)]) || {}),
+                      [inner.t_code]: { status: inner.status, rows: inner.rows ?? null },
+                    }
+                  }));
+                  setTriageExpanded(prev => ({ ...prev, [String(u.asset_id)]: true }));
+                }
+              } catch {}
+            }
+          } catch {}
+        }
+      }
+    } catch (e) { console.error('TRIAGE_STREAM_ERROR:', e); }
+    setTriageRunning(false);
+  };
+
+  const triagePhaseColor = (phase) => ({ STAGING: '#00bfff', CONNECTING: '#ffaa00', COLLECTING: '#00ff41', COMPLETE: '#00ff41', ERROR: '#ff4444' }[phase] || '#777');
+
+  // ── Map helpers ────────────────────────────────────────────────────────────
+
+  const deployToMap = (asset) => {
+    if (!activeNodes.find(n => n.hostname === asset.hostname)) {
+      setActiveNodes([...activeNodes, { hostname: asset.hostname, ip: asset.ip, mac: asset.mac_address, os: asset.os, version: asset.os_version, type: asset.form_factor, config: '', nodeNote: '', x: 400, y: 250 }]);
+    }
+  };
+
+  const handleInitiateLink = (source, target) => {
+    setLinkForm({ id: `link-${Date.now()}`, source: source.hostname, target: target.hostname, link_type: 'WIRED', interface_src: '', interface_dst: '', ip_src: source.ip || '', ip_dst: target.ip || '', vlan: '1' });
+  };
+
+  const handleConfirmLink = () => { setActiveLinks(prev => [...prev, linkForm]); setLinkForm(null); };
+
+  const handleDeleteNode = (node) => {
+    if (window.confirm(`REMOVE ${node.hostname} FROM WORKSPACE?`)) {
+      setActiveNodes(prev => prev.filter(n => n.hostname !== node.hostname));
+      setActiveLinks(prev => prev.filter(l => l.source !== node.hostname && l.target !== node.hostname));
+    }
+  };
+
+  const addInfrastructure = (type) => {
+    const id = Math.floor(Math.random() * 999);
+    setActiveNodes([...activeNodes, { hostname: `${type}_${id}`, ip: '0.0.0.0', mac: 'AUTO_GEN', type, os: 'Firmware_v1.0', config: '', nodeNote: '', x: 450, y: 250 }]);
+  };
+
+  const handleUpdateNode = (node, action, data) => {
+    if (action === 'COORD_UPDATE') { setActiveNodes(prev => prev.map(n => n.hostname === node.hostname ? { ...n, x: data.x, y: data.y } : n)); return; }
+    if (action === 'CONFIG') {
+      if (['SWITCH', 'ROUTER', 'FIREWALL'].includes(node.type?.toUpperCase())) { setEditingConfig(node); setConfigBuffer(node.config || ''); }
+      else { const v = prompt(`ENTER SYSTEM NOTES FOR ${node.hostname}:`, node.nodeNote || ''); if (v !== null) setActiveNodes(prev => prev.map(n => n.hostname === node.hostname ? { ...n, nodeNote: v } : n)); }
+      return;
+    }
+    const field = { 'IP': 'ip', 'NOTE': 'nodeNote' }[action];
+    if (field) { const v = prompt(`ENTER ${action} FOR ${node.hostname}:`, node[field] || ''); if (v !== null) setActiveNodes(prev => prev.map(n => n.hostname === node.hostname ? { ...n, [field]: v } : n)); }
+  };
+
+  const pct    = completion?.aggregate_completion_pct || 0;
+  const pctCol = pct >= 80 ? '#00ff41' : pct >= 40 ? '#ffaa00' : '#ff4444';
+
+  return (
+    <div style={{ animation: 'fadeIn 0.3s ease', color: '#fff', fontFamily: 'monospace' }}>
+      <CollabNotificationTray notifications={collab.notifications} dismissNotification={collab.dismissNotification} connected={collab.connected} />
+
+      <button onClick={onBack} style={{ background: 'none', border: 'none', color: '#00ff41', cursor: 'pointer', fontSize: '10px', marginBottom: '20px' }}>
+        [ BACK_TO_GALLERY ]
+      </button>
+
+      <div style={{ marginBottom: '20px' }}>
+        <h1 style={{ fontSize: '42px', fontWeight: 900, margin: '0' }}>{caseName}</h1>
+        <div style={{ color: '#888', fontSize: '10px', marginTop: '5px' }}>CASE_REF: {caseData.country?.toUpperCase()}_INTEL_PRIORITY_1</div>
+        {completion && (
+          <div style={{ marginTop: 12, maxWidth: 480 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>INVESTIGATION_COMPLETION</span>
+              <span style={{ color: pctCol, fontSize: 11, fontWeight: 'bold' }}>{pct}%</span>
+            </div>
+            <div style={{ background: '#1a1a1a', height: 4 }}>
+              <div style={{ background: pctCol, height: '100%', width: `${pct}%`, transition: 'width 0.6s ease' }} />
+            </div>
+            <div style={{ display: 'flex', gap: 16, marginTop: 6 }}>
+              {[
+                ['TOTAL_TECHNIQUES', completion.total_techniques, '#aaa'],
+                ['CLOSED', completion.assets?.reduce((s, a) => s + (a.closed || 0), 0), '#00ff41'],
+                ['PENDING_REVIEW', completion.assets?.reduce((s, a) => s + (a.pending_review || 0), 0), '#ffaa00'],
+                ['IN_PROGRESS', completion.assets?.reduce((s, a) => s + (a.in_progress || 0), 0), '#9b59ff'],
+              ].map(([label, val, col]) => (
+                <div key={label} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                  <span style={{ color: '#777', fontSize: 8, letterSpacing: 1 }}>{label}</span>
+                  <span style={{ color: col, fontSize: 13, fontWeight: 'bold' }}>{val ?? 0}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: '30px', marginBottom: '30px', borderBottom: '1px solid #222' }}>
+        {['OVERVIEW', 'ASSETS', 'NETWORK_MAP'].map(tab => (
+          <div key={tab} onClick={() => setActiveTab(tab)} style={{ fontSize: '11px', letterSpacing: '2px', cursor: 'pointer', color: activeTab === tab ? (tab === 'TRIAGE' ? '#ff4141' : '#00ff41') : '#666', borderBottom: activeTab === tab ? `2px solid ${tab === 'TRIAGE' ? '#ff4141' : '#00ff41'}` : '2px solid transparent', paddingBottom: '10px' }}>{tab}</div>
+        ))}
+        {(caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE' && (
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', paddingBottom: 10 }}>
+            <span style={{ fontSize: 8, letterSpacing: 1, padding: '2px 8px', border: '1px solid #ff4141', color: '#ff4141' }}>⚡ INCIDENT_RESPONSE</span>
+          </div>
+        )}
+      </div>
+
+      <div style={{ minHeight: '500px' }}>
+
+        {/* ── OVERVIEW TAB ── */}
+        {activeTab === 'OVERVIEW' && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: '40px' }}>
+            <div style={{ animation: 'fadeIn 0.5s ease' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '40px' }}>
+                <StatTile label="LEAD" val={caseData.missionLead} />
+                <StatTile label="TEAM" val={caseData.teamName} />
+                <StatTile label="UNIT" val={caseData.support} />
+                <StatTile label="OPS"  val={caseData.personnel} />
+              </div>
+              {completion?.assets?.length > 0 && (
+                <div style={{ marginBottom: 30 }}>
+                  <div style={{ color: '#888', fontSize: '9px', marginBottom: 10, letterSpacing: 1 }}>ASSET_INVESTIGATION_STATUS</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
+                    <thead>
+                      <tr style={{ color: '#666', borderBottom: '1px solid #222' }}>
+                        {['HOSTNAME', 'CLOSED', 'PENDING', 'IN_PROGRESS', 'MALICIOUS', 'CLEAN', 'PCT'].map(h => (
+                          <th key={h} style={{ padding: '5px 8px', textAlign: 'left', fontWeight: 'normal' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {completion.assets.map((a, i) => (
+                        <tr key={i} style={{ borderBottom: '1px solid #111' }}>
+                          <td style={{ padding: '6px 8px', color: '#00ff41' }}>{a.hostname}</td>
+                          <td style={{ padding: '6px 8px', color: '#00ff41' }}>{a.closed}</td>
+                          <td style={{ padding: '6px 8px', color: '#ffaa00' }}>{a.pending_review}</td>
+                          <td style={{ padding: '6px 8px', color: '#9b59ff' }}>{a.in_progress}</td>
+                          <td style={{ padding: '6px 8px', color: '#ff4444' }}>{a.malicious}</td>
+                          <td style={{ padding: '6px 8px', color: '#00ff41' }}>{a.clean}</td>
+                          <td style={{ padding: '6px 8px', color: a.completion_pct >= 80 ? '#00ff41' : a.completion_pct >= 40 ? '#ffaa00' : '#ff4444' }}>{a.completion_pct}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div style={{ borderTop: '1px solid #222', paddingTop: '30px' }}>
+                <div style={{ color: '#888', fontSize: '10px', marginBottom: '15px' }}>MISSION_TIMELINE_LOG</div>
+                <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
+                  <input value={newNote} onChange={e => setNewNote(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAddNote()} placeholder="APPEND_LOG_DATA..." style={InputStyle} />
+                  {(userRole === 'admin' || userRole === 'lead') && (
+                    <button onClick={() => setNoteType(t => t === 'NOTE' ? 'BLUF' : 'NOTE')} style={{ ...BtnStyle, background: noteType === 'BLUF' ? '#00ff41' : 'transparent', color: noteType === 'BLUF' ? '#000' : '#777', border: '1px solid #333', padding: '6px 12px', fontSize: 9 }}>
+                      {noteType === 'BLUF' ? '★ BLUF' : '☆ BLUF'}
+                    </button>
+                  )}
+                  <button onClick={handleAddNote} style={BtnStyle}>COMMIT</button>
+                </div>
+                <div style={{ maxHeight: '300px', overflowY: 'auto', background: 'rgba(0,0,0,0.2)', padding: '15px', border: '1px solid #111' }}>
+                  {notes.map((n, i) => (
+                    <div key={i} style={{ fontSize: '11px', marginBottom: '12px', borderLeft: `2px solid ${n.type === 'BLUF' ? '#00ff41' : '#444'}`, paddingLeft: '15px', background: n.type === 'BLUF' ? 'rgba(0,255,65,0.03)' : 'transparent' }}>
+                      <span style={{ color: '#00ff41', marginRight: '8px' }}>[{n.time}]</span>
+                      {n.author_initials && <span style={{ color: n.type === 'BLUF' ? '#000' : '#666', background: n.type === 'BLUF' ? '#00ff41' : '#1a1a1a', fontSize: 9, padding: '1px 5px', marginRight: 8 }}>{n.author_initials}</span>}
+                      {n.type === 'BLUF' && <span style={{ color: '#00ff41', fontSize: 9, marginRight: 6 }}>★ BLUF</span>}
+                      <span style={{ color: n.type === 'BLUF' ? '#00ff41' : '#ccc' }}>{n.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <aside style={{ borderLeft: '1px solid #222', paddingLeft: '40px' }}>
+              <div style={{ color: '#888', fontSize: '9px', marginBottom: '15px' }}>GEOPOLITICAL_CONTEXT</div>
+              <div style={{ fontSize: '12px', color: '#aaa', lineHeight: '1.6' }}>Operational environment confirmed as {caseData.country}. Priority assessment is high.</div>
+            </aside>
+          </div>
+        )}
+
+        {/* ── ASSETS TAB ── */}
+        {activeTab === 'ASSETS' && (
+          <div style={{ animation: 'fadeIn 0.4s ease' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '20px' }}>
+              <h3 style={{ fontSize: '11px', color: '#888' }}>SYSTEM_INVENTORY</h3>
+              <button onClick={() => setShowAssetModal(true)} style={BtnStyle}>+ REGISTER_NEW_ASSET</button>
+            </div>
+
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11px' }}>
+              <thead style={{ color: '#777', textAlign: 'left', borderBottom: '1px solid #222' }}>
+                <tr>
+                  <th style={{ padding: '10px' }}>HOSTNAME</th>
+                  <th>NETWORK_ADDRESSING</th>
+                  <th>OS_SPECIFICATION</th>
+                  <th>FORM_FACTOR</th>
+                  <th>ANALYSIS_MODE</th>
+                  <th style={{ width: '240px', textAlign: 'left', paddingLeft: '20px' }}>ACTION</th>
+                </tr>
+              </thead>
+              <tbody>
+                {caseData.assets?.map((a, i) => {
+                  const aId         = String(a.id);
+                  const modeCol     = { LIVE_REMOTE: '#ffaa00', DEAD_DISK_LOCAL: '#9b59ff', DEAD_DISK_REMOTE: '#9b59ff', UNKNOWN: '#555' }[a.analysis_mode] || '#555';
+                  const sessions    = mountSessions[aId] || [];
+                  const activeMount = sessions.find(s => s.status === 'MOUNTED');
+                  const isExpanded  = mountExpanded[aId];
+                  const form        = mountForms[aId] || {};
+                  const loading     = mountLoading[aId];
+                  const wasDeployed = !!deployStatus[aId];
+
+                  return (
+                    <React.Fragment key={i}>
+                      <tr style={{ borderBottom: isExpanded ? 'none' : '1px solid #111' }}>
+                        <td style={{ padding: '15px 10px', color: '#00ff41', fontWeight: 'bold' }}>{a.hostname}</td>
+                        <td style={{ color: '#aaa' }}>IP: {a.ip}<br /><span style={{ fontSize: '9px', color: '#555' }}>MAC: {a.mac_address}</span></td>
+                        <td style={{ color: '#ddd' }}>{a.os} {a.os_version}</td>
+                        <td style={{ color: '#ddd' }}>{a.form_factor}</td>
+                        <td>
+                          <select value={assetModes[aId] || a.analysis_mode || 'UNKNOWN'} onChange={async e => {
+                            const mode = e.target.value;
+                            setAssetModes(prev => ({ ...prev, [aId]: mode }));
+                            await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets/${a.id}/mode`, { method: 'PATCH', headers: getAuthHeaders(), body: JSON.stringify({ analysis_mode: mode }) });
+                            if (onRefresh) onRefresh();
+                          }} style={{ background: '#0a0a0a', border: '1px solid #2a2a2a', color: modeCol, fontFamily: 'monospace', fontSize: 9, letterSpacing: 1, padding: '3px 6px', cursor: 'pointer', outline: 'none' }}>
+                            {['UNKNOWN', 'LIVE_REMOTE', 'DEAD_DISK_LOCAL', 'DEAD_DISK_REMOTE'].map(m => <option key={m} value={m}>{m}</option>)}
+                          </select>
+                        </td>
+                        <td style={{ width: '420px', padding: '15px 0 15px 20px' }}>
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                            {isFetchingTactics && String(investigatingAssetId) === String(a.id)
+                              ? <span style={{ color: '#666', fontSize: '10px' }}>LOADING...</span>
+                              : <AssetActionTab assetId={a.id} assetName={a.hostname} setInvestigatingAsset={setInvestigatingAssetId} setTimelineAsset={handleOpenTimeline} />
+                            }
+                            <button onClick={() => openDeleteAsset(a)}
+                              style={{ background: 'transparent', border: '1px solid #330000', color: '#550000',
+                                fontFamily: 'monospace', fontSize: 9, padding: '4px 8px', cursor: 'pointer',
+                                letterSpacing: 1, transition: 'all 0.15s' }}
+                              onMouseEnter={e => { e.currentTarget.style.borderColor='#ff4141'; e.currentTarget.style.color='#ff4141'; }}
+                              onMouseLeave={e => { e.currentTarget.style.borderColor='#330000'; e.currentTarget.style.color='#550000'; }}>
+                              ✕ DEL
+                            </button>
+                            <button onClick={() => { setMountExpanded(prev => ({ ...prev, [aId]: !prev[aId] })); if (!mountSessions[aId]) loadMountSessions(a.id); }}
+                              style={{ background: activeMount ? 'rgba(155,89,255,0.15)' : '#0a0a0a', border: `1px solid ${activeMount ? '#9b59ff' : '#2a2a2a'}`, color: activeMount ? '#9b59ff' : '#777', fontFamily: 'monospace', fontSize: 9, padding: '4px 8px', cursor: 'pointer', letterSpacing: 1 }}>
+                              {activeMount ? '⏏ MOUNTED' : '⏏ MOUNT'}
+                            </button>
+                            <button onClick={() => { setPkgExpanded(prev => ({ ...prev, [aId]: !prev[aId] })); fetchPkgProgress(a.id); }}
+                              style={{ background: pkgData[aId] ? 'rgba(0,191,255,0.1)' : '#0a0a0a', border: `1px solid ${pkgData[aId] ? '#00bfff' : '#2a2a2a'}`, color: pkgData[aId] ? '#00bfff' : '#777', fontFamily: 'monospace', fontSize: 9, padding: '4px 8px', cursor: 'pointer', letterSpacing: 1 }}>
+                              ⬇ PKG
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+
+                      {/* ── Mount panel ── */}
+                      {isExpanded && (
+                        <tr><td colSpan={6} style={{ padding: '0 0 12px 0', borderBottom: '1px solid #111' }}>
+                          <div style={{ background: '#060606', border: '1px solid #1a1a1a', margin: '0 10px', padding: '12px 16px', fontFamily: 'monospace', fontSize: 10 }}>
+                            <div style={{ color: '#888', fontSize: 9, letterSpacing: 1, marginBottom: 10 }}>IMAGE_MOUNT_CONTROLLER — {a.hostname.toUpperCase()}</div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 10 }}>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 2, minWidth: 250 }}>
+                                <span style={{ color: '#666', fontSize: 9 }}>IMAGE_PATH</span>
+                                <input value={form.imagePath || ''} onChange={e => setMountForms(prev => ({ ...prev, [aId]: { ...form, imagePath: e.target.value } }))} placeholder="C:\images\suspect.E01" style={{ background: '#000', border: '1px solid #2a2a2a', color: '#00ff41', fontFamily: 'monospace', fontSize: 10, padding: '5px 8px', outline: 'none' }} />
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <span style={{ color: '#666', fontSize: 9 }}>DRIVE_LETTER</span>
+                                <select value={form.driveLetter || ''} onChange={e => setMountForms(prev => ({ ...prev, [aId]: { ...form, driveLetter: e.target.value } }))} style={{ background: '#000', border: '1px solid #2a2a2a', color: '#00ff41', fontFamily: 'monospace', fontSize: 10, padding: '5px 6px', outline: 'none' }}>
+                                  <option value="">AUTO</option>
+                                  {'ABDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map(l => <option key={l} value={l}>{l}:</option>)}
+                                </select>
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <span style={{ color: '#666', fontSize: 9 }}>PROVIDER</span>
+                                <select value={form.provider || 'auto'} onChange={e => setMountForms(prev => ({ ...prev, [aId]: { ...form, provider: e.target.value } }))} style={{ background: '#000', border: '1px solid #2a2a2a', color: '#00ff41', fontFamily: 'monospace', fontSize: 10, padding: '5px 6px', outline: 'none' }}>
+                                  {['auto', 'LibEwf', 'DiscUtils', 'LibQcow', 'None'].map(p => <option key={p} value={p}>{p}</option>)}
+                                </select>
+                              </div>
+                              <button onClick={() => handleMount(a.id)} disabled={loading || !form.imagePath || !!activeMount}
+                                style={{ background: activeMount ? '#111' : '#00ff41', color: activeMount ? '#444' : '#000', border: 'none', fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold', padding: '7px 14px', cursor: activeMount ? 'not-allowed' : 'pointer', letterSpacing: 1, opacity: loading ? 0.5 : 1 }}>
+                                {loading ? 'MOUNTING...' : activeMount ? 'ALREADY_MOUNTED' : '[ MOUNT_IMAGE ]'}
+                              </button>
+                            </div>
+                            {activeMount && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 10px', background: 'rgba(155,89,255,0.06)', border: '1px solid #2a1a4a', marginBottom: 8 }}>
+                                <div style={{ display: 'flex', gap: 16 }}>
+                                  {[['DEVICE', activeMount.device_number], ['DRIVE', activeMount.drive_letter ? `${activeMount.drive_letter}:` : '—'], ['PHYSICAL', activeMount.physical_drive], ['PROVIDER', activeMount.provider]].map(([l, v]) => v && (
+                                    <div key={l} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                      <span style={{ color: '#555', fontSize: 8 }}>{l}</span>
+                                      <span style={{ color: '#9b59ff', fontSize: 10 }}>{v}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                                <button onClick={() => handleDismount(a.id, activeMount.id)} disabled={loading}
+                                  style={{ marginLeft: 'auto', background: 'transparent', border: '1px solid #ff4141', color: '#ff4141', fontFamily: 'monospace', fontSize: 9, padding: '4px 10px', cursor: 'pointer', letterSpacing: 1 }}>
+                                  {loading ? 'DISMOUNTING...' : '[ DISMOUNT ]'}
+                                </button>
+                              </div>
+                            )}
+                            {sessions.filter(s => s.status === 'DISMOUNTED').length > 0 && (
+                              <div style={{ marginTop: 6 }}>
+                                <div style={{ color: '#333', fontSize: 8, letterSpacing: 1, marginBottom: 4 }}>MOUNT_HISTORY</div>
+                                {sessions.filter(s => s.status === 'DISMOUNTED').map((s, idx) => (
+                                  <div key={idx} style={{ display: 'flex', gap: 12, fontSize: 9, color: '#555', borderTop: '1px solid #111', padding: '4px 0' }}>
+                                    <span>{s.image_path}</span>
+                                    <span style={{ color: '#444' }}>{s.drive_letter ? `${s.drive_letter}:` : '—'}</span>
+                                    <span style={{ color: '#333', marginLeft: 'auto' }}>{new Date(s.mounted_at).toLocaleString()}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </td></tr>
+                      )}
+
+                      {/* ── PKG panel ── */}
+                      {pkgExpanded[aId] && (
+                        <tr><td colSpan={6} style={{ padding: '0 0 12px 0', borderBottom: '1px solid #111' }}>
+                          <div style={{ background: '#060606', border: '1px solid #1a1a1a', margin: '0 10px', padding: '12px 16px', fontFamily: 'monospace', fontSize: 10 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                              <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>REMOTE_COLLECTION — {a.hostname.toUpperCase()}</span>
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                {!wasDeployed && !pkgData[aId] && (
+                                  <button onClick={() => handleGeneratePackage(a.id)} disabled={pkgGenerating[aId]}
+                                    style={{ background: 'transparent', border: '1px solid #00bfff', color: '#00bfff', padding: '3px 12px', fontFamily: 'monospace', fontSize: 10, cursor: pkgGenerating[aId] ? 'not-allowed' : 'pointer', opacity: pkgGenerating[aId] ? 0.5 : 1, letterSpacing: 1 }}>
+                                    {pkgGenerating[aId] ? 'BUILDING...' : '[ GENERATE_PACKAGE ]'}
+                                  </button>
+                                )}
+                                {pkgData[aId] && (
+                                  <button onClick={() => handleRevokePackage(a.id)}
+                                    style={{ background: 'transparent', border: '1px solid #ff4141', color: '#ff4141', padding: '3px 12px', fontFamily: 'monospace', fontSize: 9, cursor: 'pointer', letterSpacing: 1 }}>
+                                    [ REVOKE ]
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {wasDeployed && (
+                              <div style={{ marginBottom: 12 }}>
+                                <div style={{ display: 'flex', gap: 2, marginBottom: 4 }}>
+                                  {DEPLOY_PHASES.map((ph, idx) => {
+                                    const current = phaseIndex(deployStatus[aId]?.phase);
+                                    const isError = deployStatus[aId]?.phase === 'ERROR';
+                                    const done    = !isError && idx < current;
+                                    const active  = !isError && idx === current;
+                                    return <div key={ph} style={{ flex: 1, height: 3, background: (isError && idx === 0) ? '#ff4444' : done ? '#00ff41' : active ? '#ffaa00' : '#222', transition: 'background 0.3s' }} />;
+                                  })}
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <span style={{ color: phaseColor(status?.phase), fontSize: 9, letterSpacing: 1, fontWeight: 'bold' }}>{deployStatus[aId]?.phase}</span>
+                                  <span style={{ color: '#888', fontSize: 9 }}>{status?.phase}</span>
+                                </div>
+                                {deployStatus[aId]?.error && <div style={{ color: '#ff4444', fontSize: 9, marginTop: 3 }}>{deployStatus[aId].error}</div>}
+                              </div>
+                            )}
+
+                            {pkgData[aId] && !wasDeployed && (() => {
+                              const pkg = pkgData[aId];
+                              return (
+                                <>
+                                  <div style={{ display: 'flex', gap: 16, marginBottom: 10, alignItems: 'center' }}>
+                                    <span style={{ color: '#00bfff', fontSize: 10 }}>✓ {pkg.technique_count} TECHNIQUES PACKAGED</span>
+                                    <span style={{ color: '#777', fontSize: 9 }}>EXPIRES {pkgExpiresIn(pkg.expires_at)}</span>
+                                  </div>
+                                  <div style={{ color: '#777', fontSize: 9, marginBottom: 4, letterSpacing: 1 }}>DEPLOY_COMMAND — run as admin on target:</div>
+                                  <div style={{ background: '#030303', border: '1px solid #2a2a2a', padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                                    <span style={{ color: '#00ff41', flex: 1, fontSize: 10, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', display: 'block', paddingBottom: 2 }}>{pkg.oneliner}</span>
+                                    <button onClick={() => handleCopyOneliner(a.id)} style={{ background: pkgCopied[aId] ? '#00ff41' : 'transparent', border: `1px solid ${pkgCopied[aId] ? '#00ff41' : '#444'}`, color: pkgCopied[aId] ? '#000' : '#888', fontFamily: 'monospace', fontSize: 9, padding: '3px 10px', cursor: 'pointer', flexShrink: 0, transition: 'all 0.15s' }}>
+                                      {pkgCopied[aId] ? '✓ COPIED' : 'COPY'}
+                                    </button>
+                                  </div>
+                                </>
+                              );
+                            })()}
+
+                            {(() => {
+                              const prog = pkgProgress[aId];
+                              const total        = prog?.total || 0;
+                              const withEvidence = prog?.with_evidence || 0;
+                              const noArt        = prog?.no_artifacts || 0;
+                              const pending      = prog?.pending || 0;
+                              if (total === 0) return null;
+                              return (
+                                <>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#888', marginBottom: 3 }}>
+                                    <span>COLLECTION_PROGRESS</span>
+                                    <span style={{ color: '#aaa' }}>{withEvidence + noArt}/{total} PROCESSED</span>
+                                  </div>
+                                  <div style={{ display: 'flex', height: 5, borderRadius: 2, overflow: 'hidden', background: '#1a1a1a', marginBottom: 4 }}>
+                                    <div style={{ width: `${(withEvidence / total) * 100}%`, background: '#00ff41', transition: 'width 0.4s' }} />
+                                    <div style={{ width: `${(noArt / total) * 100}%`, background: '#444', transition: 'width 0.4s' }} />
+                                    <div style={{ width: `${(pending / total) * 100}%`, background: '#1a1a1a', transition: 'width 0.4s' }} />
+                                  </div>
+                                  <div style={{ display: 'flex', gap: 12, fontSize: 8, color: '#777' }}>
+                                    <span style={{ color: '#00ff41' }}>■ EVIDENCE {withEvidence}</span>
+                                    <span style={{ color: '#555' }}>■ NO_ARTIFACTS {noArt}</span>
+                                    <span>■ PENDING {pending}</span>
+                                  </div>
+                                  {prog?.package_info?.completed_at && (
+                                    <div style={{ color: '#00ff41', fontSize: 9, marginTop: 6 }}>✓ COLLECTION COMPLETE — {new Date(prog.package_info.completed_at + 'Z').toLocaleString()}</div>
+                                  )}
+                                </>
+                              );
+                            })()}
+
+                            {!pkgData[aId] && !pkgGenerating[aId] && !wasDeployed && (
+                              <div style={{ color: '#777', fontSize: 9, lineHeight: 1.8 }}>
+                                Generates a self-contained collection package.<br />
+                                Copy the one-line deploy command and run it as admin on the target.<br />
+                                The agent collects artifacts, ships results back, and self-deletes.<br />
+                                Token is scoped to this asset, auto-revokes on completion, and expires in 24 hours.
+                              </div>
+                            )}
+                          </div>
+                        </td></tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+
+            {/* ── BULK DEPLOYMENT PANEL ── */}
+            <div style={{ marginTop: 24, border: '1px solid #1a1a1a' }}>
+              <div onClick={() => setDeployOpen(p => !p)} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', cursor: 'pointer', background: '#060606', borderBottom: deployOpen ? '1px solid #1a1a1a' : 'none', userSelect: 'none' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <span style={{ color: '#aaa', fontSize: 9, letterSpacing: 2 }}>⚡ BULK_REMOTE_DEPLOYMENT</span>
+                  {deployRunning && <span style={{ color: '#ffaa00', fontSize: 9, letterSpacing: 1 }}>● DEPLOYING {deploySelected.size} HOST{deploySelected.size !== 1 ? 'S' : ''}...</span>}
+                  {!deployRunning && deployComplete && deploySelected.size > 0 && <span style={{ color: '#00ff41', fontSize: 9 }}>✓ DISPATCH COMPLETE</span>}
+                  {psexecAvailable === false && deployOpen && <span style={{ color: '#ff4444', fontSize: 9 }}>⚠ psexec.exe NOT FOUND in backend/bin/</span>}
+                </div>
+                <span style={{ color: '#666', fontSize: 11 }}>{deployOpen ? '▲' : '▼'}</span>
+              </div>
+
+              {deployOpen && (
+  <div style={{ background: '#040404', padding: '16px', fontFamily: 'monospace', fontSize: 10 }}>
+    <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 16, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 180 }}>
+        <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>USERNAME</span>
+        <input value={deployCreds.username} onChange={e => setDeployCreds(p => ({ ...p, username: e.target.value }))} placeholder="DOMAIN\svcaccount  or  .\localadmin" disabled={deployRunning || triageRunning} style={{ ...InputStyle, fontSize: 10, padding: '6px 8px', opacity: (deployRunning || triageRunning) ? 0.5 : 1 }} />
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 160 }}>
+        <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>PASSWORD</span>
+        <div style={{ display: 'flex', gap: 0 }}>
+          <input type={deployShowPass ? 'text' : 'password'} value={deployCreds.password} onChange={e => setDeployCreds(p => ({ ...p, password: e.target.value }))} placeholder="••••••••" disabled={deployRunning || triageRunning} style={{ ...InputStyle, fontSize: 10, padding: '6px 8px', flex: 1, opacity: (deployRunning || triageRunning) ? 0.5 : 1 }} />
+          <button onClick={() => setDeployShowPass(p => !p)} style={{ background: '#0a0a0a', border: '1px solid #2a2a2a', borderLeft: 'none', color: '#777', fontSize: 9, padding: '0 8px', cursor: 'pointer', fontFamily: 'monospace' }}>
+            {deployShowPass ? 'HIDE' : 'SHOW'}
+          </button>
+        </div>
+      </div>
+
+      {(caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 140 }}>
+          <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>TRANSPORT</span>
+          <select value={triageCreds.transport} onChange={e => setTriageCreds(p => ({ ...p, transport: e.target.value }))}
+            disabled={triageRunning} style={{ ...InputStyle, fontSize: 10, padding: '6px 8px' }}>
+            <option value="WINRM">WINRM</option>
+            <option value="SMB_PSEXEC">SMB / PSEXEC</option>
+            <option value="SMB_TASK">SMB / SCHTASK</option>
+            <option value="SSH">SSH</option>
+          </select>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 1 }}>
+        {(caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE' ? (
+          <>
+            <button onClick={() => handleTriage(deployCreds.username, deployCreds.password)}
+              disabled={triageRunning || deploySelected.size === 0 || !deployCreds.username || !deployCreds.password || triageSelected.size === 0}
+              style={{ background: triageRunning ? 'transparent' : '#ff4141', border: triageRunning ? '1px solid #333' : 'none', color: triageRunning ? '#555' : '#000', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', padding: '7px 18px', cursor: (triageRunning || deploySelected.size === 0) ? 'not-allowed' : 'pointer', letterSpacing: 1, opacity: (deploySelected.size === 0 || !deployCreds.username || !deployCreds.password || triageSelected.size === 0) ? 0.4 : 1, transition: 'all 0.2s' }}>
+              {triageRunning ? `TRIAGING (${deploySelected.size})...` : `[ TRIAGE ${deploySelected.size} HOST${deploySelected.size !== 1 ? 'S' : ''} ]`}
+            </button>
+            {triageRunning && (
+              <button onClick={() => { triageAbortRef.current = true; setTriageRunning(false); }} style={{ background: 'transparent', border: '1px solid #ff4141', color: '#ff4141', fontFamily: 'monospace', fontSize: 9, padding: '6px 12px', cursor: 'pointer', letterSpacing: 1 }}>
+                ABORT
+              </button>
+            )}
+          </>
+        ) : (
+          <>
+            <button onClick={handleDeploy}
+              disabled={deployRunning || deploySelected.size === 0 || !deployCreds.username || !deployCreds.password || psexecAvailable === false}
+              style={{ background: deployRunning ? 'transparent' : '#00ff41', border: deployRunning ? '1px solid #333' : 'none', color: deployRunning ? '#555' : '#000', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', padding: '7px 18px', cursor: (deployRunning || deploySelected.size === 0) ? 'not-allowed' : 'pointer', letterSpacing: 1, opacity: (deploySelected.size === 0 || !deployCreds.username || !deployCreds.password) ? 0.4 : 1, transition: 'all 0.2s' }}>
+              {deployRunning ? `DEPLOYING (${deploySelected.size})...` : `[ DEPLOY TO ${deploySelected.size} HOST${deploySelected.size !== 1 ? 'S' : ''} ]`}
+            </button>
+            {deployRunning && (
+              <button onClick={() => { deployAbortRef.current = true; setDeployRunning(false); }} style={{ background: 'transparent', border: '1px solid #ff4141', color: '#ff4141', fontFamily: 'monospace', fontSize: 9, padding: '6px 12px', cursor: 'pointer', letterSpacing: 1 }}>
+                ABORT
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+
+    {/* Triage category selector — IR only */}
+    {(caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE' && (
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <span style={{ color: '#ff4141', fontSize: 9, letterSpacing: 2 }}>TRIAGE_CATEGORIES</span>
+          <button onClick={() => setTriageSelected(triageSelected.size === triageCategories.length ? new Set() : new Set(triageCategories))}
+            style={{ background: 'transparent', border: '1px solid #2a2a2a', color: '#555', fontSize: 9, padding: '2px 8px', cursor: 'pointer', fontFamily: 'monospace', letterSpacing: 1 }}>
+            {triageSelected.size === triageCategories.length ? 'DESELECT ALL' : 'SELECT ALL'}
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+          {triageCategories.map(cat => (
+            <div key={cat} onClick={() => toggleTriageCategory(cat)}
+              style={{ fontSize: 9, padding: '3px 10px', cursor: 'pointer', fontFamily: 'monospace', letterSpacing: 1,
+                border: `1px solid ${triageSelected.has(cat) ? '#ff4141' : '#2a2a2a'}`,
+                color: triageSelected.has(cat) ? '#ff4141' : '#555',
+                background: triageSelected.has(cat) ? 'rgba(255,65,65,0.06)' : 'transparent' }}>
+              {cat}
+            </div>
+          ))}
+        </div>
+      </div>
+    )}
+
+                  <div style={{ border: '1px solid #111' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 140px 160px 1fr', padding: '6px 10px', borderBottom: '1px solid #111', color: '#555', fontSize: 9, letterSpacing: 1 }}>
+                      <div onClick={toggleSelectAll} style={{ cursor: 'pointer', color: deploySelected.size === (caseData.assets?.length || 0) ? '#00ff41' : '#555', fontSize: 11, lineHeight: 1 }} title="Select all">
+                        {deploySelected.size === (caseData.assets?.length || 0) ? '☑' : '☐'}
+                      </div>
+                      <div>HOSTNAME</div><div>IP_ADDRESS</div><div>STATUS</div><div>MESSAGE</div>
+                    </div>
+                    {(caseData.assets || []).map((a) => {
+                      const aId       = String(a.id);
+                      const isChecked = deploySelected.has(a.id);
+                      const status = (caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE' ? triageStatus[aId] : deployStatus[aId];
+                      const phase     = status?.phase;
+                      return (
+                        <div key={a.id} onClick={() => !deployRunning && toggleDeploySelect(a.id)} style={{ display: 'grid', gridTemplateColumns: '32px 1fr 140px 160px 1fr', padding: '8px 10px', borderBottom: '1px solid #080808', cursor: deployRunning ? 'default' : 'pointer', background: isChecked ? 'rgba(0,255,65,0.03)' : 'transparent', transition: 'background 0.15s' }}>
+                          <div style={{ color: isChecked ? '#00ff41' : '#333', fontSize: 13, lineHeight: 1, paddingTop: 1 }}>{isChecked ? '☑' : '☐'}</div>
+                          <div style={{ color: isChecked ? '#00ff41' : '#aaa', fontWeight: isChecked ? 'bold' : 'normal' }}>{a.hostname}</div>
+                          <div style={{ color: '#888' }}>{a.ip || '—'}</div>
+                          <div>{phase
+                            ? <span style={{ color: phaseColor(phase), fontSize: 9, letterSpacing: 1, fontWeight: 'bold' }}>{phase === 'ERROR' ? '✗' : phase === 'COLLECTING' ? '●' : '◎'} {phase}</span>
+                            : <span style={{ color: '#333', fontSize: 9 }}>IDLE</span>}
+                          </div>
+                          <div style={{ color: '#777', fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{status?.message || ''}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ marginTop: 8, color: '#555', fontSize: 9, lineHeight: 1.8 }}>
+                    Requires psexec.exe in backend/bin/ · Targets must have SMB (445) reachable · Runs as SYSTEM via PsExec -s -d
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── TRIAGE TAB ── */}
+        {activeTab === 'TRIAGE' && (
+          <div style={{ animation: 'fadeIn 0.4s ease', display: 'grid', gridTemplateColumns: '280px 1fr', gap: '24px', minHeight: 500 }}>
+            {/* LEFT — category selector */}
+            <div style={{ borderRight: '1px solid #1a1a1a', paddingRight: '24px' }}>
+              <div style={{ color: '#ff4141', fontSize: '9px', letterSpacing: 2, marginBottom: '12px' }}>TRIAGE_CATEGORIES</div>
+              <div style={{ marginBottom: 8 }}>
+                <button onClick={() => setTriageSelected(triageSelected.size === triageCategories.length ? new Set() : new Set(triageCategories))}
+                  style={{ background: 'transparent', border: '1px solid #2a2a2a', color: '#777', fontFamily: 'monospace', fontSize: 9, padding: '4px 10px', cursor: 'pointer', letterSpacing: 1, width: '100%', textAlign: 'left' }}>
+                  {triageSelected.size === triageCategories.length ? '☑ DESELECT ALL' : '☐ SELECT ALL'}
+                </button>
+              </div>
+              {triageCategories.map(cat => (
+                <div key={cat} onClick={() => toggleTriageCategory(cat)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px', cursor: 'pointer', borderBottom: '1px solid #0d0d0d', background: triageSelected.has(cat) ? 'rgba(255,65,65,0.04)' : 'transparent' }}>
+                  <span style={{ color: triageSelected.has(cat) ? '#ff4141' : '#333', fontSize: 13, lineHeight: 1 }}>{triageSelected.has(cat) ? '☑' : '☐'}</span>
+                  <span style={{ color: triageSelected.has(cat) ? '#ccc' : '#666', fontSize: 10, letterSpacing: 1 }}>{cat}</span>
+                </div>
+              ))}
+              <div style={{ marginTop: 12, color: '#555', fontSize: 9, lineHeight: 1.7 }}>
+                Powered by Windows.KapeFiles.Targets.<br />
+                Results stored in evidence table under t_code=TRIAGE.
+              </div>
+            </div>
+            {/* RIGHT — asset selector + controls */}
+            <div>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 16, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>TRANSPORT</span>
+                  <select value={triageCreds.transport} onChange={e => setTriageCreds(p => ({ ...p, transport: e.target.value }))} disabled={triageRunning}
+                    style={{ background: '#000', border: '1px solid #2a2a2a', color: '#ff4141', fontFamily: 'monospace', fontSize: 10, padding: '6px 8px', outline: 'none', cursor: 'pointer' }}>
+                    {['SMB_PSEXEC', 'SMB_TASK', 'WINRM', 'SSH'].map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 120 }}>
+                  <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>DOMAIN</span>
+                  <input value={triageCreds.domain} onChange={e => setTriageCreds(p => ({ ...p, domain: e.target.value }))} placeholder="CORP" disabled={triageRunning}
+                    style={{ ...InputStyle, fontSize: 10, padding: '6px 8px', opacity: triageRunning ? 0.5 : 1 }} />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 140 }}>
+                  <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>USERNAME</span>
+                  <input value={triageCreds.username} onChange={e => setTriageCreds(p => ({ ...p, username: e.target.value }))} placeholder="svcaccount" disabled={triageRunning}
+                    style={{ ...InputStyle, fontSize: 10, padding: '6px 8px', opacity: triageRunning ? 0.5 : 1 }} />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 140 }}>
+                  <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>PASSWORD</span>
+                  <div style={{ display: 'flex' }}>
+                    <input type={triageShowPass ? 'text' : 'password'} value={triageCreds.password} onChange={e => setTriageCreds(p => ({ ...p, password: e.target.value }))} placeholder="••••••••" disabled={triageRunning}
+                      style={{ ...InputStyle, fontSize: 10, padding: '6px 8px', flex: 1, opacity: triageRunning ? 0.5 : 1 }} />
+                    <button onClick={() => setTriageShowPass(p => !p)} style={{ background: '#0a0a0a', border: '1px solid #2a2a2a', borderLeft: 'none', color: '#777', fontSize: 9, padding: '0 8px', cursor: 'pointer', fontFamily: 'monospace' }}>{triageShowPass ? 'HIDE' : 'SHOW'}</button>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 1 }}>
+                  <button onClick={handleTriage} disabled={triageRunning || triageAssets.size === 0 || !triageCreds.username || !triageCreds.password || triageSelected.size === 0}
+                    style={{ background: triageRunning ? 'transparent' : '#ff4141', border: triageRunning ? '1px solid #333' : 'none', color: triageRunning ? '#555' : '#000', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', padding: '7px 18px', cursor: (triageRunning || triageAssets.size === 0) ? 'not-allowed' : 'pointer', letterSpacing: 1, opacity: (triageAssets.size === 0 || !triageCreds.username || !triageCreds.password || triageSelected.size === 0) ? 0.4 : 1 }}>
+                    {triageRunning ? `TRIAGING (${triageAssets.size})...` : `[ TRIAGE ${triageAssets.size} HOST${triageAssets.size !== 1 ? 'S' : ''} ]`}
+                  </button>
+                  {triageRunning && (
+                    <button onClick={() => { triageAbortRef.current = true; setTriageRunning(false); }}
+                      style={{ background: 'transparent', border: '1px solid #ff4141', color: '#ff4141', fontFamily: 'monospace', fontSize: 9, padding: '6px 12px', cursor: 'pointer', letterSpacing: 1 }}>ABORT</button>
+                  )}
+                </div>
+              </div>
+              <div style={{ color: '#888', fontSize: '9px', letterSpacing: 2, marginBottom: '8px' }}>TARGET_ASSETS</div>
+              <div style={{ border: '1px solid #111' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 140px 160px 1fr 120px', padding: '6px 10px', borderBottom: '1px solid #111', color: '#555', fontSize: 9, letterSpacing: 1 }}>
+                  <div onClick={toggleAllTriageAssets} style={{ cursor: 'pointer', color: triageAssets.size === (caseData.assets?.length || 0) ? '#ff4141' : '#555', fontSize: 11, lineHeight: 1 }} title="Select all">
+                    {triageAssets.size === (caseData.assets?.length || 0) ? '☑' : '☐'}
+                  </div>
+                  <div>HOSTNAME</div><div>IP_ADDRESS</div><div>STATUS</div><div>MESSAGE</div><div></div>
+                </div>
+                {(caseData.assets || []).map(a => {
+                  const aId = String(a.id);
+                  const checked = triageAssets.has(a.id);
+                  const status = triageStatus[aId];
+                  const phase = status?.phase;
+                  const hasResults = phase === 'COLLECTING' || phase === 'COMPLETE' || phase === 'LOG';
+                  return (
+                    <React.Fragment key={a.id}>
+                      <div onClick={() => !triageRunning && toggleTriageAsset(a.id)}
+                        style={{ display: 'grid', gridTemplateColumns: '32px 1fr 140px 160px 1fr 120px', padding: '8px 10px', borderBottom: '1px solid #080808', cursor: triageRunning ? 'default' : 'pointer', background: checked ? 'rgba(255,65,65,0.03)' : 'transparent' }}>
+                        <div style={{ color: checked ? '#ff4141' : '#333', fontSize: 13, lineHeight: 1, paddingTop: 1 }}>{checked ? '☑' : '☐'}</div>
+                        <div style={{ color: checked ? '#ff4141' : '#aaa', fontWeight: checked ? 'bold' : 'normal' }}>{a.hostname}</div>
+                        <div style={{ color: '#888' }}>{a.ip || '—'}</div>
+                        <div>{phase ? <span style={{ color: triagePhaseColor(phase), fontSize: 9, letterSpacing: 1, fontWeight: 'bold' }}>{phase === 'ERROR' ? '✗' : phase === 'COLLECTING' ? '●' : '◎'} {phase}</span> : <span style={{ color: '#333', fontSize: 9 }}>IDLE</span>}</div>
+                        <div style={{ color: '#777', fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{status?.message || ''}</div>
+                        <div onClick={e => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                          {phase && <span onClick={() => setTriageExpanded(prev => ({ ...prev, [aId]: !prev[aId] }))}
+                            style={{ color: '#555', fontSize: 9, cursor: 'pointer', padding: '2px 6px', border: '1px solid #222' }}>
+                            {triageExpanded[aId] ? '▲' : '▼'}
+                          </span>}
+                          {hasResults && (
+                            <button onClick={() => {
+                              setInvestigatingAssetId(a.id);
+                              setEvidenceTacticList([{ t_code: 'TRIAGE', tactic: 'TRIAGE', techniques: [{ t_code: 'TRIAGE', name: 'Triage Collection' }] }]);
+                              setIsEvidenceOpen(true);
+                            }} style={{ background: 'transparent', border: '1px solid #ff4141', color: '#ff4141', fontFamily: 'monospace', fontSize: 9, padding: '3px 8px', cursor: 'pointer', letterSpacing: 1 }}>
+                              VIEW
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {triageExpanded[aId] && (
+                        <div style={{ background: '#060606', border: '1px solid #1a1a1a', margin: '0 10px 4px', padding: '10px 14px', fontFamily: 'monospace', fontSize: 9 }}>
+                          <div style={{ color: '#555', fontSize: 8, letterSpacing: 1, marginBottom: 6 }}>COLLECTION_PROGRESS — {a.hostname.toUpperCase()}</div>
+                          {Object.entries(triageTechStatus[aId] || {}).map(([tcode, ts]) => {
+                            const col = ts.status === 'COMPLETE' ? '#00ff41' : ts.status === 'ZERO' ? '#444' : ts.status === 'RUNNING' ? '#ffaa00' : ts.status === 'ERROR' ? '#ff4444' : '#555';
+                            return (
+                              <div key={tcode} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', borderBottom: '1px solid #0a0a0a' }}>
+                                <span style={{ color: col, letterSpacing: 1 }}>{tcode}</span>
+                                <span style={{ color: col }}>{ts.status}{ts.rows != null ? ` — ${ts.rows} rows` : ''}</span>
+                              </div>
+                            );
+                          })}
+                          {Object.keys(triageTechStatus[aId] || {}).length === 0 && (
+                            <div style={{ color: '#333', fontSize: 9 }}>Waiting for collection data...</div>
+                          )}
+                        </div>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── NETWORK MAP TAB ── */}
+        {activeTab === 'NETWORK_MAP' && (
+          <div style={{ position: isMaximized ? 'fixed' : 'relative', top: isMaximized ? 0 : 'auto', left: isMaximized ? 0 : 'auto', width: isMaximized ? '100vw' : '100%', height: isMaximized ? '100vh' : '650px', zIndex: isMaximized ? 2000 : 1, display: 'grid', gridTemplateColumns: isMaximized ? '1fr 350px' : '1fr 300px', background: '#111', border: '1px solid #1a1a1a' }}>
+            <div style={{ background: '#000', overflow: 'hidden', position: 'relative' }}>
+              <NetworkMap activeNodes={activeNodes} activeLinks={activeLinks} updateNodeData={handleUpdateNode} onInitiateLink={handleInitiateLink} onDeleteNode={handleDeleteNode} onInvestigateAsset={handleInvestigateAsset} investigatingAssetId={investigatingAssetId} isFetchingTactics={isFetchingTactics} techniqueStatuses={collab.techniqueStatuses} caseAssets={caseData.assets || []} onToggleMaximize={() => setIsMaximized(p => !p)} isMaximized={isMaximized} />
+            </div>
+            <div style={{ background: '#080808', padding: '20px', borderLeft: '1px solid #1a1a1a', overflowY: 'auto' }}>
+              <button onClick={saveMapLayout} style={{ ...BtnStyle, width: '100%', marginBottom: '20px' }}>{saveStatus === 'READY' ? '[ COMMIT_MAP_TO_DATABASE ]' : `[ ${saveStatus} ]`}</button>
+              <div style={{ color: '#777', fontSize: '9px', marginBottom: '15px' }}>INFRASTRUCTURE_TEMPLATES</div>
+              {['SWITCH', 'ROUTER', 'FIREWALL'].map(type => <button key={type} onClick={() => addInfrastructure(type)} style={TempBtnStyle}>+ ADD_{type}</button>)}
+              <div style={{ color: '#777', fontSize: '9px', margin: '20px 0 15px' }}>AVAILABLE_ASSETS</div>
+              {caseData.assets?.map((asset, i) => (
+                <div key={i} onDoubleClick={() => deployToMap(asset)} style={AssetCardStyle}>
+                  <div style={{ color: '#00ff41' }}>{asset.hostname}</div>
+                  <div style={{ color: '#666', fontSize: '10px' }}>{asset.ip}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <EvidenceWindow caseType={caseData?.case_type || 'INVESTIGATION'} assetId={investigatingAssetId} assetName={currentAsset?.hostname} tCode={null} isOpen={isEvidenceOpen} onClose={handleCloseEvidence} tacticList={evidenceTacticList} caseName={caseName} collab={collab} analysisMode={assetModes[String(investigatingAssetId)] || currentAsset?.analysis_mode || 'UNKNOWN'} assetIp={currentAsset?.ip || ''} assetType={currentAsset?.asset_type || currentAsset?.type || ''}
+        memSummary={memSummaries[String(investigatingAssetId)] || null}
+        avSummary={avSummaries[String(investigatingAssetId)] || null}
+        vulnSummary={vulnSummaries[String(investigatingAssetId)] || null}
+        onSummaryUpdate={(type, assetId, data) => {
+          if (type === 'memory') setMemSummaries(p => ({ ...p, [String(assetId)]: data }));
+          else if (type === 'av') setAvSummaries(p => ({ ...p, [String(assetId)]: data }));
+          else if (type === 'vuln') setVulnSummaries(p => ({ ...p, [String(assetId)]: data }));
+        }}
+      />
+
+      {isTimelineOpen && timelineAssetId && (
+        <div style={ModalOverlay} onClick={() => setIsTimelineOpen(false)}>
+          <div onClick={e => e.stopPropagation()} style={{
+            width: '95vw', height: '92vh', background: '#050505',
+            border: '1px solid #ff4141', display: 'flex', flexDirection: 'column',
+            fontFamily: 'monospace', overflow: 'hidden',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              padding: '8px 16px', borderBottom: '1px solid #330000', flexShrink: 0 }}>
+              <span style={{ color: '#ff4141', fontWeight: 'bold', fontSize: 12, letterSpacing: 1 }}>
+                ⏱ UNIFIED_TIMELINE — {caseData?.assets?.find(a => String(a.id) === String(timelineAssetId))?.hostname || timelineAssetId}
+              </span>
+              <button onClick={() => setIsTimelineOpen(false)}
+                style={{ background: 'none', border: 'none', color: '#ff4141', cursor: 'pointer', fontSize: 18, fontFamily: 'monospace' }}>×</button>
+            </div>
+            <TimelineViewer assetId={timelineAssetId} />
+          </div>
+        </div>
+      )}
+
+      {/* ── Asset Delete Modal ──────────────────────────────────────────── */}
+      {deleteStep > 0 && deleteTarget && (
+        <div style={ModalOverlay}>
+          <div style={{ ...ModalContent, maxWidth: 480, border: '1px solid #ff4141' }}>
+
+            {/* Step 1 — First confirmation */}
+            {deleteStep === 1 && (<>
+              <h2 style={{ color: '#ff4141', fontSize: 13, marginBottom: 16, letterSpacing: 1 }}>⚠ DELETE ASSET</h2>
+              <p style={{ color: '#ccc', fontSize: 11, marginBottom: 8 }}>
+                You are about to permanently delete asset:
+              </p>
+              <p style={{ color: '#ff4141', fontSize: 13, fontWeight: 'bold', marginBottom: 16 }}>
+                {deleteTarget.hostname} ({deleteTarget.ip})
+              </p>
+              <p style={{ color: '#888', fontSize: 10, marginBottom: 20 }}>
+                This will delete ALL collected evidence, MFT entries, event logs, registry data, notes, and analysis results for this asset. This cannot be undone.
+              </p>
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                <button onClick={closeDelete} style={{ ...ExecuteBtn, background: 'transparent', color: '#666', border: '1px solid #333' }}>CANCEL</button>
+                <button onClick={() => setDeleteStep(2)} style={{ ...ExecuteBtn, background: '#ff4141', color: '#000' }}>YES, CONTINUE</button>
+              </div>
+            </>)}
+
+            {/* Step 2 — Second confirmation */}
+            {deleteStep === 2 && (<>
+              <h2 style={{ color: '#ff4141', fontSize: 13, marginBottom: 16, letterSpacing: 1 }}>⚠ ARE YOU SURE?</h2>
+              <p style={{ color: '#ff8888', fontSize: 11, marginBottom: 20 }}>
+                All forensic evidence for <strong>{deleteTarget.hostname}</strong> will be permanently destroyed. This action is irreversible and cannot be recovered.
+              </p>
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                <button onClick={closeDelete} style={{ ...ExecuteBtn, background: 'transparent', color: '#666', border: '1px solid #333' }}>CANCEL</button>
+                <button onClick={() => setDeleteStep(3)} style={{ ...ExecuteBtn, background: '#ff4141', color: '#000' }}>YES, I AM SURE</button>
+              </div>
+            </>)}
+
+            {/* Step 3 — Math problem */}
+            {deleteStep === 3 && (<>
+              <h2 style={{ color: '#ff4141', fontSize: 13, marginBottom: 16, letterSpacing: 1 }}>VERIFY YOU ARE HUMAN</h2>
+              <p style={{ color: '#ccc', fontSize: 11, marginBottom: 12 }}>
+                Solve this to continue:
+              </p>
+              <p style={{ color: '#ffaa00', fontSize: 18, fontWeight: 'bold', marginBottom: 16, textAlign: 'center', letterSpacing: 2 }}>
+                {deleteMath.a} {deleteMath.op} {deleteMath.b} = ?
+              </p>
+              <input
+                value={deleteMathAnswer}
+                onChange={e => setDeleteMathAnswer(e.target.value)}
+                placeholder="ENTER ANSWER"
+                style={{ ...InputStyle, width: '100%', marginBottom: 16, textAlign: 'center', fontSize: 14 }}
+                autoFocus
+              />
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                <button onClick={closeDelete} style={{ ...ExecuteBtn, background: 'transparent', color: '#666', border: '1px solid #333' }}>CANCEL</button>
+                <button
+                  onClick={() => { if (parseInt(deleteMathAnswer) === mathAnswer()) setDeleteStep(4); else { setDeleteMathAnswer(''); alert('INCORRECT. Try again.'); } }}
+                  style={{ ...ExecuteBtn, background: '#ff4141', color: '#000' }}>VERIFY</button>
+              </div>
+            </>)}
+
+            {/* Step 4 — Final type-to-confirm */}
+            {deleteStep === 4 && (<>
+              <h2 style={{ color: '#ff4141', fontSize: 13, marginBottom: 16, letterSpacing: 1 }}>FINAL WARNING</h2>
+              <p style={{ color: '#ff8888', fontSize: 11, marginBottom: 8 }}>
+                Type the hostname to confirm permanent deletion:
+              </p>
+              <p style={{ color: '#ffaa00', fontSize: 12, fontWeight: 'bold', marginBottom: 12, letterSpacing: 1 }}>
+                {deleteTarget.hostname}
+              </p>
+              <input
+                value={deleteConfirmText}
+                onChange={e => setDeleteConfirmText(e.target.value)}
+                placeholder={`TYPE: ${deleteTarget.hostname}`}
+                style={{ ...InputStyle, width: '100%', marginBottom: 16 }}
+                autoFocus
+              />
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                <button onClick={closeDelete} style={{ ...ExecuteBtn, background: 'transparent', color: '#666', border: '1px solid #333' }}>CANCEL</button>
+                <button
+                  disabled={deleteConfirmText !== deleteTarget.hostname}
+                  onClick={confirmDeleteAsset}
+                  style={{ ...ExecuteBtn, background: deleteConfirmText === deleteTarget.hostname ? '#ff4141' : '#330000',
+                    color: deleteConfirmText === deleteTarget.hostname ? '#000' : '#550000',
+                    cursor: deleteConfirmText === deleteTarget.hostname ? 'pointer' : 'not-allowed' }}>
+                  PERMANENTLY DELETE
+                </button>
+              </div>
+            </>)}
+
+          </div>
+        </div>
+      )}
+
+      {linkForm && (
+        <div style={ModalOverlay}><div style={ModalContent}>
+          <h2 style={{ color: '#00ff41', fontSize: '12px', marginBottom: '20px' }}>[ ESTABLISH_LINK ]: {linkForm.source} ↔ {linkForm.target}</h2>
+          <div style={{ display: 'grid', gap: '15px' }}>
+            <select style={InputStyle} value={linkForm.link_type} onChange={e => setLinkForm({ ...linkForm, link_type: e.target.value })}>
+              <option value="WIRED">WIRED</option><option value="WIRELESS">WIRELESS</option><option value="VPN">VPN</option>
+            </select>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <input style={InputStyle} value={linkForm.ip_src} onChange={e => setLinkForm({ ...linkForm, ip_src: e.target.value })} placeholder="SRC IP" />
+              <input style={InputStyle} value={linkForm.interface_src} onChange={e => setLinkForm({ ...linkForm, interface_src: e.target.value })} placeholder="eth0" />
+            </div>
+            <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+              <button onClick={handleConfirmLink} style={BtnStyle}>INITIATE_UPLINK</button>
+              <button onClick={() => setLinkForm(null)} style={{ ...BtnStyle, background: 'transparent', color: '#777', border: '1px solid #333' }}>ABORT</button>
+            </div>
+          </div>
+        </div></div>
+      )}
+
+      {editingConfig && (
+        <div style={ModalOverlay}><div style={{ width: '90%', height: '85%', background: '#050505', border: '1px solid #00ff41', display: 'flex', flexDirection: 'column', padding: '20px' }}>
+          <div style={{ color: '#00ff41', fontSize: '12px', marginBottom: '15px' }}>[TERMINAL_EDITOR]: {editingConfig.hostname.toUpperCase()}_CONFIG</div>
+          <textarea autoFocus value={configBuffer} onChange={e => setConfigBuffer(e.target.value)} style={TextareaStyle} />
+          <div style={{ display: 'flex', gap: '15px', marginTop: '20px' }}>
+            <button onClick={() => { setActiveNodes(prev => prev.map(n => n.hostname === editingConfig.hostname ? { ...n, config: configBuffer } : n)); setEditingConfig(null); }} style={BtnStyle}>COMMIT_TO_MEMORY</button>
+            <button onClick={() => setEditingConfig(null)} style={{ ...BtnStyle, background: 'transparent', color: '#777', border: '1px solid #333' }}>ABORT</button>
+          </div>
+        </div></div>
+      )}
+
+      {showAssetModal && (
+        <div style={ModalOverlay}><div style={{ ...ModalContent, width: 480 }}>
+          <h2 style={{ color: '#00ff41', fontSize: '14px', marginBottom: '20px' }}>NEW_ASSET_SPECIFICATION</h2>
+          <div style={{ display: 'grid', gap: '10px' }}>
+            <input style={InputStyle} placeholder="HOSTNAME" value={assetForm.hostname} onChange={e => setAssetForm({ ...assetForm, hostname: e.target.value })} />
+            <input style={InputStyle} placeholder="IP_ADDRESS" value={assetForm.ip} onChange={e => setAssetForm({ ...assetForm, ip: e.target.value })} />
+            <input style={InputStyle} placeholder="MAC_ADDRESS" value={assetForm.mac} onChange={e => setAssetForm({ ...assetForm, mac: e.target.value })} />
+            <div>
+              <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>OPERATING_SYSTEM</div>
+              <select style={InputStyle} value={assetForm.os} onChange={e => setAssetForm({ ...assetForm, os: e.target.value })}>
+                {['Windows', 'Linux', 'macOS', 'Network', 'Other'].map(o => <option key={o} value={o}>{o}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>ASSET_TYPE</div>
+              <select style={InputStyle} value={assetForm.type} onChange={e => {
+                const type = e.target.value;
+                setAssetForm({ ...assetForm, type, formFactor: type === 'Network Device' ? 'Switch' : 'Laptop' });
+              }}>
+                {['Workstation', 'Server', 'Domain Controller', 'Network Device', 'Unknown'].map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>FORM_FACTOR</div>
+              {assetForm.type === 'Network Device' ? (
+                <select style={InputStyle} value={assetForm.formFactor} onChange={e => setAssetForm({ ...assetForm, formFactor: e.target.value })}>
+                  {['Switch', 'Router', 'Firewall', 'Load Balancer', 'Access Point', 'IDS/IPS', 'Proxy', 'Other'].map(f => <option key={f} value={f}>{f}</option>)}
+                </select>
+              ) : (
+                <select style={InputStyle} value={assetForm.formFactor} onChange={e => setAssetForm({ ...assetForm, formFactor: e.target.value })}>
+                  {['Laptop', 'Desktop', 'Server Rack', 'Virtual Machine', 'Container', 'Embedded', 'Other'].map(f => <option key={f} value={f}>{f}</option>)}
+                </select>
+              )}
+            </div>
+            <div>
+              <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>ANALYSIS_MODE</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                {[['LIVE_REMOTE', 'LIVE_REMOTE', 'Deploy VR to live system'], ['DEAD_DISK_LOCAL', 'DEAD_DISK_LOCAL', 'Image mounted on ORCA host'], ['DEAD_DISK_REMOTE', 'DEAD_DISK_REMOTE', 'Image at analyst site B'], ['UNKNOWN', 'UNKNOWN', 'Determine later']].map(([val, label, hint]) => (
+                  <button key={val} onClick={() => setAssetForm({ ...assetForm, analysisMode: val })} title={hint}
+                    style={{ background: assetForm.analysisMode === val ? '#00ff41' : 'transparent', color: assetForm.analysisMode === val ? '#000' : '#777', border: `1px solid ${assetForm.analysisMode === val ? '#00ff41' : '#333'}`, padding: '8px 10px', fontSize: 9, fontFamily: 'monospace', cursor: 'pointer', textAlign: 'left', letterSpacing: 1 }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+              <button onClick={handleRegisterAsset} style={BtnStyle}>SAVE_ASSET</button>
+              <button onClick={() => setShowAssetModal(false)} style={{ background: '#111', border: 'none', color: '#777', padding: '10px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 10 }}>CANCEL</button>
+            </div>
+          </div>
+        </div></div>
+      )}
+    </div>
+  );
+}
+
+const StatTile = ({ label, val }) => (
+  <div style={{ border: '1px solid #1a1a1a', padding: '12px' }}>
+    <div style={{ fontSize: '8px', color: '#555', marginBottom: '5px' }}>{label}</div>
+    <div style={{ fontSize: '12px', color: '#eee' }}>{val || '---'}</div>
+  </div>
+);
+
+const AssetCardStyle = { padding: '10px', border: '1px solid #1a1a1a', marginBottom: '8px', cursor: 'grab', fontSize: '11px' };
+const TempBtnStyle   = { background: '#111', color: '#00ff41', border: '1px solid #222', textAlign: 'left', width: '100%', padding: '10px', marginBottom: '8px', cursor: 'pointer', fontSize: '10px', fontFamily: 'monospace' };
+const InputStyle     = { background: '#000', border: '1px solid #2a2a2a', padding: '10px', color: '#00ff41', fontSize: '11px', width: '100%', outline: 'none', fontFamily: 'monospace', boxSizing: 'border-box' };
+const TextareaStyle  = { flex: 1, background: '#000', color: '#00ff41', border: '1px solid #111', fontFamily: 'monospace', fontSize: '13px', padding: '20px', outline: 'none' };
+const BtnStyle       = { background: '#00ff41', color: '#000', border: 'none', padding: '10px 20px', fontWeight: 'bold', cursor: 'pointer', fontSize: '10px', fontFamily: 'monospace' };
+const ModalOverlay   = { position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.95)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 3000 };
+const ModalContent   = { background: '#050505', border: '1px solid #00ff41', padding: '40px', width: '420px' };
+const ExecuteBtn     = { padding: '8px 18px', background: '#00ff41', color: '#000', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '11px', fontFamily: 'monospace' };

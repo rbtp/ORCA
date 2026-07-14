@@ -1,0 +1,1 @@
+﻿UPDATE ref_artifact_library SET custom_vql='SELECT EntryNumber, FullPath, FileName, FileSize, InUse, IsDir, Created0x10, Modified0x10, Accessed0x10, Created0x30, Modified0x30, Accessed0x30 FROM parse_mft(filename=''C:/'', accessor=''ntfs'')'  WHERE t_code='MFT';

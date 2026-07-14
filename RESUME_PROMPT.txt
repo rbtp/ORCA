@@ -1,0 +1,9 @@
+
+Continue the ORCA containerization task.
+
+1. Read CLAUDE.md to see what has been completed and what is next
+2. Read CONTAINERIZATION_PROMPT.md for the full spec
+3. Pick up from "Next Step" in CLAUDE.md
+4. Do NOT redo completed steps
+5. Update CLAUDE.md after each step
+6. When fully complete, write exactly: TASK COMPLETE

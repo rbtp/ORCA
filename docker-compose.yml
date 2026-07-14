@@ -1,0 +1,86 @@
+name: orcaweb
+
+services:
+  orca-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: orca-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@orca-postgres:5432/orca_db
+      - JWT_SECRET=${JWT_SECRET:-orca-secret-change-me}
+      - TLS_CERT_PATH=/app/certs/orca.crt
+      - TLS_KEY_PATH=/app/certs/orca.key
+      - ORCA_SERVER_URL=${ORCA_SERVER_URL:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://localhost}
+    volumes:
+      - orca-certs:/app/certs          # shared TLS certs (writable — backend generates on first boot)
+      - ./backend/bin:/app/bin:ro
+      - orca-evidence:/app/evidence
+    networks:
+      - orca-net
+    depends_on:
+      - orca-postgres
+
+  orca-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=${VITE_API_URL:-}
+    container_name: orca-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - orca-certs:/etc/nginx/certs:ro  # shared TLS certs (read-only — backend owns writes)
+    networks:
+      - orca-net
+    depends_on:
+      - orca-backend
+
+  orca-postgres:
+    image: postgres:15
+    container_name: orca-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=orca_db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - orca-postgres-data:/var/lib/postgresql/data
+    networks:
+      - orca-net
+
+networks:
+  orca-net:
+    driver: bridge
+
+volumes:
+  orca-postgres-data:
+  orca-evidence:
+  orca-certs:         # shared ECDSA P-256 cert/key between backend and frontend
+
+# ─── EXISTING INSTALLATION NOTE ───────────────────────────────────────────────
+# If you already have a standalone orca-postgres container running on this machine:
+#
+#   1. Do NOT run `docker compose up orca-postgres` — it will conflict.
+#   2. Connect the existing container to orca-net after first compose run:
+#        docker network create orca-net 2>/dev/null || true
+#        docker network connect orca-net orca-postgres
+#   3. Then start only the backend and frontend:
+#        docker compose up -d orca-backend orca-frontend
+#
+# See DEPLOY.md for full migration instructions.
+#
+# ─── TLS NOTE ────────────────────────────────────────────────────────────────
+# On first boot, the backend entrypoint auto-generates a self-signed ECDSA P-256
+# cert and writes it to the orca-certs volume. The frontend nginx waits for that
+# cert before starting. No manual cert files needed.
+#
+# Browser security warning on first visit is expected for self-signed certs.
+# Analysts click "proceed anyway" once; subsequent visits are seamless.

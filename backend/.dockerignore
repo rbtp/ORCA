@@ -1,0 +1,8 @@
+.env
+*.bak
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+sandbox_*/
+bin/

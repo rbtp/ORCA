@@ -1,0 +1,6 @@
+{
+  "server_url": "https://10.11.110.60:8000",
+  "token": "YOUR_JWT_TOKEN",
+  "bin_dir": "./bin",
+  "poll_interval": 5
+}

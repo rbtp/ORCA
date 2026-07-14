@@ -1,0 +1,90 @@
+.mitre-browser-container {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+    background: #121212;
+}
+
+.intelligence-pane {
+    flex: 1;
+    overflow-y: auto;
+    padding: 40px;
+    color: #fff;
+}
+
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 80%;
+    color: #666;
+}
+
+.intel-header {
+    margin-bottom: 30px;
+    border-bottom: 2px solid #333;
+    padding-bottom: 20px;
+}
+
+.stats-bar {
+    display: flex;
+    gap: 20px;
+    color: #0078d4;
+    font-weight: bold;
+    margin-top: 10px;
+}
+
+.intel-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #1a1a1a;
+}
+
+.intel-table th {
+    text-align: left;
+    padding: 15px;
+    background: #252525;
+    color: #888;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+}
+
+.intel-table td {
+    padding: 15px;
+    border-bottom: 1px solid #333;
+}
+
+.tech-name { font-weight: bold; color: #e0e0e0; }
+.tech-code { color: #0078d4; font-family: monospace; }
+
+.tactic-tag {
+    background: #333;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+}
+
+/* Frequency Progress Bar */
+.progress-bg {
+    width: 100%;
+    background: #333;
+    height: 20px;
+    border-radius: 10px;
+    position: relative;
+    overflow: hidden;
+}
+
+.progress-fill {
+    background: #0078d4;
+    height: 100%;
+    transition: width 0.5s ease;
+}
+
+.percent-text {
+    position: absolute;
+    right: 10px;
+    top: 2px;
+    font-size: 0.7rem;
+    color: #fff;
+}

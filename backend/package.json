@@ -1,0 +1,9 @@
+{
+  "name": "orca-backend",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "docx": "^8.5.0",
+    "sharp": "^0.33.4"
+  }
+}
