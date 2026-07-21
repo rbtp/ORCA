@@ -443,6 +443,84 @@ function renderNetworkMap(){
   return elems;
 }
 
+// ── behavioral analysis ───────────────────────────────────────
+function renderBehavioral(){
+  const out=[sHead('Behavioral Analysis')];
+  const behavioral=data.behavioral_by_asset||{};
+  const hasAny=Object.values(behavioral).some(b=>
+    (b.capa_techniques&&b.capa_techniques.length)||
+    (b.floss_iocs&&b.floss_iocs.length)||
+    (b.speakeasy_network&&b.speakeasy_network.length)
+  );
+  if(!hasAny){out.push(para('No behavioral analysis results available.',{color:G.DIM}));return out;}
+  for(const asset of (data.assets||[])){
+    const b=behavioral[String(asset.id)];
+    if(!b) continue;
+    out.push(new Paragraph({spacing:{before:160,after:60},children:[
+      new TextRun({text:asset.hostname,bold:true,color:G.GREEN,font:'Courier New',size:22}),
+      new TextRun({text:'  BEHAVIORAL ANALYSIS',color:G.DIM,font:'Courier New',size:16}),
+    ]}));
+    // CAPA ATT&CK Techniques
+    if(b.capa_techniques&&b.capa_techniques.length){
+      out.push(new Paragraph({spacing:{before:80,after:40},children:[new TextRun({text:'ATT&CK TECHNIQUES (CAPA)',bold:true,color:G.AMBER,font:'Courier New',size:18})]}));
+      const cols=[1440,3600,2160,760];
+      out.push(new Table({width:{size:9360,type:WidthType.DXA},columnWidths:cols,rows:[
+        new TableRow({tableHeader:true,children:[hdr('T-CODE',{width:cols[0]}),hdr('TECHNIQUE',{width:cols[1]}),hdr('TACTIC',{width:cols[2]}),hdr('SEV',{width:cols[3]})]}),
+        ...b.capa_techniques.map((t,i)=>{const bg=i%2?G.G4:G.G5;return new TableRow({children:[
+          cell(t.technique_id||'—',{bg,width:cols[0],color:G.GREEN,bold:true}),
+          cell(t.technique_name||'—',{bg,width:cols[1]}),
+          cell(t.tactic_name||'—',{bg,width:cols[2],color:G.DIM}),
+          cell((t.severity||'—').toUpperCase(),{bg,width:cols[3],color:t.severity==='high'?G.RED:t.severity==='medium'?G.AMBER:G.DIM}),
+        ]});}),
+      ]}));
+      out.push(para(''));
+    }
+    // FLOSS IOCs (capped at 50)
+    if(b.floss_iocs&&b.floss_iocs.length){
+      out.push(new Paragraph({spacing:{before:80,after:40},children:[new TextRun({text:`EXTRACTED IOCS (${b.floss_iocs.length}${b.floss_iocs.length>=50?' — truncated at 50':''})`,bold:true,color:G.RED,font:'Courier New',size:18})]}));
+      const cols=[1440,7920];
+      out.push(new Table({width:{size:9360,type:WidthType.DXA},columnWidths:cols,rows:[
+        new TableRow({tableHeader:true,children:[hdr('TYPE',{width:cols[0]}),hdr('VALUE',{width:cols[1]})]}),
+        ...b.floss_iocs.map((ioc,i)=>{const bg=i%2?G.G4:G.G5;return new TableRow({children:[
+          cell(ioc.ioc_type||'—',{bg,width:cols[0],color:G.AMBER}),
+          cell(ioc.string_value||'—',{bg,width:cols[1],size:16}),
+        ]});}),
+      ]}));
+      out.push(para(''));
+    }
+    // Speakeasy network events
+    if(b.speakeasy_network&&b.speakeasy_network.length){
+      out.push(new Paragraph({spacing:{before:80,after:40},children:[new TextRun({text:`EMULATED NETWORK EVENTS (${b.speakeasy_network.length})`,bold:true,color:G.GREEN,font:'Courier New',size:18})]}));
+      const cols=[900,3060,720,4680];
+      out.push(new Table({width:{size:9360,type:WidthType.DXA},columnWidths:cols,rows:[
+        new TableRow({tableHeader:true,children:[hdr('PROTO',{width:cols[0]}),hdr('HOST',{width:cols[1]}),hdr('PORT',{width:cols[2]}),hdr('URL',{width:cols[3]})]}),
+        ...b.speakeasy_network.map((ev,i)=>{const bg=i%2?G.G4:G.G5;return new TableRow({children:[
+          cell((ev.protocol||'—').toUpperCase(),{bg,width:cols[0],color:G.GREEN}),
+          cell(ev.host||'—',{bg,width:cols[1]}),
+          cell(ev.port?String(ev.port):'—',{bg,width:cols[2],color:G.DIM}),
+          cell(ev.url||'—',{bg,width:cols[3],size:14}),
+        ]});}),
+      ]}));
+      out.push(para(''));
+    }
+    // Top API calls
+    if(b.speakeasy_top_api&&b.speakeasy_top_api.length){
+      out.push(new Paragraph({spacing:{before:80,after:40},children:[new TextRun({text:'TOP API CALLS (EMULATION)',bold:true,color:G.GREEN,font:'Courier New',size:18})]}));
+      const cols=[5760,3600];
+      out.push(new Table({width:{size:9360,type:WidthType.DXA},columnWidths:cols,rows:[
+        new TableRow({tableHeader:true,children:[hdr('FUNCTION',{width:cols[0]}),hdr('CALL COUNT',{width:cols[1]})]}),
+        ...b.speakeasy_top_api.map((a,i)=>{const bg=i%2?G.G4:G.G5;return new TableRow({children:[
+          cell(a.func_name||'—',{bg,width:cols[0],color:G.GREEN}),
+          cell(String(a.call_count||0),{bg,width:cols[1],color:G.AMBER}),
+        ]});}),
+      ]}));
+      out.push(para(''));
+    }
+    out.push(divider());
+  }
+  return out;
+}
+
 const RENDERERS={
   summary:()=>renderSummary(),
   network:()=>renderNetworkMap(),
@@ -451,6 +529,7 @@ const RENDERERS={
   bluf:()=>renderBluf(),
   timeline:(d)=>renderTimeline(d),
   verdicts:()=>renderVerdicts(),
+  behavioral:()=>renderBehavioral(),
 };
 
 const children=[...cover()];

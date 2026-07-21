@@ -250,6 +250,43 @@ async def get_case_report(
             ORDER BY n.created_at ASC
         """), {"asset_ids": scoped_asset_ids}).mappings().all()
 
+        # ── Behavioral analysis data per asset ───────────────────────────────────
+        behavioral_by_asset = {}
+        for aid in scoped_asset_ids:
+            job_row = session.execute(text("""
+                SELECT job_id FROM behavioral_jobs
+                WHERE asset_id = :aid AND overall_status = 'complete'
+                ORDER BY submitted_at DESC LIMIT 1
+            """), {"aid": aid}).fetchone()
+            if job_row:
+                jid = str(job_row[0])
+                capa_rows = session.execute(text("""
+                    SELECT technique_id, technique_name, tactic_name, severity
+                    FROM capa_results WHERE job_id = :jid
+                    ORDER BY tactic_name, technique_id
+                """), {"jid": jid}).mappings().all()
+                floss_ioc_rows = session.execute(text("""
+                    SELECT string_value, ioc_type FROM floss_results
+                    WHERE job_id = :jid AND is_ioc = TRUE
+                    ORDER BY ioc_type, string_value LIMIT 50
+                """), {"jid": jid}).mappings().all()
+                se_net_rows = session.execute(text("""
+                    SELECT protocol, host, port, url FROM speakeasy_results
+                    WHERE job_id = :jid AND result_type = 'network' ORDER BY id
+                """), {"jid": jid}).mappings().all()
+                se_api_rows = session.execute(text("""
+                    SELECT func_name, COUNT(*)::int AS call_count
+                    FROM speakeasy_results
+                    WHERE job_id = :jid AND result_type = 'api_call'
+                    GROUP BY func_name ORDER BY call_count DESC LIMIT 20
+                """), {"jid": jid}).mappings().all()
+                behavioral_by_asset[str(aid)] = {
+                    "capa_techniques": [dict(r) for r in capa_rows],
+                    "floss_iocs": [dict(r) for r in floss_ioc_rows],
+                    "speakeasy_network": [dict(r) for r in se_net_rows],
+                    "speakeasy_top_api": [dict(r) for r in se_api_rows],
+                }
+
         return {
             "case_name":     case_name,
             "focus_country": focus_country,
@@ -272,6 +309,7 @@ async def get_case_report(
             "assets":               assets_list,
             "per_asset_techniques": per_asset_techniques,
             "map_data":             map_data,
+            "behavioral_by_asset":  behavioral_by_asset,
         }
 
     except HTTPException:
@@ -298,12 +336,13 @@ async def export_report(
     report_data = await get_case_report(case_name, current_user=current_user)
 
     default_sections = [
-        {"id": "summary",  "detail": False},
-        {"id": "network",  "detail": False},
-        {"id": "assets",   "detail": False},
-        {"id": "bluf",     "detail": False},
-        {"id": "timeline", "detail": False},
-        {"id": "verdicts", "detail": False},
+        {"id": "summary",    "detail": False},
+        {"id": "network",    "detail": False},
+        {"id": "assets",     "detail": False},
+        {"id": "bluf",       "detail": False},
+        {"id": "timeline",   "detail": False},
+        {"id": "verdicts",   "detail": False},
+        {"id": "behavioral", "detail": False},
     ]
 
     payload = {

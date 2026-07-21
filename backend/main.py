@@ -22,7 +22,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 from core.database_manager import db
-from routes import mitre_routes, ioc, admin, profile_routes, coverage_routes, network_routes
+from routes import mitre_routes, ioc, admin, profile_routes, coverage_routes, network_routes, behavioral_routes
 import vr_remote
 from agent_routes import router as agent_router
 from config import cfg
@@ -660,6 +660,10 @@ app.include_router(ioc.router)
 app.include_router(profile_routes.router)
 app.include_router(coverage_routes.router)
 app.include_router(network_routes.router)
+app.include_router(behavioral_routes.router)
+
+# Clean up temp behavioral analysis files older than 1 hour on startup
+behavioral_routes.cleanup_old_temp_files()
 
 if __name__ == "__main__":
     import ssl as _ssl

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import BehavioralAnalysisTab from '../BehavioralAnalysisTab';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
 // ── Palette ────────────────────────────────────────────────────────────────
@@ -181,7 +182,7 @@ const CollectionStatusBar = ({ tacticList }) => {
 // OVERVIEW TAB  — replace the entire OverviewTab component in EvidenceWindow.jsx
 // Lines 139-259 in the original file
 // ══════════════════════════════════════════════════════════════════════════════
-const OverviewTab = ({ tacticList, memSummary, avSummary, vulnSummary, isNetworkDevice, netConfigText, netConfigFile, netConfigSaving, onConfigLoad }) => {
+const OverviewTab = ({ tacticList, memSummary, avSummary, vulnSummary, behavioralSummary, capaIdentifiedTechniques = new Set(), isNetworkDevice, netConfigText, netConfigFile, netConfigSaving, onConfigLoad }) => {
   const configFileRef = React.useRef(null);
   const handleConfigFile = (e) => {
     const file = e.target.files[0];
@@ -315,7 +316,12 @@ const OverviewTab = ({ tacticList, memSummary, avSummary, vulnSummary, isNetwork
                     const col = vCol[v] || C.greyDim;
                     return (
                       <tr key={i} style={{ borderBottom: `1px solid #0a0a0a` }}>
-                        <td style={{ padding: '5px 10px', color: C.green }}>{t.t_code}</td>
+                        <td style={{ padding: '5px 10px', color: C.green, whiteSpace: 'nowrap' }}>
+                          {t.t_code}
+                          {capaIdentifiedTechniques.has(t.t_code) && (
+                            <span style={{ marginLeft: 6, padding: '1px 4px', fontSize: 8, background: 'rgba(255,170,0,0.12)', color: C.amber, border: `1px solid rgba(255,170,0,0.4)`, borderRadius: 2, verticalAlign: 'middle' }}>CAPA</span>
+                          )}
+                        </td>
                         <td style={{ padding: '5px 10px', color: C.grey }}>{t.technique_name || t.name}</td>
                         <td style={{ padding: '5px 10px', color: t.evidence_imported ? C.purple : (t.verdict?.toUpperCase() === 'NO_ARTIFACTS' ? C.greyDim : '#ffaa00') }}>
                           {t.evidence_imported ? '✓' : t.verdict?.toUpperCase() === 'NO_ARTIFACTS' ? 'EMPTY' : 'PENDING'}
@@ -397,6 +403,31 @@ const OverviewTab = ({ tacticList, memSummary, avSummary, vulnSummary, isNetwork
             <div style={{ width: 7, height: 7, borderRadius: '50%', background: C.greyDim, flexShrink: 0 }} />
             <span style={{ color: C.greyDim, fontSize: 11, fontFamily: 'monospace' }}>
               PENDING_ANALYSIS — No results available. Run a vuln scan in the VULN_SCAN tab to populate this section.
+            </span>
+          </div>
+        )}
+      </Card>
+
+      {/* Behavioral analysis summary */}
+      <Card title="BEHAVIORAL_ANALYSIS_SUMMARY">
+        {behavioralSummary ? (
+          <div style={{ padding: 14, display: 'flex', gap: 0 }}>
+            {[
+              ['ATT&CK TECHNIQUES', behavioralSummary.techniqueCount, behavioralSummary.techniqueCount > 0 ? C.red : C.greyDim],
+              ['IOCS_EXTRACTED',    behavioralSummary.iocCount,       behavioralSummary.iocCount       > 0 ? C.amber : C.greyDim],
+              ['API_CALLS',         behavioralSummary.apiCallCount,   C.green],
+            ].map(([l, v, col]) => (
+              <div key={l} style={{ padding: '8px 18px', borderRight: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <span style={{ color: C.greyDim, fontSize: 9, letterSpacing: 1 }}>{l}</span>
+                <span style={{ color: col, fontSize: 20, fontWeight: 'bold', fontFamily: 'monospace' }}>{String(v)}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ padding: 18, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ width: 7, height: 7, borderRadius: '50%', background: C.greyDim, flexShrink: 0 }} />
+            <span style={{ color: C.greyDim, fontSize: 11, fontFamily: 'monospace' }}>
+              PENDING_ANALYSIS — No results available. Submit a binary in the BEHAVIORAL ANALYSIS tab to populate this section.
             </span>
           </div>
         )}
@@ -3659,7 +3690,7 @@ const ReportTab = ({ caseName, assetId }) => {
 // MalwareSignaturesTab, and ArtifactAnalysisTab are NEVER unmounted when
 // switching tabs — their state, refs, and active SSE streams all survive.
 // ══════════════════════════════════════════════════════════════════════════════
-const EvidenceWindow = ({ assetId, assetName, tCode, isOpen, onClose, tacticList, caseName, collab, analysisMode = 'UNKNOWN', assetIp = '', caseType = 'INVESTIGATION', assetType = '', memSummary: memSummaryProp = null, avSummary: avSummaryProp = null, vulnSummary: vulnSummaryProp = null, onSummaryUpdate }) => {
+const EvidenceWindow = ({ assetId, assetName, tCode, isOpen, onClose, tacticList, caseName, collab, analysisMode = 'UNKNOWN', assetIp = '', caseType = 'INVESTIGATION', assetType = '', memSummary: memSummaryProp = null, avSummary: avSummaryProp = null, vulnSummary: vulnSummaryProp = null, behavioralSummary: behavioralSummaryProp = null, onSummaryUpdate }) => {
   const isIR = caseType === 'INCIDENT_RESPONSE';
   const NETWORK_TYPES = ['FIREWALL', 'ROUTER', 'SWITCH', 'NETWORK', 'AP', 'LOAD_BALANCER', 'PROXY', 'VPN', 'IDS', 'IPS', 'WAF'];
   const isNetworkDevice = NETWORK_TYPES.some(t => (assetType || '').toUpperCase().includes(t));
@@ -3669,13 +3700,16 @@ const EvidenceWindow = ({ assetId, assetName, tCode, isOpen, onClose, tacticList
   const [tab, setTab]                 = useState('OVERVIEW');
   const [progressLabel, setProgressLabel] = useState(null);
   // Summary state — initialized from lifted props, updates propagate back up
-  const [memSummary, setMemSummaryLocal]   = useState(memSummaryProp);
-  const [avSummary, setAvSummaryLocal]     = useState(avSummaryProp);
-  const [vulnSummary, setVulnSummaryLocal] = useState(vulnSummaryProp);
+  const [memSummary, setMemSummaryLocal]          = useState(memSummaryProp);
+  const [avSummary, setAvSummaryLocal]            = useState(avSummaryProp);
+  const [vulnSummary, setVulnSummaryLocal]        = useState(vulnSummaryProp);
+  const [behavioralSummary, setBehavioralSummaryLocal] = useState(behavioralSummaryProp);
+  const [capaIdentifiedTechniques, setCapaIdentifiedTechniques] = useState(new Set());
 
-  const setMemSummary = (data) => { setMemSummaryLocal(data); onSummaryUpdate && onSummaryUpdate('memory', assetId, data); };
-  const setAvSummary  = (data) => { setAvSummaryLocal(data);  onSummaryUpdate && onSummaryUpdate('av', assetId, data); };
-  const setVulnSummary = (data) => { setVulnSummaryLocal(data); onSummaryUpdate && onSummaryUpdate('vuln', assetId, data); };
+  const setMemSummary        = (data) => { setMemSummaryLocal(data);        onSummaryUpdate && onSummaryUpdate('memory',     assetId, data); };
+  const setAvSummary         = (data) => { setAvSummaryLocal(data);         onSummaryUpdate && onSummaryUpdate('av',         assetId, data); };
+  const setVulnSummary       = (data) => { setVulnSummaryLocal(data);       onSummaryUpdate && onSummaryUpdate('vuln',       assetId, data); };
+  const setBehavioralSummary = (data) => { setBehavioralSummaryLocal(data); onSummaryUpdate && onSummaryUpdate('behavioral', assetId, data); };
 
 useEffect(() => {
     if (isOpen) {
@@ -3687,6 +3721,7 @@ useEffect(() => {
       setMemSummaryLocal(memSummaryProp);
       setAvSummaryLocal(avSummaryProp);
       setVulnSummaryLocal(vulnSummaryProp);
+      setBehavioralSummaryLocal(behavioralSummaryProp);
       if (collab && assetId) collab.loadTechniqueStatuses(assetId);
       // Persist vuln summary across sessions by deriving counts from stored results
       fetch(`${import.meta.env.VITE_API_URL}/api/assets/${assetId}/vuln-results`, { headers: getAuth() })
@@ -3703,6 +3738,23 @@ useEffect(() => {
           });
           setVulnSummary(counts);  // also propagates to InvestigationWorkspace
         })
+        .catch(() => {});
+      // Restore behavioral summary from last completed job
+      fetch(`${import.meta.env.VITE_API_URL}/api/behavioral/asset/${assetId}/latest`, { headers: getAuth() })
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (!data) return;
+          setBehavioralSummaryLocal({
+            techniqueCount: data.capa?.technique_count || 0,
+            iocCount: data.floss?.ioc_count || 0,
+            apiCallCount: data.speakeasy?.api_calls?.length || 0,
+          });
+        })
+        .catch(() => {});
+      // Load CAPA-identified technique IDs for badge rendering in the technique table
+      fetch(`${import.meta.env.VITE_API_URL}/api/behavioral/asset/${assetId}/capa-techniques`, { headers: getAuth() })
+        .then(r => r.ok ? r.json() : [])
+        .then(rows => setCapaIdentifiedTechniques(new Set(rows.map(r => r.technique_id))))
         .catch(() => {});
       // Load persisted network config if this is a network device asset
       if (isNetworkDevice && assetId) {
@@ -3728,8 +3780,13 @@ useEffect(() => {
     }).finally(() => setNetConfigSaving(false));
   };
 
-  const TABS = ['OVERVIEW', 'ARTIFACT_ANALYSIS', ...(isNetworkDevice ? ['NET_CONFIG'] : []), 'MEMORY_ANALYSIS', 'KNOWN_MALWARE_SIGNATURES', 'VULN_SCAN'];
-  const TAB_LABELS = { 'ARTIFACT_ANALYSIS': isIR ? 'IR ARTIFACTS' : 'ARTIFACT ANALYSIS' };
+  const TABS = ['OVERVIEW', 'ARTIFACT_ANALYSIS', ...(isNetworkDevice ? ['NET_CONFIG'] : []), 'MEMORY_ANALYSIS', 'KNOWN_MALWARE_SIGNATURES', 'VULN_SCAN', 'BEHAVIORAL_ANALYSIS'];
+  const TAB_LABELS = {
+    'ARTIFACT_ANALYSIS': isIR ? 'IR ARTIFACTS' : 'ARTIFACT ANALYSIS',
+    'BEHAVIORAL_ANALYSIS': behavioralSummary?.techniqueCount > 0
+      ? `BEHAVIORAL ANALYSIS [${behavioralSummary.techniqueCount}]`
+      : 'BEHAVIORAL ANALYSIS',
+  };
 
   // Shared style for each tab's wrapper div.
   // When the tab is active: flex column filling all available space.
@@ -3792,7 +3849,7 @@ useEffect(() => {
         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
 
           <div style={tabStyle('OVERVIEW')}>
-            <OverviewTab tacticList={tacticList || []} memSummary={memSummary} avSummary={avSummary} vulnSummary={vulnSummary} isNetworkDevice={isNetworkDevice} netConfigText={netConfigText} netConfigFile={netConfigFile} netConfigSaving={netConfigSaving} onConfigLoad={handleConfigLoad} />
+            <OverviewTab tacticList={tacticList || []} memSummary={memSummary} avSummary={avSummary} vulnSummary={vulnSummary} behavioralSummary={behavioralSummary} capaIdentifiedTechniques={capaIdentifiedTechniques} isNetworkDevice={isNetworkDevice} netConfigText={netConfigText} netConfigFile={netConfigFile} netConfigSaving={netConfigSaving} onConfigLoad={handleConfigLoad} />
           </div>
 
           <div style={tabStyle('ARTIFACT_ANALYSIS')}>
@@ -3848,6 +3905,13 @@ useEffect(() => {
               analysisMode={analysisMode}
               collab={collab}
               onScanComplete={setVulnSummary}
+            />
+          </div>
+
+          <div style={tabStyle('BEHAVIORAL_ANALYSIS')}>
+            <BehavioralAnalysisTab
+              assetId={assetId}
+              onSummaryUpdate={setBehavioralSummary}
             />
           </div>
 
