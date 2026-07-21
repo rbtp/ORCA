@@ -1,6 +1,6 @@
 # ORCA — Operational Response & Collection Architecture
 
-**ORCA** is a self-hosted, web-based digital forensics and incident response (DFIR) platform. It orchestrates Velociraptor artifact collection, memory forensics with Volatility3, malware scanning with ClamAV, vulnerability scanning with Grype/Syft, and threat-intelligence-driven triage — all inside a dark-ops terminal UI, delivered as a containerised Docker stack.
+**ORCA** is a self-hosted, web-based digital forensics and incident response (DFIR) platform. It orchestrates Velociraptor artifact collection, memory forensics with Volatility3, behavioral analysis with Mandiant CAPA/FLOSS/Speakeasy, malware scanning with ClamAV, vulnerability scanning with Grype/Syft, and threat-intelligence-driven triage — all inside a dark-ops terminal UI, delivered as a containerised Docker stack.
 
 ---
 
@@ -67,10 +67,20 @@
 - Store discovered IOCs (IP, domain, hash, etc.) against a case
 - Cross-reference IOC values against evidence table via substring search
 
+### Behavioral Analysis (CAPA / FLOSS / Speakeasy)
+- Static capability analysis via **Mandiant CAPA** — maps binary capabilities to MITRE ATT&CK techniques; badges appear on the matching technique rows in the investigation checklist
+- Obfuscated string extraction via **Mandiant FLOSS** — extracts static, stack, tight, and decoded strings; automatically flags IOCs (IPs, domains, URLs, registry keys, file paths, emails); cross-references extracted IOCs against the global IOC library with threat-actor attribution
+- Windows PE emulation via **Speakeasy** — captures API call sequences, network connections, file/registry activity, and memory operations without executing the sample on a real system
+- Submit binaries by file upload or by selecting a previously collected artifact directly from the evidence library
+- SSE-streamed pipeline: live progress per tool with technique and string counts updating in real time
+- Full results persisted to database; history picker lets analysts compare runs across multiple samples on the same asset
+- Behavioral summary card in the asset Overview tab; BEHAVIORAL ANALYSIS tab badge shows live technique count
+- Behavioral data included in DOCX/PDF report exports
+
 ### Reporting
 - DOCX report export via Node.js + `docx` library with a terminal/dark theme
 - PDF export via LibreOffice headless conversion
-- Sections: cover page, investigation summary, asset breakdown, BLUF/executive notes, analyst timeline, technique verdicts table, network map (rendered as embedded image)
+- Sections: cover page, investigation summary, asset breakdown, BLUF/executive notes, analyst timeline, technique verdicts table, network map (rendered as embedded image), behavioral analysis (CAPA techniques, FLOSS IOCs, Speakeasy network events, top API calls)
 
 ### Agent Fleet
 - Persistent Python agent (`orca_agent.py`) deployed to endpoints via remote SMB trigger or manual install
@@ -136,6 +146,9 @@ All API calls from the browser are relative `/api/...` paths. nginx proxies them
 | Malware scanning | ClamAV | (apt package) |
 | Vulnerability scanning | Syft + Grype | (bundled binaries) |
 | Disk imaging | Arsenal Image Mounter CLI | (bundled) |
+| Capability analysis | Mandiant CAPA (flare-capa) | 7.4.x |
+| String extraction | Mandiant FLOSS (flare-floss) | 3.1.x |
+| PE emulation | Speakeasy (speakeasy-emulator) | 1.5.x |
 | Report generation | Node.js + docx | 8.x |
 | PDF conversion | LibreOffice headless | (apt package) |
 | Containerisation | Docker Compose | v2 |
@@ -176,6 +189,16 @@ Default credentials are created by the database seed migration. See [First-Run S
 2. Log in with the seeded admin account (set during database initialisation).
 3. Navigate to **Options → User Registry** to create analyst accounts.
 4. Navigate to **Investigations** → create a case → add assets.
+
+### Enabling Behavioral Analysis
+
+Run the included PowerShell helper to create the database tables and rebuild the backend image with CAPA rules pre-installed:
+
+```powershell
+.\deploy-behavioral.ps1
+```
+
+This applies the `behavioral_analysis_migration.sql` schema, downloads flare-capa rules matching the installed version, and recreates the `orca-backend` container. No manual download or configuration is required.
 
 ---
 
