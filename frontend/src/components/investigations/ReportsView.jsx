@@ -22,8 +22,7 @@ const DEFAULT_SECTIONS = [
   { id: "verdicts",  label: "TECHNIQUE VERDICTS",      enabled: true,  detail: false },
 ];
 
-const token = () => localStorage.getItem("orca_token");
-const authHdr = () => ({ Authorization: `Bearer ${token()}` });
+const authHdr = () => ({ 'Content-Type': 'application/json' });
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 function fmt(n) { return (n ?? 0).toLocaleString(); }
@@ -294,7 +293,7 @@ export default function ReportsView() {
   const [rangeTo,   setRangeTo]   = useState(toLocal(now));
 
   useEffect(() => {
-    fetch(`${import.meta.env.VITE_API_URL}/api/mitre/cases`, { headers: authHdr() })
+    fetch(`${import.meta.env.VITE_API_URL}/api/mitre/cases`, { credentials: 'include', headers: authHdr() })
       .then(r => r.json())
       .then(d => setCases(Array.isArray(d) ? d : d.cases || []))
       .catch(() => {});
@@ -304,7 +303,7 @@ export default function ReportsView() {
     if (!selectedCase) return;
     setLoading(true);
     setReportData(null);
-    fetch(`${import.meta.env.VITE_API_URL}/api/reports/${encodeURIComponent(selectedCase)}`, { headers: authHdr() })
+    fetch(`${import.meta.env.VITE_API_URL}/api/reports/${encodeURIComponent(selectedCase)}`, { credentials: 'include', headers: authHdr() })
       .then(r => r.json())
       .then(d => { setReportData(d); setLoading(false); })
       .catch(() => setLoading(false));
@@ -338,7 +337,7 @@ export default function ReportsView() {
       };
       const res = await fetch(
         `${import.meta.env.VITE_API_URL}/api/reports/${encodeURIComponent(selectedCase)}/export?format=${format}`,
-        { method: "POST", headers: { ...authHdr(), "Content-Type": "application/json" }, body: JSON.stringify(body) }
+        { method: "POST", credentials: 'include', headers: { ...authHdr(), "Content-Type": "application/json" }, body: JSON.stringify(body) }
       );
       if (!res.ok) throw new Error("Export failed");
       const blob = await res.blob();

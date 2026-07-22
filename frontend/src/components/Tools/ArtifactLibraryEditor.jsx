@@ -27,10 +27,8 @@ const ArtifactLibraryEditor = () => {
 
   // Helper to get auth header
   const getAuthHeader = () => ({
-    headers: {
-      'Authorization': `Bearer ${localStorage.getItem('orca_token')}`,
-      'Content-Type': 'application/json'
-    }
+    withCredentials: true,
+    headers: { 'Content-Type': 'application/json' },
   });
 
   useEffect(() => {

@@ -2,10 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 
 const API_URL = `${import.meta.env.VITE_API_URL}/api/coverage`;
 
-const getAuthHeaders = () => ({
-  'Authorization': `Bearer ${localStorage.getItem('orca_token')}`,
-  'Content-Type': 'application/json',
-});
+const getAuthHeaders = () => ({ 'Content-Type': 'application/json' });
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -38,7 +35,7 @@ export default function DetectionCoverage() {
   const [tcSearch, setTcSearch] = useState('');     // per-entry T-code filter (shared by all expanded)
 
   useEffect(() => {
-    fetch(API_URL, { headers: getAuthHeaders() })
+    fetch(API_URL, { credentials: 'include', headers: getAuthHeaders() })
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(d => setData(Array.isArray(d) ? d : []))
       .catch(e => setError(e.message))

@@ -7,11 +7,11 @@ services:
       dockerfile: Dockerfile
     container_name: orca-backend
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     environment:
       - DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@orca-postgres:5432/orca_db
-      - JWT_SECRET=${JWT_SECRET:-orca-secret-change-me}
+      - JWT_SECRET=${JWT_SECRET}
       - TLS_CERT_PATH=/app/certs/orca.crt
       - TLS_KEY_PATH=/app/certs/orca.key
       - ORCA_SERVER_URL=${ORCA_SERVER_URL:-}

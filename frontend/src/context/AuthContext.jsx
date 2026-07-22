@@ -2,77 +2,74 @@ import React, { createContext, useState, useContext, useEffect, useCallback } fr
 
 const AuthContext = createContext(null);
 
-const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000; // re-login 5 min before expiry
-
-function getTokenExpiry(token) {
-  try {
-    const payload = JSON.parse(atob(token.split('.')[1]));
-    return payload.exp ? payload.exp * 1000 : null; // convert to ms
-  } catch {
-    return null;
-  }
-}
-
-function isTokenExpired(token) {
-  const exp = getTokenExpiry(token);
-  if (!exp) return true;
-  return Date.now() >= exp;
-}
-
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sessionExpired, setSessionExpired] = useState(false);
+  const expiryTimerRef = React.useRef(null);
 
-  const logout = useCallback((expired = false) => {
-    localStorage.removeItem('orca_token');
+  const clearExpiryTimer = () => {
+    if (expiryTimerRef.current) {
+      clearTimeout(expiryTimerRef.current);
+      expiryTimerRef.current = null;
+    }
+  };
+
+  const logout = useCallback(async (expired = false) => {
+    clearExpiryTimer();
     localStorage.removeItem('orca_user');
     setUser(null);
     if (expired) setSessionExpired(true);
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch { /* best-effort cookie clear */ }
   }, []);
 
-  // On mount — check token validity before restoring session
-  useEffect(() => {
-    const savedUser = localStorage.getItem('orca_user');
-    const token = localStorage.getItem('orca_token');
-    if (savedUser && token) {
-      if (isTokenExpired(token)) {
-        logout(true);
-      } else {
-        setUser(JSON.parse(savedUser));
-        scheduleExpiryLogout(token);
-      }
-    }
-    setLoading(false);
-  }, []);
-
-  // Schedule auto-logout before token expires so it's graceful, not a 401
-  const scheduleExpiryLogout = useCallback((token) => {
-    const exp = getTokenExpiry(token);
-    if (!exp) return;
-    const msUntilWarning = exp - Date.now() - TOKEN_REFRESH_MARGIN_MS;
-    if (msUntilWarning <= 0) {
+  const scheduleExpiryLogout = useCallback((expiresAt) => {
+    clearExpiryTimer();
+    if (!expiresAt) return;
+    const msUntilExpiry = (expiresAt * 1000) - Date.now() - (5 * 60 * 1000);
+    if (msUntilExpiry <= 0) {
       logout(true);
       return;
     }
-    const timer = setTimeout(() => logout(true), msUntilWarning);
-    return () => clearTimeout(timer);
+    expiryTimerRef.current = setTimeout(() => logout(true), msUntilExpiry);
   }, [logout]);
+
+  // On mount — restore session via /auth/me (cookie sent automatically)
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/auth/me', { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          setUser(data.user);
+          localStorage.setItem('orca_user', JSON.stringify(data.user));
+          scheduleExpiryLogout(data.expires_at);
+        } else {
+          localStorage.removeItem('orca_user');
+        }
+      } catch {
+        localStorage.removeItem('orca_user');
+      }
+      setLoading(false);
+    })();
+  }, []);
 
   const login = async (username, password) => {
     setSessionExpired(false);
-    const response = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/login`, {
+    const response = await fetch('/api/auth/login', {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     });
 
     if (response.ok) {
       const data = await response.json();
-      localStorage.setItem('orca_token', data.access_token);
       localStorage.setItem('orca_user', JSON.stringify(data.user));
       setUser(data.user);
-      scheduleExpiryLogout(data.access_token);
+      scheduleExpiryLogout(data.expires_at);
       return { success: true };
     } else {
       const error = await response.json();
@@ -80,8 +77,6 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  // Global 401 interceptor — any fetch that gets a 401 triggers graceful session expiry
-  // Components can call this instead of rolling their own logout-on-401 logic
   const handle401 = useCallback(() => {
     logout(true);
   }, [logout]);

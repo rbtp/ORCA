@@ -121,7 +121,7 @@ const TRIAGE_TREE = [
 ];
 
 const CONF_COLOR = { H: C.red, M: C.amber, L: C.green };
-const getAuth = () => ({ 'Authorization': `Bearer ${localStorage.getItem('orca_token')}`, 'Content-Type': 'application/json' });
+const getAuth = () => ({ 'Content-Type': 'application/json' });
 const ts = () => new Date().toLocaleTimeString([], { hour12: false });
 
 // ── Shared micro-styles ────────────────────────────────────────────────────
@@ -597,7 +597,7 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
 
   // Decode current user initials from JWT to determine lock ownership
   const myInitials = (() => {
-    try { return JSON.parse(atob(localStorage.getItem('orca_token').split('.')[1])).initials; } catch { return null; }
+    try { return JSON.parse(localStorage.getItem('orca_user')).initials; } catch { return null; }
   })();
   const iAmLockHolder = lockInfo && lockInfo.locked_by_initials === myInitials;
   const isLockedByOther = lockInfo && !iAmLockHolder;
@@ -2403,7 +2403,7 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
       const { job_id } = await r.json();
       addLog(`Job dispatched to agent: ${job_id}`);
       const evtSource = new EventSource(
-        `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream?token=${localStorage.getItem('orca_token')}`
+        `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream`
       );
       let pluginsRun = 0, totalRows = 0, curPlugin = null;
       evtSource.onmessage = (e) => {
@@ -2903,7 +2903,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
       const { job_id } = await r.json();
       addLog(`ClamAV job dispatched to agent: ${job_id}`);
       const evtSource = new EventSource(
-        `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream?token=${localStorage.getItem('orca_token')}`
+        `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream`
       );
       evtSource.onmessage = (e) => {
         try {
@@ -3142,7 +3142,7 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
       const { job_id } = await r.json();
       addLog(`Grype job dispatched: ${job_id}`);
       const evtSource = new EventSource(
-        `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream?token=${localStorage.getItem('orca_token')}`
+        `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream`
       );
       evtSource.onmessage = (e) => {
         try {
@@ -4006,10 +4006,9 @@ export const TimelineViewer = ({ assetId }) => {
         filters: (flt || []).join('||'),
         sources: [...srcs].join(','),
       });
-      const token = localStorage.getItem('orca_token');
       const r = await fetch(
         `${import.meta.env.VITE_API_URL}/api/mitre/evidence/${assetId}/timeline?${params}`,
-        { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } }
+        { credentials: 'include', headers: { 'Content-Type': 'application/json' } }
       );
       const d = await r.json();
       setEntries(d.entries || []);
@@ -4043,7 +4042,6 @@ export const TimelineViewer = ({ assetId }) => {
   const fetchChartData = async () => {
     setChartLoading(true);
     try {
-      const token = localStorage.getItem('orca_token');
       const hasDateRange = dateFrom || dateTo;
       // With a date range: fetch all events in the window (no cap)
       // Without: use first 5000 rows as a representative sample
@@ -4057,7 +4055,7 @@ export const TimelineViewer = ({ assetId }) => {
         });
         const r = await fetch(
           `${import.meta.env.VITE_API_URL}/api/mitre/evidence/${assetId}/timeline?${params}`,
-          { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } }
+          { credentials: 'include', headers: { 'Content-Type': 'application/json' } }
         );
         const d = await r.json();
         const combined = [...acc, ...(d.entries || [])];

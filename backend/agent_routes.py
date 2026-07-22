@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from datetime import timedelta
-from auth_utils import get_current_user, get_current_user_sse, create_access_token
+from auth_utils import get_current_user, create_access_token
 from config import cfg
 from core.database_manager import db
 import vr_remote
@@ -139,7 +139,7 @@ async def dispatch_job(
 @router.get("/jobs/{job_id}/stream")
 async def stream_job_results(
     job_id: str,
-    current_user: dict = Depends(get_current_user_sse)
+    current_user: dict = Depends(get_current_user)
 ):
     # Check if job already finished so we can close immediately after replay
     already_done = False
@@ -189,6 +189,16 @@ async def poll_jobs(
     agent_id: str,
     current_user: dict = Depends(get_current_user)
 ):
+    # Agent tokens are self-authenticating; analyst tokens must own this agent
+    if current_user.get("role") != "agent":
+        with db.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT analyst_id FROM agent_registrations WHERE agent_id = :id"
+            ), {"id": agent_id}).fetchone()
+        if not row or str(row[0]) != str(current_user.get("id")):
+            from fastapi import HTTPException as _HTTPException
+            raise _HTTPException(status_code=403, detail="AGENT_ACCESS_DENIED")
+
     with db.engine.connect() as conn:
         conn.execute(text(
             "UPDATE agent_registrations SET last_seen = NOW() WHERE agent_id = :id"
@@ -365,7 +375,7 @@ async def download_binary(filename: str, current_user: dict = Depends(get_curren
 
 
 @router.get("/download/orca_agent.py")
-async def download_orca_agent(current_user: dict = Depends(get_current_user_sse)):
+async def download_orca_agent():
     agent_path = Path(__file__).parent.parent / "agent" / "orca_agent.py"
     if not agent_path.exists():
         raise HTTPException(404, "Agent script not found on server")
@@ -413,11 +423,17 @@ async def deploy_agent(
         "$d='C:\\ORCA_Agent';"
         "New-Item -ItemType Directory -Force $d | Out-Null;"
         "New-Item -ItemType Directory -Force \"$d\\bin\" | Out-Null;"
-        "[Net.ServicePointManager]::ServerCertificateValidationCallback={$true};"
+        # Disable cert validation only for this download (self-signed server cert)
+        "Add-Type -TypeDefinition '"
+        "using System.Net;using System.Security.Cryptography.X509Certificates;"
+        "public class SC:ICertificatePolicy{"
+        "public bool CheckValidationResult(ServicePoint s,X509Certificate c,WebRequest r,int e){return true;}"
+        "}';"
+        "[System.Net.ServicePointManager]::CertificatePolicy=New-Object SC;"
     )
     ps_script += (
         f"(New-Object Net.WebClient).DownloadFile("
-        f"'{orca_url}/api/agent/download/orca_agent.py?token={agent_token}',"
+        f"'{orca_url}/api/agent/download/orca_agent.py',"
         f"'C:\\ORCA_Agent\\orca_agent.py');"
     )
     ps_script += (

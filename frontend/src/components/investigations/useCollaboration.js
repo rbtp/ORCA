@@ -1,16 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 const API_BASE = `${import.meta.env.VITE_API_URL}/api/mitre`;
-const getAuth = () => ({
-  'Authorization': `Bearer ${localStorage.getItem('orca_token')}`,
-  'Content-Type': 'application/json',
-});
+const getAuth = () => ({ 'Content-Type': 'application/json' });
 
 /**
  * useCollaboration
  *
  * Maintains a persistent SSE connection to /api/mitre/collaboration/stream.
- * Tracks technique locks, tool locks, and queues access-attempt notifications.
+ * Auth via HttpOnly cookie (sent automatically by browser for same-origin requests).
  *
  * Returns:
  *   techniqueLocks   — Map of "assetId:tCode" → { locked_by, locked_by_initials, locked_at }
@@ -43,14 +40,11 @@ export function useCollaboration() {
     let retryTimeout;
 
     const connect = () => {
-      const token = localStorage.getItem('orca_token');
-      if (!token) return;
+      // Session is authenticated via HttpOnly cookie — no token in URL needed
+      const userStr = localStorage.getItem('orca_user');
+      if (!userStr) return;
 
-      // EventSource doesn't support custom headers — pass token as query param
-      // Backend needs to support ?token= as fallback (see note below)
-      es = new EventSource(
-        `${API_BASE}/collaboration/stream?token=${encodeURIComponent(token)}`
-      );
+      es = new EventSource(`${API_BASE}/collaboration/stream`);
       esRef.current = es;
 
       es.onopen = () => setConnected(true);
@@ -65,7 +59,6 @@ export function useCollaboration() {
       es.onerror = () => {
         setConnected(false);
         es.close();
-        // Reconnect after 5s
         retryTimeout = setTimeout(connect, 5000);
       };
     };
@@ -103,7 +96,6 @@ export function useCollaboration() {
         break;
 
       case 'technique_submitted':
-        // No lock change — just update status locally
         setTechniqueStatuses(prev => {
           const next = new Map(prev);
           const k = key(msg.asset_id, msg.t_code);
@@ -124,7 +116,6 @@ export function useCollaboration() {
         break;
 
       case 'technique_access_attempt':
-        // This fires only on the lock holder — add a persistent notification
         addNotification('ACCESS_ATTEMPT', {
           message: `[ ${msg.attempted_by_initials || msg.attempted_by} ] attempted to access ${msg.t_code}`,
           payload: msg,
@@ -181,7 +172,7 @@ export function useCollaboration() {
   // ── Technique state machine actions ────────────────────────────────────────
   const claimTechnique = useCallback(async (assetId, tCode) => {
     const res = await fetch(`${API_BASE}/techniques/claim`, {
-      method: 'POST', headers: getAuth(),
+      method: 'POST', credentials: 'include', headers: getAuth(),
       body: JSON.stringify({ asset_id: assetId, t_code: tCode }),
     });
     return res.json();
@@ -189,14 +180,14 @@ export function useCollaboration() {
 
   const releaseTechnique = useCallback(async (assetId, tCode) => {
     await fetch(`${API_BASE}/techniques/release`, {
-      method: 'POST', headers: getAuth(),
+      method: 'POST', credentials: 'include', headers: getAuth(),
       body: JSON.stringify({ asset_id: assetId, t_code: tCode }),
     });
   }, []);
 
   const submitTechnique = useCallback(async (assetId, tCode) => {
     const res = await fetch(`${API_BASE}/techniques/submit`, {
-      method: 'POST', headers: getAuth(),
+      method: 'POST', credentials: 'include', headers: getAuth(),
       body: JSON.stringify({ asset_id: assetId, t_code: tCode }),
     });
     return res.json();
@@ -204,7 +195,7 @@ export function useCollaboration() {
 
   const closeTechnique = useCallback(async (assetId, tCode) => {
     const res = await fetch(`${API_BASE}/techniques/close`, {
-      method: 'POST', headers: getAuth(),
+      method: 'POST', credentials: 'include', headers: getAuth(),
       body: JSON.stringify({ asset_id: assetId, t_code: tCode }),
     });
     return res.json();
@@ -212,7 +203,7 @@ export function useCollaboration() {
 
   const kickbackTechnique = useCallback(async (assetId, tCode) => {
     const res = await fetch(`${API_BASE}/techniques/kickback`, {
-      method: 'POST', headers: getAuth(),
+      method: 'POST', credentials: 'include', headers: getAuth(),
       body: JSON.stringify({ asset_id: assetId, t_code: tCode }),
     });
     return res.json();
@@ -221,7 +212,7 @@ export function useCollaboration() {
   // ── Tool locks ──────────────────────────────────────────────────────────────
   const acquireToolLock = useCallback(async (assetId, toolName) => {
     const res = await fetch(`${API_BASE}/tools/lock`, {
-      method: 'POST', headers: getAuth(),
+      method: 'POST', credentials: 'include', headers: getAuth(),
       body: JSON.stringify({ asset_id: assetId, tool_name: toolName }),
     });
     return res.json();
@@ -229,7 +220,7 @@ export function useCollaboration() {
 
   const releaseToolLock = useCallback(async (assetId, toolName) => {
     await fetch(`${API_BASE}/tools/release`, {
-      method: 'POST', headers: getAuth(),
+      method: 'POST', credentials: 'include', headers: getAuth(),
       body: JSON.stringify({ asset_id: assetId, tool_name: toolName }),
     });
   }, []);
@@ -237,13 +228,14 @@ export function useCollaboration() {
   // ── Technique status loader ─────────────────────────────────────────────────
   const loadTechniqueStatuses = useCallback(async (assetId) => {
     try {
-      const res = await fetch(`${API_BASE}/techniques/${assetId}/status`, { headers: getAuth() });
+      const res = await fetch(`${API_BASE}/techniques/${assetId}/status`, {
+        credentials: 'include', headers: getAuth(),
+      });
       const rows = await res.json();
       setTechniqueStatuses(prev => {
         const next = new Map(prev);
         rows.forEach(r => {
           next.set(`${assetId}:${r.t_code}`, r);
-          // Seed lock map from DB state
           if (r.lock_held_by) {
             setTechniqueLocks(lp => {
               const ln = new Map(lp);

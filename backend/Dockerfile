@@ -31,6 +31,14 @@ RUN mkdir -p /app/certs /var/lib/clamav
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# Drop to non-root user; pre-create writable directories with correct ownership
+RUN useradd -r -u 1000 -g root -s /bin/false orca && \
+    mkdir -p /app/certs /app/evidence /var/lib/clamav /tmp/orca_behavioral && \
+    chown -R orca:root /app /var/lib/clamav /tmp/orca_behavioral /entrypoint.sh && \
+    chmod -R g+w /app /var/lib/clamav /tmp/orca_behavioral
+
+USER orca
+
 EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]

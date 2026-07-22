@@ -19,7 +19,7 @@ const Btn = {
 };
 
 const ts = () => new Date().toLocaleTimeString([], { hour12: false });
-const getAuth = () => ({ 'Authorization': `Bearer ${localStorage.getItem('orca_token')}`, 'Content-Type': 'application/json' });
+const getAuth = () => ({ 'Content-Type': 'application/json' });
 
 function StatusDot({ status }) {
   const col = status === 'ONLINE' ? C.green : C.greyDim;
@@ -43,7 +43,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
 
   const handleDelete = async (agentId) => {
     try {
-      await fetch(`${API}/api/agent/${agentId}`, { method: 'DELETE', headers: getAuth() });
+      await fetch(`${API}/api/agent/${agentId}`, { method: 'DELETE', credentials: 'include', headers: getAuth() });
       setFleet(f => f.filter(a => a.agent_id !== agentId));
     } catch {}
     setConfirmDelete(null);
@@ -54,12 +54,12 @@ export default function AgentDeployModal({ isOpen, onClose }) {
     if (!isOpen) return;
     setLogs([]); setDeployDone(null);
 
-    fetch(`${API}/api/agent/list`, { headers: getAuth() })
+    fetch(`${API}/api/agent/list`, { credentials: 'include', headers: getAuth() })
       .then(r => r.ok ? r.json() : [])
       .then(setFleet)
       .catch(() => {});
 
-    fetch(`${API}/api/agent/deploy/psexec-status`, { headers: getAuth() })
+    fetch(`${API}/api/agent/deploy/psexec-status`, { credentials: 'include', headers: getAuth() })
       .then(r => r.json())
       .then(d => setPsexecOk(d.available))
       .catch(() => setPsexecOk(false));
@@ -72,7 +72,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
   useEffect(() => {
     if (!isOpen) return;
     const id = setInterval(() => {
-      fetch(`${API}/api/agent/list`, { headers: getAuth() })
+      fetch(`${API}/api/agent/list`, { credentials: 'include', headers: getAuth() })
         .then(r => r.ok ? r.json() : [])
         .then(setFleet)
         .catch(() => {});
@@ -88,6 +88,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
     try {
       const resp = await fetch(`${API}/api/agent/deploy`, {
         method: 'POST',
+        credentials: 'include',
         headers: getAuth(),
         body: JSON.stringify({ ip: ip.trim(), username: username.trim(), password }),
       });
@@ -118,7 +119,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
               setDeployDone(evt.data);
               setIsDeploying(false);
               // Refresh fleet after deployment
-              fetch(`${API}/api/agent/list`, { headers: getAuth() })
+              fetch(`${API}/api/agent/list`, { credentials: 'include', headers: getAuth() })
                 .then(r => r.json()).then(setFleet).catch(() => {});
             }
           } catch {}
@@ -268,7 +269,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
               <div style={{ padding: '10px 14px', background: 'rgba(255,170,0,0.05)', border: `1px solid ${C.amber}`, marginBottom: 12 }}>
                 <div style={{ ...mono, fontSize: 10, color: C.amber, marginBottom: 6 }}>MANUAL_INSTALL — Run on target workstation:</div>
                 <div style={{ ...mono, fontSize: 10, color: C.greyDim, userSelect: 'all', lineHeight: 1.6 }}>
-                  {`python -c "import urllib.request; urllib.request.urlretrieve('${window.location.origin}/api/agent/download/orca_agent.py?token=${localStorage.getItem('orca_token')}','orca_agent.py')" && pip install requests && python orca_agent.py`}
+                  {`python -c "import urllib.request; urllib.request.urlretrieve('${window.location.origin}/api/agent/download/orca_agent.py','orca_agent.py')" && pip install requests && python orca_agent.py`}
                 </div>
               </div>
             )}

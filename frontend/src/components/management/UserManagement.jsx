@@ -16,7 +16,7 @@ export default function UserManagement() {
   const fetchUsers = async () => {
     try {
       const res = await fetch(`${import.meta.env.VITE_API_URL}/api/admin/users`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('orca_token')}` }
+        credentials: 'include',
       });
       const data = await res.json();
       if (res.ok && Array.isArray(data)) {
@@ -31,10 +31,8 @@ export default function UserManagement() {
     try {
       const res = await fetch(`${import.meta.env.VITE_API_URL}/api/admin/users/create`, {
         method: 'POST',
-        headers: { 
-          'Authorization': `Bearer ${localStorage.getItem('orca_token')}`,
-          'Content-Type': 'application/json'
-        },
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newUser)
       });
 
@@ -58,7 +56,7 @@ export default function UserManagement() {
     try {
       const res = await fetch(`${import.meta.env.VITE_API_URL}/api/admin/users/${username}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('orca_token')}` }
+        credentials: 'include',
       });
 
       if (res.ok) {

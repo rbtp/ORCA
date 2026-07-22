@@ -4,7 +4,7 @@ import json
 import subprocess
 import asyncio
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, BackgroundTasks, status, Depends, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, status, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import uvicorn
@@ -38,8 +38,9 @@ cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "https://local
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 app.include_router(admin.router)
@@ -99,8 +100,8 @@ class MountRequest(BaseModel):
 # --- AUTH ENDPOINTS ---
 @app.post("/api/auth/login")
 @limiter.limit("5/minute")
-async def login(request: Request, login_data: LoginRequest):
-    """Verifies user credentials and returns a JWT."""
+async def login(request: Request, response: Response, login_data: LoginRequest):
+    """Verifies user credentials and sets an HttpOnly session cookie."""
     try:
         with db.engine.connect() as conn:
             query = text("SELECT id, username, password_hash, initials, role FROM users WHERE username = :u")
@@ -114,28 +115,52 @@ async def login(request: Request, login_data: LoginRequest):
         if not verify_password(login_data.password, db_password_hash):
             raise HTTPException(status_code=401, detail="INVALID_CREDENTIALS")
 
-        token = create_access_token(data={
-            "sub":      db_username,
-            "id":       db_id,
-            "role":     db_role,
-            "initials": db_initials,
-        })
+        from datetime import timedelta as _td
+        import time as _time
+        token_data = {"sub": db_username, "id": db_id, "role": db_role, "initials": db_initials}
+        token = create_access_token(data=token_data)
+        expires_at = int(_time.time()) + (60 * 60)  # 60-minute expiry in unix seconds
 
+        response.set_cookie(
+            key="orca_token",
+            value=token,
+            httponly=True,
+            secure=True,
+            samesite="strict",
+            max_age=3600,
+            path="/",
+        )
         return {
-            "access_token": token,
-            "token_type": "bearer",
-            "user": {
-                "username": db_username,
-                "initials": db_initials,
-                "role":     db_role,
-                "id":       db_id,
-            }
+            "user": {"username": db_username, "initials": db_initials, "role": db_role, "id": db_id},
+            "expires_at": expires_at,
         }
     except HTTPException:
         raise
     except Exception as e:
         print(f"[!] LOGIN_ERROR: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error during Authentication")
+
+
+@app.get("/api/auth/me")
+async def get_me(current_user: dict = Depends(get_current_user)):
+    """Returns the current user's profile from the validated session cookie."""
+    import time as _time
+    return {
+        "user": {
+            "username": current_user["sub"],
+            "role":     current_user["role"],
+            "initials": current_user["initials"],
+            "id":       current_user["id"],
+        },
+        "expires_at": current_user.get("exp"),
+    }
+
+
+@app.post("/api/auth/logout")
+async def logout(response: Response):
+    """Clears the session cookie."""
+    response.delete_cookie(key="orca_token", httponly=True, secure=True, samesite="strict", path="/")
+    return {"ok": True}
 
 # --- VELOCIRAPTOR ORCHESTRATION ---
 def run_vr_orchestrator(target_list, tsource, output_root, asset_id):
@@ -257,36 +282,12 @@ async def execute_asset_action(
         return {"status": "initiated", "target_count": len(target_list), "run_id": run_id}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/assets/remote-execute")
-async def remote_execute(
-    request: RemoteExecuteRequest,
-    current_user: dict = Depends(get_current_user)
-):
-    """SSE stream — pushes VR to remote asset, collects, pulls results back."""
-    return StreamingResponse(
-        vr_remote.run_remote_collection(
-            asset_id       = int(request.asset_id),
-            ip             = request.ip,
-            transport      = request.transport,
-            username       = request.username,
-            password       = request.password,
-            domain         = request.domain,
-            tsource        = request.tsource,
-            cleanup        = request.cleanup,
-            remap_mounted  = request.remap_mounted,
-            remap_original = request.remap_original,
-            vr_exe         = VR_EXE_WINDOWS,
-            data_root      = DATA_ROOT,
-        ),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+        print(f"[ERROR] execute_asset_action asset_id={request.asset_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/assets/vuln-scan")
+@limiter.limit("5/minute")
 async def vuln_scan(
     request: VulnScanRequest,
     current_user: dict = Depends(get_current_user)
@@ -476,7 +477,7 @@ async def get_vuln_results(
             """), {"id": asset_id}).fetchall()
         return [dict(r._mapping) for r in rows]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 def _parse_aim_output(output: str) -> dict:
@@ -585,7 +586,7 @@ async def mount_image(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/assets/dismount")
@@ -635,7 +636,7 @@ async def dismount_image(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/assets/{asset_id}/mounts")

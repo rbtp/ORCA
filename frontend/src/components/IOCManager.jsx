@@ -18,7 +18,6 @@ export default function IOCManager() {
   });
 
   const API_BASE = `${import.meta.env.VITE_API_URL}/api/ioc`;
-  const token = () => localStorage.getItem('orca_token');
 
   const iocTypes = {
     HASH_SHA256: { label: 'SHA256', regex: /^[a-fA-F0-9]{64}$/ },
@@ -36,7 +35,8 @@ export default function IOCManager() {
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/library`, {
-        headers: { Authorization: `Bearer ${token()}` },
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
       });
       if (res.ok) setIocs(await res.json());
     } catch (err) {
@@ -54,7 +54,8 @@ export default function IOCManager() {
       for (let i = 0; i < iocs.length; i++) {
         const ioc = iocs[i];
         const res = await fetch(`${API_BASE}/search?query=${encodeURIComponent(ioc.value)}`, {
-          headers: { Authorization: `Bearer ${token()}` },
+          credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
         });
         if (res.ok) {
           const data = await res.json();
@@ -86,7 +87,8 @@ export default function IOCManager() {
     try {
       const res = await fetch(`${API_BASE}/library`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newIoc),
       });
       if (!res.ok) { setError('SAVE_FAILED'); return; }
@@ -104,7 +106,8 @@ export default function IOCManager() {
     try {
       await fetch(`${API_BASE}/library/${ioc.id}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${token()}` },
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
       });
       setIocs(iocs.filter(i => i.id !== ioc.id));
       setSelectedIoc(null);

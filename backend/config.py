@@ -29,7 +29,7 @@ class _Config:
     DB_URL: str = (
         os.environ.get("DATABASE_URL") or
         os.environ.get("ORCA_DB_URL") or
-        "postgresql://postgres:password@localhost:5432/orca_db"
+        ""
     )
 
     # ── Data root ─────────────────────────────────────────────────────────────
@@ -66,6 +66,20 @@ class _Config:
         os.path.join(_BASE, "bin", "arsenal", f"aim_cli{_EXE}")
     )
 
+    # ── Memory / forensics binaries ───────────────────────────────────────────
+    VOL3_BASE: str = os.environ.get(
+        "ORCA_VOL3_BASE",
+        os.path.join(_BASE, "bin", "remora", "volatility3")
+    )
+    WINPMEM_BASE: str = os.environ.get(
+        "ORCA_WINPMEM_BASE",
+        os.path.join(_BASE, "bin", "remora", "volatility3")
+    )
+    CLAM_BASE: str = os.environ.get(
+        "ORCA_CLAM_BASE",
+        os.path.join(_BASE, "bin", "clamav")
+    )
+
     # ── Parallel collection ───────────────────────────────────────────────────
     VR_MAX_WORKERS: int = int(os.environ.get("ORCA_VR_MAX_WORKERS", "5"))
 
@@ -74,8 +88,11 @@ cfg = _Config()
 
 
 def _validate_required_env():
-    missing = [v for v in ("DATABASE_URL", "TLS_CERT_PATH", "TLS_KEY_PATH") if not os.environ.get(v)]
+    required = ("DATABASE_URL", "TLS_CERT_PATH", "TLS_KEY_PATH")
+    missing = [v for v in required if not os.environ.get(v)]
     if missing:
         raise RuntimeError(f"FATAL: Missing required environment variables: {', '.join(missing)}")
+    if not cfg.DB_URL:
+        raise RuntimeError("FATAL: DATABASE_URL or ORCA_DB_URL must be set")
 
 _validate_required_env()

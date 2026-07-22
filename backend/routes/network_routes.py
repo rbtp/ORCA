@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
-from auth_utils import get_current_user
+from auth_utils import get_current_user, require_admin
 
 router = APIRouter(prefix="/api/network", tags=["network"])
 
@@ -95,9 +95,7 @@ async def detected_identity(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/regenerate-cert")
-async def regenerate_cert(current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="ADMIN_PRIVILEGES_REQUIRED")
+async def regenerate_cert(current_user: dict = Depends(require_admin)):
 
     ip, hostname = _get_server_identity()
     san = f"IP:{ip},DNS:{hostname},DNS:orca-backend,DNS:localhost"

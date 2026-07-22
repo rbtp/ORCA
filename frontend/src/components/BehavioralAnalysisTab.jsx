@@ -9,10 +9,7 @@ const C = {
   orange:  '#fb8c00',
 };
 
-const getAuth = () => {
-  const tok = localStorage.getItem('orca_token');
-  return { Authorization: `Bearer ${tok}` };
-};
+const getAuth = () => ({ 'Content-Type': 'application/json' });
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -123,7 +120,7 @@ function ArtifactPickerModal({ assetId, onSelect, onClose }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`${API}/api/behavioral/asset/${assetId}/artifact-files`, { headers: getAuth() })
+    fetch(`${API}/api/behavioral/asset/${assetId}/artifact-files`, { headers: getAuth(), credentials: 'include' })
       .then(r => r.ok ? r.json() : [])
       .then(data => { setFiles(data); setLoading(false); })
       .catch(() => setLoading(false));
@@ -163,7 +160,7 @@ function HistoryDropdown({ assetId, onSelect, onClose }) {
   const [jobs, setJobs] = useState([]);
 
   useEffect(() => {
-    fetch(`${API}/api/behavioral/asset/${assetId}/jobs`, { headers: getAuth() })
+    fetch(`${API}/api/behavioral/asset/${assetId}/jobs`, { headers: getAuth(), credentials: 'include' })
       .then(r => r.ok ? r.json() : [])
       .then(setJobs)
       .catch(() => {});
@@ -233,7 +230,7 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
   // --- Load latest job on mount ---
   useEffect(() => {
     if (!assetId) return;
-    fetch(`${API}/api/behavioral/asset/${assetId}/latest`, { headers: getAuth() })
+    fetch(`${API}/api/behavioral/asset/${assetId}/latest`, { headers: getAuth(), credentials: 'include' })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return;
@@ -261,8 +258,7 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
   const connectStream = useCallback((jid) => {
     if (evtSourceRef.current) evtSourceRef.current.close();
 
-    const token = localStorage.getItem('orca_token');
-    const url = `${API}/api/behavioral/stream/${jid}?token=${token}`;
+    const url = `${API}/api/behavioral/stream/${jid}`;
     const es = new EventSource(url);
     evtSourceRef.current = es;
 
@@ -325,7 +321,7 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
       if (jobId || phase === 'PIPELINE_COMPLETE') {
         const jid = jobId;
         setTimeout(() => {
-          fetch(`${API}/api/behavioral/job/${jid}`, { headers: getAuth() })
+          fetch(`${API}/api/behavioral/job/${jid}`, { headers: getAuth(), credentials: 'include' })
             .then(r => r.ok ? r.json() : null)
             .then(data => {
               if (!data) return;
@@ -366,10 +362,9 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
     }
 
     try {
-      const token = localStorage.getItem('orca_token');
       const res = await fetch(`${API}/api/behavioral/submit`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        credentials: 'include',
         body: fd,
       });
       if (!res.ok) {
@@ -388,7 +383,7 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
 
   // --- Load a specific historical job ---
   const loadJob = (jid) => {
-    fetch(`${API}/api/behavioral/job/${jid}`, { headers: getAuth() })
+    fetch(`${API}/api/behavioral/job/${jid}`, { headers: getAuth(), credentials: 'include' })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return;

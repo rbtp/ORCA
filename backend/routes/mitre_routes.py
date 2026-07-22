@@ -7,15 +7,12 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Union, Any, Dict, Optional
 import json, os, re, uuid, subprocess, shutil, yaml, asyncio, glob
+import logging
 
-from auth_utils import get_current_user, get_current_user_sse
+from auth_utils import get_current_user, require_admin
+from config import cfg
 
 router = APIRouter(prefix="/api/mitre")
-
-def require_admin(user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="ADMIN_ROLE_REQUIRED")
-    return user
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
 class MapUpdatePayload(BaseModel):
@@ -39,14 +36,12 @@ class MemoryRunRequest(BaseModel):
     os_profile: Optional[str] = "windows"
     args: Optional[List[str]] = []
     symbol_paths: Optional[str] = None
-    vol3_base: Optional[str] = r"C:\Users\Sentinel\Desktop\Tests\ORCAWEB\backend\bin\remora\volatility3"
 
 class MemoryFullScanRequest(BaseModel):
     asset_id: str
     image_path: str
     os_profile: Optional[str] = "windows"
     symbol_paths: Optional[str] = None
-    vol3_base: Optional[str] = r"C:\Users\Sentinel\Desktop\Tests\ORCAWEB\backend\bin\remora\volatility3"
 
 class MemoryActorScanRequest(BaseModel):
     asset_id: str
@@ -54,29 +49,25 @@ class MemoryActorScanRequest(BaseModel):
     actor_name: str
     os_profile: Optional[str] = "windows"
     symbol_paths: Optional[str] = None
-    vol3_base: Optional[str] = r"C:\Users\Sentinel\Desktop\Tests\ORCAWEB\backend\bin\remora\volatility3"
 
 class MemoryAcquireRequest(BaseModel):
     asset_id: str
     destination_path: str
-    winpmem_base: Optional[str] = r"C:\Users\Sentinel\Desktop\Tests\ORCAWEB\backend\bin\remora\volatility3"
 
 class MemoryDumpRequest(BaseModel):
     asset_id: str
     image_path: str
     pid: int
     destination_path: str
-    vol3_base: Optional[str] = r"C:\Users\Sentinel\Desktop\Tests\ORCAWEB\backend\bin\remora\volatility3"
 
 class ClamScanRequest(BaseModel):
     asset_id: str
     scan_path: str
     recursive: bool = True
     remove: bool = False
-    clam_base: Optional[str] = r"C:\Users\Sentinel\Desktop\Tests\ORCAWEB\backend\bin\clamav"
 
 class ClamUpdateRequest(BaseModel):
-    clam_base: Optional[str] = r"C:\Users\Sentinel\Desktop\Tests\ORCAWEB\backend\bin\clamav"
+    pass
 
 
 def _get_clam_db_args(clam_base: str) -> List[str]:
@@ -362,7 +353,8 @@ def get_all_techniques(current_user: dict = Depends(get_current_user)):
             ORDER BY t_code ASC
         """)).mappings().all()
         return [dict(r) for r in results]
-    except:
+    except Exception as _e:
+        logging.error(f"[mitre_routes] {_e}")
         return []
     finally:
         session.close()
@@ -637,7 +629,8 @@ async def get_tcode_notes(asset_id: int, t_code: str, current_user: dict = Depen
         """), {"aid": asset_id, "t": t_code}).mappings().all()
         return [{"id": r['id'], "text": r['note_text'], "type": r['note_type'],
                  "time": r['created_at'].strftime("%H:%M") if r['created_at'] else ""} for r in results]
-    except:
+    except Exception as _e:
+        logging.error(f"[mitre_routes] {_e}")
         return []
     finally:
         session.close()
@@ -726,7 +719,8 @@ def get_all_cases(current_user: dict = Depends(get_current_user)):
                  "case_type": r['case_type'] or 'INVESTIGATION',
                  "groups": r['selected_groups'].split(",") if r['selected_groups'] else [],
                  "mapData": json.loads(r['map_data']) if isinstance(r['map_data'], str) else (r['map_data'] or [])} for r in results]
-    except:
+    except Exception as _e:
+        logging.error(f"[mitre_routes] {_e}")
         return []
     finally:
         session.close()
@@ -1307,7 +1301,8 @@ def get_case_assets(case_name: str, current_user: dict = Depends(get_current_use
             FROM public.assets a WHERE a.case_name = :name
         """), {"name": case_name}).mappings().all()
         return [dict(r) for r in results]
-    except:
+    except Exception as _e:
+        logging.error(f"[mitre_routes] {_e}")
         return []
     finally:
         session.close()
@@ -1520,12 +1515,12 @@ async def get_vol_plugins(os_profile: str = "windows", current_user: dict = Depe
 async def acquire_memory(payload: MemoryAcquireRequest, user: dict = Depends(get_current_user)):
     winpmem_exe = None
     for name in ["winpmem_mini_x64_rc2.exe", "winpmem.exe", "winpmem_mini_x64.exe", "winpmem64.exe"]:
-        candidate = os.path.join(payload.winpmem_base, name)
+        candidate = os.path.join(cfg.WINPMEM_BASE, name)
         if os.path.exists(candidate):
             winpmem_exe = candidate
             break
     if not winpmem_exe:
-        raise HTTPException(status_code=404, detail=f"winpmem not found in {payload.winpmem_base}")
+        raise HTTPException(status_code=404, detail="winpmem binary not found in configured WINPMEM_BASE")
 
     dest = payload.destination_path
     dest_dir = os.path.dirname(dest)
@@ -1559,17 +1554,17 @@ async def acquire_memory(payload: MemoryAcquireRequest, user: dict = Depends(get
 
 @router.post("/memory/dump")
 async def dump_process_memory(payload: MemoryDumpRequest, user: dict = Depends(get_current_user)):
-    if not os.path.exists(payload.vol3_base):
-        raise HTTPException(status_code=404, detail=f"VOL3_PATH_NOT_FOUND: {payload.vol3_base}")
+    if not os.path.exists(cfg.VOL3_BASE):
+        raise HTTPException(status_code=404, detail="Volatility3 not found — check ORCA_VOL3_BASE configuration")
     os.makedirs(payload.destination_path, exist_ok=True)
-    cmd = _build_vol_cmd(payload.vol3_base, payload.image_path, "windows.dumpfiles",
+    cmd = _build_vol_cmd(cfg.VOL3_BASE, payload.image_path, "windows.dumpfiles",
                          None, ["--pid", str(payload.pid), "--dump-dir", payload.destination_path])
 
     async def event_stream():
         yield f"data: {json.dumps({'type': 'log', 'data': f'Dumping PID {payload.pid} -> {payload.destination_path}'})}\n\n"
         try:
             process = await asyncio.create_subprocess_exec(
-                *cmd, cwd=payload.vol3_base,
+                *cmd, cwd=cfg.VOL3_BASE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             async for raw_line in process.stdout:
@@ -1591,14 +1586,14 @@ async def dump_process_memory(payload: MemoryDumpRequest, user: dict = Depends(g
 
 @router.post("/memory/run")
 async def run_volatility_streaming(payload: MemoryRunRequest, user: dict = Depends(get_current_user)):
-    if not os.path.exists(payload.vol3_base):
-        raise HTTPException(status_code=404, detail=f"VOL3_PATH_NOT_FOUND: {payload.vol3_base}")
+    if not os.path.exists(cfg.VOL3_BASE):
+        raise HTTPException(status_code=404, detail="Volatility3 not found — check ORCA_VOL3_BASE configuration")
 
     async def event_stream():
         yield f"data: {json.dumps({'type': 'log', 'data': f'Queued {len(payload.plugins)} plugin(s)'})}\n\n"
         for plugin in payload.plugins:
             yield f"data: {json.dumps({'type': 'plugin_start', 'data': plugin})}\n\n"
-            async for evt in _stream_plugin(payload.vol3_base, payload.image_path, plugin,
+            async for evt in _stream_plugin(cfg.VOL3_BASE, payload.image_path, plugin,
                                             payload.symbol_paths, payload.args,
                                             PLUGIN_MITRE_MAP, PLUGIN_MITRE_CONFIDENCE):
                 yield f"data: {json.dumps(evt)}\n\n"
@@ -1609,15 +1604,15 @@ async def run_volatility_streaming(payload: MemoryRunRequest, user: dict = Depen
 
 @router.post("/memory/fullscan")
 async def run_volatility_fullscan(payload: MemoryFullScanRequest, user: dict = Depends(get_current_user)):
-    if not os.path.exists(payload.vol3_base):
-        raise HTTPException(status_code=404, detail=f"VOL3_PATH_NOT_FOUND: {payload.vol3_base}")
+    if not os.path.exists(cfg.VOL3_BASE):
+        raise HTTPException(status_code=404, detail="Volatility3 not found — check ORCA_VOL3_BASE configuration")
     all_plugins = [p for group in VOL_PLUGINS_BY_OS.get(payload.os_profile.lower(), VOL_PLUGINS_BY_OS["windows"]).values() for p in group]
 
     async def event_stream():
         yield f"data: {json.dumps({'type': 'log', 'data': f'FULL_SCAN: {len(all_plugins)} plugins queued'})}\n\n"
         for plugin in all_plugins:
             yield f"data: {json.dumps({'type': 'plugin_start', 'data': plugin})}\n\n"
-            async for evt in _stream_plugin(payload.vol3_base, payload.image_path, plugin,
+            async for evt in _stream_plugin(cfg.VOL3_BASE, payload.image_path, plugin,
                                             payload.symbol_paths, [], PLUGIN_MITRE_MAP, PLUGIN_MITRE_CONFIDENCE):
                 yield f"data: {json.dumps(evt)}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'data': 'FULL_SCAN_COMPLETE'})}\n\n"
@@ -1627,8 +1622,8 @@ async def run_volatility_fullscan(payload: MemoryFullScanRequest, user: dict = D
 
 @router.post("/memory/actorscan")
 async def run_volatility_actor_scan(payload: MemoryActorScanRequest, user: dict = Depends(get_current_user)):
-    if not os.path.exists(payload.vol3_base):
-        raise HTTPException(status_code=404, detail=f"VOL3_PATH_NOT_FOUND: {payload.vol3_base}")
+    if not os.path.exists(cfg.VOL3_BASE):
+        raise HTTPException(status_code=404, detail="Volatility3 not found — check ORCA_VOL3_BASE configuration")
     actor_techniques = THREAT_ACTORS.get(payload.actor_name)
     if not actor_techniques:
         raise HTTPException(status_code=404, detail=f"ACTOR_NOT_FOUND: {payload.actor_name}")
@@ -1639,7 +1634,7 @@ async def run_volatility_actor_scan(payload: MemoryActorScanRequest, user: dict 
         yield f"data: {json.dumps({'type': 'log', 'data': f'Techniques: {len(actor_techniques)} -> Plugins: {len(plugins)}'})}\n\n"
         for plugin in plugins:
             yield f"data: {json.dumps({'type': 'plugin_start', 'data': plugin})}\n\n"
-            async for evt in _stream_plugin(payload.vol3_base, payload.image_path, plugin,
+            async for evt in _stream_plugin(cfg.VOL3_BASE, payload.image_path, plugin,
                                             payload.symbol_paths, [], PLUGIN_MITRE_MAP, PLUGIN_MITRE_CONFIDENCE):
                 yield f"data: {json.dumps(evt)}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'data': 'ACTOR_SCAN_COMPLETE'})}\n\n"
@@ -1759,12 +1754,12 @@ async def load_clam_results(asset_id: int, user: dict = Depends(get_current_user
 
 @router.post("/scan/clam/update")
 async def update_clam_defs(payload: ClamUpdateRequest, user: dict = Depends(get_current_user)):
-    freshclam_exe = os.path.join(payload.clam_base, "freshclam.exe")
+    freshclam_exe = os.path.join(cfg.CLAM_BASE, "freshclam.exe")
     if not os.path.exists(freshclam_exe):
-        raise HTTPException(status_code=404, detail=f"FRESHCLAM_NOT_FOUND: {freshclam_exe}")
+        raise HTTPException(status_code=404, detail="freshclam not found — check ORCA_CLAM_BASE configuration")
     try:
         result = subprocess.run(
-            [freshclam_exe, f"--datadir={payload.clam_base}", "--stdout"],
+            [freshclam_exe, f"--datadir={cfg.CLAM_BASE}", "--stdout"],
             capture_output=True, text=True, timeout=300
         )
         output = (result.stdout + result.stderr).strip()
@@ -1782,15 +1777,16 @@ async def update_clam_defs(payload: ClamUpdateRequest, user: dict = Depends(get_
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="freshclam timed out after 300s")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"[clam/update] {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/scan/clam")
 async def run_clamscan_streaming(payload: ClamScanRequest, user: dict = Depends(get_current_user)):
-    exe_path = os.path.join(payload.clam_base, "clamscan.exe")
+    exe_path = os.path.join(cfg.CLAM_BASE, "clamscan.exe")
     if not os.path.exists(exe_path):
-        raise HTTPException(status_code=404, detail=f"CLAMSCAN_NOT_FOUND: {exe_path}")
+        raise HTTPException(status_code=404, detail="clamscan not found — check ORCA_CLAM_BASE configuration")
 
-    db_args = _get_clam_db_args(payload.clam_base)
+    db_args = _get_clam_db_args(cfg.CLAM_BASE)
     cmd = [exe_path] + db_args + ["--stdout"]
     if payload.recursive:
         cmd.append("-r")
@@ -1817,7 +1813,7 @@ async def run_clamscan_streaming(payload: ClamScanRequest, user: dict = Depends(
                 elif "Scanned files:" in line:
                     try:
                         scanned = int(line.split(":")[1].strip())
-                    except:
+                    except Exception:
                         pass
                     yield f"data: {json.dumps({'type': 'summary', 'data': line})}\n\n"
                 elif line.startswith("---") or "Infected files:" in line or "Engine version:" in line:
@@ -1881,7 +1877,7 @@ async def _notify_user(user_id: int, event_type: str, payload: dict):
             pass
 
 @router.get("/collaboration/stream")
-async def collaboration_stream(current_user: dict = Depends(get_current_user_sse)):
+async def collaboration_stream(current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
     q: asyncio.Queue = asyncio.Queue(maxsize=50)
     _sse_clients[user_id] = q
@@ -2208,13 +2204,16 @@ async def acquire_tool_lock(payload: ToolLockPayload, current_user: dict = Depen
                 "expires_at": existing["expires_at"].isoformat() if existing["expires_at"] else None,
             }
 
-        ttl = "2 hours" if tool_name in ("volatility", "clamav") else "30 minutes"
-        session.execute(text(f"""
+        is_long = tool_name in ("volatility", "clamav")
+        session.execute(text("""
             INSERT INTO public.tool_locks (asset_id, tool_name, locked_by, locked_at, expires_at)
-            VALUES (:aid, :tool, :uid, NOW(), NOW() + INTERVAL '{ttl}')
+            VALUES (:aid, :tool, :uid, NOW(),
+                    CASE WHEN :is_long THEN NOW() + INTERVAL '2 hours'
+                         ELSE NOW() + INTERVAL '30 minutes' END)
             ON CONFLICT (asset_id, tool_name) DO UPDATE
-                SET expires_at = NOW() + INTERVAL '{ttl}'
-        """), {"aid": asset_id, "tool": tool_name, "uid": user_id})
+                SET expires_at = CASE WHEN :is_long THEN NOW() + INTERVAL '2 hours'
+                                      ELSE NOW() + INTERVAL '30 minutes' END
+        """), {"aid": asset_id, "tool": tool_name, "uid": user_id, "is_long": is_long})
 
         session.commit()
 
@@ -2459,7 +2458,8 @@ async def get_tcode_notes_v2(asset_id: int, t_code: str, current_user: dict = De
             "author_initials": r["author_initials"],
             "author_username": r["author_username"],
         } for r in results]
-    except:
+    except Exception as _e:
+        logging.error(f"[mitre_routes] {_e}")
         return []
     finally:
         session.close()
@@ -2524,7 +2524,8 @@ async def get_case_notes_v2(case_name: str, current_user: dict = Depends(get_cur
             "author_initials": r["author_initials"],
             "author_username": r["author_username"],
         } for r in results]
-    except:
+    except Exception as _e:
+        logging.error(f"[mitre_routes] {_e}")
         return []
     finally:
         session.close()

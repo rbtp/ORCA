@@ -2,10 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 
 const API_BASE = `${import.meta.env.VITE_API_URL}/api/profiles`;
 
-const getAuthHeaders = () => ({
-  'Authorization': `Bearer ${localStorage.getItem('orca_token')}`,
-  'Content-Type': 'application/json',
-});
+const getAuthHeaders = () => ({ 'Content-Type': 'application/json' });
 
 export default function InvestigationProfileManager() {
   const [profiles, setProfiles] = useState([]);
@@ -29,8 +26,8 @@ export default function InvestigationProfileManager() {
 
   useEffect(() => {
     Promise.all([
-      fetch(`${API_BASE}`, { headers: getAuthHeaders() }).then(r => r.json()),
-      fetch(`${API_BASE}/tcodes/available`, { headers: getAuthHeaders() }).then(r => r.json()),
+      fetch(`${API_BASE}`, { credentials: 'include', headers: getAuthHeaders() }).then(r => r.json()),
+      fetch(`${API_BASE}/tcodes/available`, { credentials: 'include', headers: getAuthHeaders() }).then(r => r.json()),
     ]).then(([profs, tcodes]) => {
       setProfiles(Array.isArray(profs) ? profs : []);
       setAvailableTcodes(Array.isArray(tcodes) ? tcodes : []);
@@ -93,6 +90,7 @@ export default function InvestigationProfileManager() {
       const method = editingProfile ? 'PUT' : 'POST';
       const res = await fetch(url, {
         method,
+        credentials: 'include',
         headers: getAuthHeaders(),
         body: JSON.stringify(body),
       });
@@ -120,6 +118,7 @@ export default function InvestigationProfileManager() {
     try {
       const res = await fetch(`${API_BASE}/${deleteTarget.id}`, {
         method: 'DELETE',
+        credentials: 'include',
         headers: getAuthHeaders(),
       });
       if (!res.ok) return;

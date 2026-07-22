@@ -78,17 +78,13 @@ export default function CaseDetail({
 
   const API_BASE = `${import.meta.env.VITE_API_URL}/api/mitre`;
 
-  const getAuthHeaders = () => ({
-    'Authorization': `Bearer ${localStorage.getItem('orca_token')}`,
-    'Content-Type': 'application/json',
-  });
+  const getAuthHeaders = () => ({ 'Content-Type': 'application/json' });
 
   const getCurrentUserRole = () => {
     try {
-      const token = localStorage.getItem('orca_token');
-      if (!token) return 'analyst';
-      const payload = JSON.parse(atob(token.split('.')[1]));
-      return payload.role || 'analyst';
+      const userStr = localStorage.getItem('orca_user');
+      if (!userStr) return 'analyst';
+      return JSON.parse(userStr).role || 'analyst';
     } catch { return 'analyst'; }
   };
   const userRole = getCurrentUserRole();
@@ -111,7 +107,7 @@ export default function CaseDetail({
 
   const loadCompletion = async () => {
     try {
-      const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/completion`, { headers: getAuthHeaders() });
+      const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/completion`, { credentials: 'include', headers: getAuthHeaders() });
       if (res.ok) setCompletion(await res.json());
     } catch {}
   };
@@ -120,7 +116,7 @@ export default function CaseDetail({
 
   useEffect(() => {
     if (deployOpen && psexecAvailable === null) {
-      fetch(`${import.meta.env.VITE_API_URL}/api/deploy/psexec-status`, { headers: getAuthHeaders() })
+      fetch(`${import.meta.env.VITE_API_URL}/api/deploy/psexec-status`, { credentials: 'include', headers: getAuthHeaders() })
         .then(r => r.json())
         .then(d => setPsexecAvailable(d.available))
         .catch(() => setPsexecAvailable(false));
@@ -138,7 +134,7 @@ export default function CaseDetail({
     const identifier = caseName || caseData.country;
     if (!identifier) { setEvidenceTacticList([]); setIsEvidenceOpen(true); return; }
     setIsFetchingTactics(true);
-    fetch(`${API_BASE}/threat-profile/${encodeURIComponent(identifier)}?asset_id=${investigatingAssetId}`, { headers: getAuthHeaders() })
+    fetch(`${API_BASE}/threat-profile/${encodeURIComponent(identifier)}?asset_id=${investigatingAssetId}`, { credentials: 'include', headers: getAuthHeaders() })
       .then(r => r.json())
       .then(data => { setEvidenceTacticList(Array.isArray(data) ? data : []); setIsEvidenceOpen(true); })
       .catch(() => { setEvidenceTacticList([]); setIsEvidenceOpen(true); })
@@ -175,7 +171,7 @@ export default function CaseDetail({
   const confirmDeleteAsset = async () => {
     try {
       const res = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/assets/${deleteTarget.id}`,
-        { method: 'DELETE', headers: getAuthHeaders() });
+        { method: 'DELETE', credentials: 'include', headers: getAuthHeaders() });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
         throw new Error(detail.detail || `HTTP ${res.status}`);
@@ -207,7 +203,7 @@ export default function CaseDetail({
     autoSaveTimerRef.current = setTimeout(() => {
       fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/map-sync`, {
         method: 'POST',
-        headers: getAuthHeaders(),
+        credentials: 'include', headers: getAuthHeaders(),
         body: JSON.stringify({ nodes: activeNodes, links: activeLinks }),
       }).catch(() => {});
     }, 2000);
@@ -218,7 +214,7 @@ export default function CaseDetail({
     setSaveStatus('SAVING...');
     try {
       const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/map-sync`, {
-        method: 'POST', headers: getAuthHeaders(),
+        method: 'POST', credentials: 'include', headers: getAuthHeaders(),
         body: JSON.stringify({ nodes: activeNodes || [], links: activeLinks || [] }),
       });
       if (res.ok) { setSaveStatus('SAVED_SUCCESSFULLY'); setTimeout(() => setSaveStatus('READY'), 2000); }
@@ -227,14 +223,14 @@ export default function CaseDetail({
   };
 
   useEffect(() => {
-    fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/notes/v2`, { headers: getAuthHeaders() })
+    fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/notes/v2`, { credentials: 'include', headers: getAuthHeaders() })
       .then(r => r.json()).then(setNotes).catch(() => setNotes([]));
   }, [caseName]);
 
   const handleAddNote = async () => {
     if (!newNote.trim()) return;
     const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/notes/v2`, {
-      method: 'POST', headers: getAuthHeaders(),
+      method: 'POST', credentials: 'include', headers: getAuthHeaders(),
       body: JSON.stringify({ text: newNote, note_type: noteType }),
     });
     if (res.ok) {
@@ -253,16 +249,16 @@ export default function CaseDetail({
   const handleRegisterAsset = async () => {
     try {
       const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets`, {
-        method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(assetForm),
+        method: 'POST', credentials: 'include', headers: getAuthHeaders(), body: JSON.stringify(assetForm),
       });
       if (res.ok) {
         if (assetForm.analysisMode !== 'UNKNOWN') {
-          const assetsRes = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets`, { headers: getAuthHeaders() });
+          const assetsRes = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets`, { credentials: 'include', headers: getAuthHeaders() });
           const assets = await assetsRes.json();
           const newAsset = assets.find(a => a.hostname === assetForm.hostname);
           if (newAsset) {
             await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets/${newAsset.id}/mode`, {
-              method: 'PATCH', headers: getAuthHeaders(),
+              method: 'PATCH', credentials: 'include', headers: getAuthHeaders(),
               body: JSON.stringify({ analysis_mode: assetForm.analysisMode }),
             });
             setAssetModes(prev => ({ ...prev, [String(newAsset.id)]: assetForm.analysisMode }));
@@ -276,7 +272,7 @@ export default function CaseDetail({
 
   const loadMountSessions = async (assetId) => {
     try {
-      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/${assetId}/mounts`, { headers: getAuthHeaders() });
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/${assetId}/mounts`, { credentials: 'include', headers: getAuthHeaders() });
       if (r.ok) { const data = await r.json(); setMountSessions(prev => ({ ...prev, [String(assetId)]: data })); }
     } catch {}
   };
@@ -287,7 +283,7 @@ export default function CaseDetail({
     setMountLoading(prev => ({ ...prev, [String(assetId)]: true }));
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/mount`, {
-        method: 'POST', headers: getAuthHeaders(),
+        method: 'POST', credentials: 'include', headers: getAuthHeaders(),
         body: JSON.stringify({ asset_id: assetId, image_path: form.imagePath, drive_letter: form.driveLetter || null, provider: form.provider || 'auto', readonly: true }),
       });
       const d = await r.json();
@@ -304,7 +300,7 @@ export default function CaseDetail({
   const handleDismount = async (assetId, mountId) => {
     setMountLoading(prev => ({ ...prev, [String(assetId)]: true }));
     try {
-      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/dismount?asset_id=${assetId}&mount_id=${mountId}`, { method: 'POST', headers: getAuthHeaders() });
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/dismount?asset_id=${assetId}&mount_id=${mountId}`, { method: 'POST', credentials: 'include', headers: getAuthHeaders() });
       const d = await r.json();
       if (r.ok) { await loadMountSessions(assetId); }
       else { alert('DISMOUNT_ERROR: ' + (d.detail || 'Unknown error')); }
@@ -317,7 +313,7 @@ export default function CaseDetail({
   const handleGeneratePackage = async (assetId) => {
     setPkgGenerating(prev => ({ ...prev, [String(assetId)]: true }));
     try {
-      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/${assetId}/package`, { method: 'POST', headers: getAuthHeaders() });
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/${assetId}/package`, { method: 'POST', credentials: 'include', headers: getAuthHeaders() });
       if (!r.ok) { const e = await r.json(); alert(`PACKAGE_ERROR: ${e.detail || r.statusText}`); return; }
       const data = await r.json();
       setPkgData(prev => ({ ...prev, [String(assetId)]: data }));
@@ -331,7 +327,7 @@ export default function CaseDetail({
     if (!pkg?.token) return;
     if (!window.confirm('Revoke this package token? The agent cannot submit further results.')) return;
     try {
-      await fetch(`${import.meta.env.VITE_API_URL}/api/packages/${pkg.token}`, { method: 'DELETE', headers: getAuthHeaders() });
+      await fetch(`${import.meta.env.VITE_API_URL}/api/packages/${pkg.token}`, { method: 'DELETE', credentials: 'include', headers: getAuthHeaders() });
       setPkgData(prev => { const n = { ...prev }; delete n[String(assetId)]; return n; });
     } catch (e) { alert(`REVOKE_ERROR: ${e.message}`); }
   };
@@ -395,7 +391,7 @@ export default function CaseDetail({
 
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/deploy/bulk`, {
-        method: 'POST', headers: getAuthHeaders(),
+        method: 'POST', credentials: 'include', headers: getAuthHeaders(),
         body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password }),
       });
 
@@ -441,7 +437,7 @@ export default function CaseDetail({
 
   useEffect(() => {
     if ((caseData.case_type || 'INVESTIGATION') !== 'INCIDENT_RESPONSE') return;
-    fetch(`${import.meta.env.VITE_API_URL}/api/deploy/triage-categories`, { headers: getAuthHeaders() })
+    fetch(`${import.meta.env.VITE_API_URL}/api/deploy/triage-categories`, { credentials: 'include', headers: getAuthHeaders() })
       .then(r => r.json())
       .then(d => { setTriageCategories(d.categories || []); setTriageSelected(new Set(d.categories || [])); })
       .catch(() => {});
@@ -469,7 +465,7 @@ export default function CaseDetail({
     setTriageStatus(initial);
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/deploy/triage`, {
-        method: 'POST', headers: getAuthHeaders(),
+        method: 'POST', credentials: 'include', headers: getAuthHeaders(),
         body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password, categories: Array.from(triageSelected), transport: triageCreds.transport, domain: triageCreds.domain || null }),
       });
       if (!r.ok) { const e = await r.json(); alert(`TRIAGE_ERROR: ${e.detail || r.statusText}`); setTriageRunning(false); return; }
@@ -711,7 +707,7 @@ export default function CaseDetail({
                           <select value={assetModes[aId] || a.analysis_mode || 'UNKNOWN'} onChange={async e => {
                             const mode = e.target.value;
                             setAssetModes(prev => ({ ...prev, [aId]: mode }));
-                            await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets/${a.id}/mode`, { method: 'PATCH', headers: getAuthHeaders(), body: JSON.stringify({ analysis_mode: mode }) });
+                            await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets/${a.id}/mode`, { method: 'PATCH', credentials: 'include', headers: getAuthHeaders(), body: JSON.stringify({ analysis_mode: mode }) });
                             if (onRefresh) onRefresh();
                           }} style={{ background: '#0a0a0a', border: '1px solid #2a2a2a', color: modeCol, fontFamily: 'monospace', fontSize: 9, letterSpacing: 1, padding: '3px 6px', cursor: 'pointer', outline: 'none' }}>
                             {['UNKNOWN', 'LIVE_REMOTE', 'DEAD_DISK_LOCAL', 'DEAD_DISK_REMOTE'].map(m => <option key={m} value={m}>{m}</option>)}

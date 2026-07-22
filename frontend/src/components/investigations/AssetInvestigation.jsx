@@ -15,10 +15,7 @@ const AssetInvestigation = forwardRef(({ asset }, ref) => {
   const searchIdentifier = asset?.case_name || asset?.focus_country || asset?.country_focus;
 
   // AUTH HEADER HELPER
-  const getAuthHeaders = () => ({
-    "Authorization": `Bearer ${localStorage.getItem('orca_token')}`,
-    "Content-Type": "application/json"
-  });
+  const getAuthHeaders = () => ({ "Content-Type": "application/json" });
 
   // FORCED DOWNLOAD TRIGGER & REFRESH HANDLES
   useImperativeHandle(ref, () => ({
@@ -28,6 +25,7 @@ const AssetInvestigation = forwardRef(({ asset }, ref) => {
       try {
         const response = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/execute`, {
           method: "POST",
+          credentials: 'include',
           headers: getAuthHeaders(),
           body: JSON.stringify({
             action: 'Generate KAPE Modules',
@@ -59,7 +57,8 @@ const AssetInvestigation = forwardRef(({ asset }, ref) => {
     setIsLoading(true);
     try {
       const res = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/threat-profile/${searchIdentifier}?asset_id=${asset?.id}`, {
-        headers: getAuthHeaders()
+        credentials: 'include',
+        headers: getAuthHeaders(),
       });
       const data = await res.json();
       setTacticList(data);
@@ -76,7 +75,8 @@ const AssetInvestigation = forwardRef(({ asset }, ref) => {
   useEffect(() => {
     if (selectedTactic) {
       fetch(`${import.meta.env.VITE_API_URL}/api/mitre/library/${selectedTactic}`, {
-        headers: getAuthHeaders()
+        credentials: 'include',
+        headers: getAuthHeaders(),
       })
         .then(res => res.json())
         .then(data => setProtocolData(data))
@@ -94,6 +94,7 @@ const AssetInvestigation = forwardRef(({ asset }, ref) => {
     try {
       await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/evidence/${asset.id}/${selectedTactic}/verdict`, {
         method: 'POST',
+        credentials: 'include',
         headers: getAuthHeaders(),
         body: JSON.stringify({ verdict })
       });

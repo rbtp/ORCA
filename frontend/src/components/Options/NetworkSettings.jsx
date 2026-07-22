@@ -3,10 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 
 const API = `${import.meta.env.VITE_API_URL}/api/network`;
 
-const getAuthHeaders = () => ({
-  'Authorization': `Bearer ${localStorage.getItem('orca_token')}`,
-  'Content-Type': 'application/json',
-});
+const getAuthHeaders = () => ({ 'Content-Type': 'application/json' });
 
 const fmtDate = (iso) => {
   if (!iso) return '—';
@@ -37,7 +34,7 @@ export default function NetworkSettings() {
   const fetchCertInfo = async () => {
     setCertLoading(true);
     try {
-      const r = await fetch(`${API}/cert-info`, { headers: getAuthHeaders() });
+      const r = await fetch(`${API}/cert-info`, { credentials: 'include', headers: getAuthHeaders() });
       if (r.ok) setCertInfo(await r.json());
       else setCertInfo(null);
     } catch { setCertInfo(null); }
@@ -47,7 +44,7 @@ export default function NetworkSettings() {
   const fetchIdentity = async () => {
     setIdentityLoading(true);
     try {
-      const r = await fetch(`${API}/detected-identity`, { headers: getAuthHeaders() });
+      const r = await fetch(`${API}/detected-identity`, { credentials: 'include', headers: getAuthHeaders() });
       if (r.ok) setIdentity(await r.json());
     } catch { }
     finally { setIdentityLoading(false); }
@@ -65,6 +62,7 @@ export default function NetworkSettings() {
     try {
       const r = await fetch(`${API}/regenerate-cert`, {
         method: 'POST',
+        credentials: 'include',
         headers: getAuthHeaders(),
       });
       const data = await r.json();

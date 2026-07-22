@@ -13,7 +13,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const API = (path) => `/api${path}`;
-const authHdr = () => ({ Authorization: `Bearer ${localStorage.getItem("orca_token")}` });
+const authHdr = () => ({ 'Content-Type': 'application/json' });
 
 const STATUS_COLORS = {
   COMPLETE:          "#00ff41",
@@ -41,7 +41,7 @@ export default function RemotePackagePanel({ assetId, hostname, caseName }) {
 
   const fetchProgress = async () => {
     try {
-      const resp = await fetch(API(`/ingest/remote/${assetId}/progress`), { headers: authHdr() });
+      const resp = await fetch(API(`/ingest/remote/${assetId}/progress`), { credentials: 'include', headers: authHdr() });
       if (resp.status === 401) { stopPoll(); return; }
       if (!resp.ok) return;
       const data = await resp.json();
@@ -63,6 +63,7 @@ export default function RemotePackagePanel({ assetId, hostname, caseName }) {
     try {
       const resp = await fetch(API(`/assets/${assetId}/package`), {
         method: "POST",
+        credentials: 'include',
         headers: authHdr(),
       });
       if (!resp.ok) {
@@ -95,6 +96,7 @@ export default function RemotePackagePanel({ assetId, hostname, caseName }) {
     try {
       await fetch(API(`/packages/${pkg.token}`), {
         method: "DELETE",
+        credentials: 'include',
         headers: authHdr(),
       });
       setPkg(null);

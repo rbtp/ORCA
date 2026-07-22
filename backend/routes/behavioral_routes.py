@@ -4,7 +4,8 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, UploadFi
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from core.database_manager import db
-from auth_utils import get_current_user, get_current_user_sse
+from auth_utils import get_current_user
+from config import cfg
 
 router = APIRouter(prefix="/api/behavioral", tags=["behavioral"])
 
@@ -94,16 +95,29 @@ async def submit_behavioral_analysis(
     tmp_dir = f"/tmp/orca_behavioral/{job_id}"
     is_temp = False
 
+    _MAX_UPLOAD = 256 * 1024 * 1024  # 256 MB application-layer limit
+
     if file is not None:
         os.makedirs(tmp_dir, exist_ok=True)
         safe_name = os.path.basename(file.filename or "uploaded_file")
         actual_path = os.path.join(tmp_dir, safe_name)
         content = await file.read()
+        if len(content) > _MAX_UPLOAD:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise HTTPException(status_code=413, detail="File exceeds 256 MB limit")
         with open(actual_path, 'wb') as fout:
             fout.write(content)
         display_name = safe_name
         is_temp = True
     elif file_path:
+        # Sandbox: file_path must resolve inside the evidence root
+        _allowed_roots = [
+            os.path.realpath(cfg.DATA_ROOT),
+            os.path.realpath("/app/evidence"),
+        ]
+        resolved = os.path.realpath(file_path)
+        if not any(resolved.startswith(root + os.sep) or resolved == root for root in _allowed_roots):
+            raise HTTPException(status_code=403, detail="file_path is outside the permitted evidence directory")
         actual_path = file_path
         display_name = os.path.basename(file_path)
     else:
@@ -147,7 +161,7 @@ async def submit_behavioral_analysis(
 
 
 @router.get("/stream/{job_id}")
-async def stream_analysis(job_id: str, current_user: dict = Depends(get_current_user_sse)):
+async def stream_analysis(job_id: str, current_user: dict = Depends(get_current_user)):
     q = _job_queues.get(job_id)
 
     async def event_gen():

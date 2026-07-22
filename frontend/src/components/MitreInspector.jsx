@@ -55,13 +55,9 @@ export default function MitreInspector() {
 
   // --- INITIAL SYNC WITH AUTH ---
   useEffect(() => {
-    const token = localStorage.getItem('orca_token');
-
     fetch(`${API_BASE}/sidebar`, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      }
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
     })
       .then(r => {
         if (!r.ok) throw new Error("AUTH_REJECTED");
@@ -89,12 +85,9 @@ export default function MitreInspector() {
     }));
 
     try {
-      const token = localStorage.getItem('orca_token');
       const response = await fetch(`${API_BASE}/${type}s/${identifier}`, {
-        headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-        }
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
       });
       
       const fullDossier = await response.json();

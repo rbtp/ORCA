@@ -28,20 +28,17 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
   const isConnected = status === "CONNECTED_STABLE";
   const API_BASE = `${import.meta.env.VITE_API_URL}/api/mitre`;
 
-  const getAuthHeaders = () => ({
-    "Authorization": `Bearer ${localStorage.getItem('orca_token')}`,
-    "Content-Type": "application/json"
-  });
+  const getAuthHeaders = () => ({ "Content-Type": "application/json" });
 
   useEffect(() => {
     const loadData = async () => {
       try {
-        const headers = getAuthHeaders();
+        const fetchOpts = { credentials: 'include', headers: getAuthHeaders() };
         const profilesUrl = `${import.meta.env.VITE_API_URL}/api/profiles`;
         const [mitreRes, casesRes, profilesRes] = await Promise.all([
-          fetch(`${API_BASE}/geopolitical/groups`, { headers }),
-          fetch(`${API_BASE}/cases`, { headers }),
-          fetch(profilesUrl, { headers }),
+          fetch(`${API_BASE}/geopolitical/groups`, fetchOpts),
+          fetch(`${API_BASE}/cases`, fetchOpts),
+          fetch(profilesUrl, fetchOpts),
         ]);
         if (!mitreRes.ok || !casesRes.ok) throw new Error("DATA_SYNC_FAILED");
         setMitreData(await mitreRes.json());
@@ -65,7 +62,8 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
   const fetchPkgProgress = async (assetId) => {
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/ingest/remote/${assetId}/progress`, {
-        headers: getAuthHeaders()
+        credentials: 'include',
+        headers: getAuthHeaders(),
       });
       if (r.status === 401) return;
       if (r.ok) {
@@ -118,7 +116,8 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
     setStatus(`FETCHING_ASSETS: ${caseName}`);
     try {
       const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assets`, {
-        headers: getAuthHeaders()
+        credentials: 'include',
+        headers: getAuthHeaders(),
       });
       const assetData = res.ok ? await res.json() : [];
       setSelectedCase({ ...caseObj, assets: assetData });
@@ -137,7 +136,7 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
     setCases(prev => [...prev, newCase]);
     try {
       await fetch(`${API_BASE}/cases`, {
-        method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(newCase),
+        method: 'POST', credentials: 'include', headers: getAuthHeaders(), body: JSON.stringify(newCase),
       });
     } catch (err) { console.error("DB_COMMIT_ERROR:", err); }
   };
@@ -147,7 +146,7 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
     setCases(prev => prev.filter(c => (c.case_name || c.name) !== caseName));
     try {
       await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}`, {
-        method: 'DELETE', headers: getAuthHeaders()
+        method: 'DELETE', credentials: 'include', headers: getAuthHeaders()
       });
     } catch (err) { console.error("DB_DELETE_ERROR:", err); }
   };

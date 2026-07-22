@@ -39,9 +39,8 @@ export default function App() {
 
   useEffect(() => {
     if (user && activeNav === 'Dashboard') {
-      const token = localStorage.getItem('orca_token');
       fetch(`${API_BASE}/cases`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        credentials: 'include',
       })
         .then(res => {
           if (res.ok) { setDbStatus("CONNECTED_STABLE"); return res.json(); }
@@ -52,7 +51,7 @@ export default function App() {
         .catch(() => setDbStatus("OFFLINE_ERR_500"));
 
       fetch(`${import.meta.env.VITE_API_URL}/api/agent/list`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        credentials: 'include',
       })
         .then(r => r.ok ? r.json() : [])
         .then(setAgentFleet)
