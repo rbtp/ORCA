@@ -25,6 +25,15 @@ fi
 mkdir -p /var/lib/clamav
 freshclam --quiet 2>/dev/null || echo "[ORCA] WARN: freshclam update failed, using existing signatures"
 
+# Verify investigation working-directory mount is writable
+if touch /app/cases/.orca_mount_check 2>/dev/null; then
+    rm -f /app/cases/.orca_mount_check
+    CASES_HOST="${CASES_DIR:-<ORCA project folder>/cases}"
+    echo "[ORCA] Cases mount OK — investigation folders will be created at: ${CASES_HOST}"
+else
+    echo "[ORCA] WARN: /app/cases is not writable — 'Create local working directory' will not work. Set CASES_DIR in .env and restart."
+fi
+
 # Pre-warm LibreOffice so first PDF export doesn't incur 5-15s cold-start delay
 echo "[ORCA] Pre-warming LibreOffice..."
 printf '<html><body>ORCA</body></html>' > /tmp/orca_warmup.html

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Body, BackgroundTasks, Request
+from fastapi import APIRouter, HTTPException, Depends, Body, BackgroundTasks, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from core.database_manager import db, get_db
 from services.mitre_service import MitreIntelService
@@ -274,6 +274,66 @@ def _get_plugins_for_techniques(technique_ids: list, os_profile: str = "windows"
                 seen.add(full)
     return matched
 
+_WIN_DRIVE_RE = re.compile(r'^([A-Za-z]):[/\\](.*)', re.DOTALL)
+_MEMORY_DUMPS_DIR = "/app/memory-dumps"   # container path of the MEMORY_DUMPS_DIR bind-mount
+
+def _resolve_image_path(image_path: str):
+    """
+    Normalise a user-supplied memory image path for the Linux container.
+    Returns (resolved_path: str, error: str | None).
+
+    Resolution order for Windows paths (C:\\...):
+      1. /mnt/{drive}/...         — MEMORY_DUMPS_DIR=C:\\ in .env mounts C: here
+      2. /{drive}/...             — alternative mount convention
+      3. /app/memory-dumps/{name} — MEMORY_DUMPS_DIR pointing at the dump's directory
+    """
+    if not image_path:
+        return image_path, "image_path is empty"
+
+    m = _WIN_DRIVE_RE.match(image_path)
+    if m:
+        drive = m.group(1).lower()
+        rest  = m.group(2).replace("\\", "/")
+        filename = rest.split("/")[-1]
+        candidates = [
+            f"/mnt/{drive}/{rest}",              # MEMORY_DUMPS_DIR=C:\ → C: at /mnt/c
+            f"/{drive}/{rest}",                  # WSL2 / alternative convention
+            f"{_MEMORY_DUMPS_DIR}/{rest}",       # MEMORY_DUMPS_DIR=C:\ → C: at /app/memory-dumps
+            f"{_MEMORY_DUMPS_DIR}/{filename}",   # MEMORY_DUMPS_DIR=the dump's folder directly
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate, None
+        drive_upper = drive.upper()
+        return image_path, (
+            f"Windows path '{image_path}' is not accessible from inside the Docker container.\n"
+            f"To fix, set MEMORY_DUMPS_DIR in your .env to the folder containing the dump:\n"
+            f"  MEMORY_DUMPS_DIR={drive_upper}:\\{chr(92).join(rest.split('/')[:-1]) or ''}\n"
+            f"Then restart: docker compose up -d --no-deps orca-backend\n"
+            f"The file will be available at /app/memory-dumps/{filename}\n"
+            f"Or copy the dump into the ORCA memory-dumps folder and use /app/memory-dumps/{filename}"
+        )
+
+    # Linux path — if it's a directory, look for the first image file inside it
+    if os.path.isdir(image_path):
+        _img_exts = {".raw", ".mem", ".dmp", ".vmem", ".lime", ".bin", ".img", ".dd"}
+        try:
+            for fname in sorted(os.listdir(image_path)):
+                if os.path.splitext(fname)[1].lower() in _img_exts:
+                    return os.path.join(image_path, fname), None
+        except PermissionError:
+            pass
+        return image_path, (
+            f"Path '{image_path}' is a directory with no recognised memory image files.\n"
+            f"Drop a .raw/.mem/.dmp/.vmem file into that folder, then click BROWSE to select it."
+        )
+
+    if not os.path.exists(image_path):
+        return image_path, f"File not found: {image_path}"
+
+    return image_path, None
+
+
 def _build_vol_cmd(vol3_base, image_path, plugin, symbol_paths, args):
     vol_py = os.path.join(vol3_base, "vol.py")
     cmd = ["python", vol_py, "--offline", "-f", image_path]
@@ -287,7 +347,11 @@ def _build_vol_cmd(vol3_base, image_path, plugin, symbol_paths, args):
 async def _stream_plugin(vol3_base, image_path, plugin, symbol_paths, extra_args, pmap, pconf):
     columns = None
     row_count = 0
-    cmd = _build_vol_cmd(vol3_base, image_path, plugin, symbol_paths, extra_args)
+    resolved, path_err = _resolve_image_path(image_path)
+    if path_err:
+        yield {"type": "plugin_error", "data": {"plugin": plugin, "error": path_err}}
+        return
+    cmd = _build_vol_cmd(vol3_base, resolved, plugin, symbol_paths, extra_args)
     plugin_key = plugin.split(".")[-1]
     mapped_techs = pmap.get(plugin_key, [])
     confidence_map = pconf.get(plugin_key, {})
@@ -328,7 +392,13 @@ async def _stream_plugin(vol3_base, image_path, plugin, symbol_paths, extra_args
 def to_dict(row):
     if row is None:
         return None
-    data = dict(row._mapping) if hasattr(row, '_mapping') else dict(row)
+    if hasattr(row, '_mapping'):
+        data = dict(row._mapping)
+    elif hasattr(row, '__table__'):
+        # SQLAlchemy ORM model instance
+        data = {c.name: getattr(row, c.name) for c in row.__table__.columns}
+    else:
+        data = dict(row)
     return {
         "id": data.get('id') or data.get('s_code') or data.get('m_code') or "",
         "stix_id": data.get('stix_id') or "",
@@ -405,16 +475,16 @@ async def get_unified_timeline(
     if not source_filter or "MFT" in source_filter:
         dc = _date_clauses("si_created", "mft")
         sc = _filter_clauses("file_name", "full_path")
-        unions.append(f"""
-            SELECT si_created AS ts, 'MFT' AS source, file_name AS title, full_path AS detail,
-                CASE WHEN in_use = FALSE THEN 'DELETED'
-                     WHEN si_lt_fn = TRUE THEN 'TIMESTOMP'
-                     WHEN has_ads = TRUE  THEN 'ADS'
-                     ELSE 'NORMAL' END AS flag,
-                file_size::text AS extra
-            FROM mft_entries
-            WHERE asset_id = :aid AND si_created IS NOT NULL AND is_dir = FALSE {dc}{sc}
-        """)
+        unions.append(
+            "SELECT si_created AS ts, 'MFT' AS source, file_name AS title, full_path AS detail,"
+            " CASE WHEN in_use = FALSE THEN 'DELETED'"
+            " WHEN si_lt_fn = TRUE THEN 'TIMESTOMP'"
+            " WHEN has_ads = TRUE THEN 'ADS'"
+            " ELSE 'NORMAL' END AS flag,"
+            " file_size::text AS extra"
+            " FROM mft_entries"
+            f" WHERE asset_id = :aid AND si_created IS NOT NULL AND is_dir = FALSE {dc}{sc}"  # nosec B608 — dc/sc are server-computed parameterized clauses; no user input
+        )
 
     # Event Logs
     event_log_tcodes = [
@@ -428,17 +498,17 @@ async def get_unified_timeline(
         ts_expr = "to_timestamp((raw_data->>'EventTime')::double precision)"
         dc = _date_clauses(ts_expr, "el")
         sc = _filter_clauses("raw_data->>'EventID'", "COALESCE(raw_data->>'Message', raw_data->>'Description', '')")
-        unions.append(f"""
-            SELECT {ts_expr} AS ts, t_code AS source,
-                COALESCE(raw_data->>'EventID', raw_data->>'EventId', '?') AS title,
-                COALESCE(raw_data->>'Message', raw_data->>'Description', '') AS detail,
-                COALESCE(raw_data->>'Level', '') AS flag,
-                COALESCE(raw_data->>'Computer', '') AS extra
-            FROM evidence
-            WHERE asset_id = :aid AND t_code = ANY(:el_tcodes)
-              AND raw_data ? 'EventTime' AND (raw_data->>'EventTime') IS NOT NULL
-              {dc}{sc}
-        """)
+        unions.append(
+            f"SELECT {ts_expr} AS ts, t_code AS source,"  # nosec B608 — ts_expr is a hardcoded SQL expression; no user input
+            " COALESCE(raw_data->>'EventID', raw_data->>'EventId', '?') AS title,"
+            " COALESCE(raw_data->>'Message', raw_data->>'Description', '') AS detail,"
+            " COALESCE(raw_data->>'Level', '') AS flag,"
+            " COALESCE(raw_data->>'Computer', '') AS extra"
+            " FROM evidence"
+            " WHERE asset_id = :aid AND t_code = ANY(:el_tcodes)"
+            " AND raw_data ? 'EventTime' AND (raw_data->>'EventTime') IS NOT NULL"
+            f" {dc}{sc}"  # nosec B608 — dc/sc are server-computed parameterized clauses
+        )
 
     # Prefetch
     if not source_filter or "PREFETCH" in source_filter:
@@ -576,17 +646,16 @@ async def get_evidence_rows_paginated(
         where_search = ""
 
     with db.engine.connect() as conn:
-        total = conn.execute(text(f"""
-            SELECT COUNT(*) FROM evidence
-            WHERE asset_id = :aid AND t_code = :t {where_search}
-        """), params).scalar() or 0
+        total = conn.execute(text(
+            "SELECT COUNT(*) FROM evidence"
+            f" WHERE asset_id = :aid AND t_code = :t {where_search}"  # nosec B608 — where_search is either empty or ' AND (raw_data::text ILIKE :q)'; no user data in clause structure
+        ), params).scalar() or 0
 
-        rows = conn.execute(text(f"""
-            SELECT raw_data FROM evidence
-            WHERE asset_id = :aid AND t_code = :t {where_search}
-            ORDER BY id ASC
-            LIMIT :limit OFFSET :offset
-        """), params).fetchall()
+        rows = conn.execute(text(
+            "SELECT raw_data FROM evidence"
+            f" WHERE asset_id = :aid AND t_code = :t {where_search}"  # nosec B608 — same as above
+            " ORDER BY id ASC LIMIT :limit OFFSET :offset"
+        ), params).fetchall()
 
     evidence = [
         json.loads(r.raw_data) if isinstance(r.raw_data, str) else r.raw_data
@@ -711,12 +780,13 @@ def get_all_cases(current_user: dict = Depends(get_current_user)):
     session = db.get_session()
     try:
         results = session.execute(text(
-            "SELECT name, team_name, mission_lead, focus_country, selected_groups, support, personnel, map_data, case_type FROM public.cases"
+            "SELECT name, team_name, mission_lead, focus_country, selected_groups, support, personnel, map_data, case_type, local_dir FROM public.cases"
         )).mappings().all()
         return [{"name": r['name'], "teamName": r['team_name'], "missionLead": r['mission_lead'],
                  "country": r['focus_country'], "support": r['support'] or "N/A",
                  "personnel": r['personnel'] or "0",
                  "case_type": r['case_type'] or 'INVESTIGATION',
+                 "local_dir": r['local_dir'],
                  "groups": r['selected_groups'].split(",") if r['selected_groups'] else [],
                  "mapData": json.loads(r['map_data']) if isinstance(r['map_data'], str) else (r['map_data'] or [])} for r in results]
     except Exception as _e:
@@ -730,6 +800,7 @@ def save_case(case_data: dict, current_user: dict = Depends(get_current_user)):
     session = db.get_session()
     try:
         groups_csv = ",".join(case_data.get('groups') or []) if isinstance(case_data.get('groups'), list) else ""
+        case_name = case_data.get('name')
         session.execute(text("""
             INSERT INTO public.cases (name, team_name, mission_lead, focus_country, selected_groups, support, personnel, case_type)
             VALUES (:name, :team, :lead, :country, :groups, :support, :personnel, :case_type)
@@ -738,12 +809,33 @@ def save_case(case_data: dict, current_user: dict = Depends(get_current_user)):
                 focus_country=EXCLUDED.focus_country, selected_groups=EXCLUDED.selected_groups,
                 support=EXCLUDED.support, personnel=EXCLUDED.personnel,
                 case_type=EXCLUDED.case_type
-        """), {"name": case_data.get('name'), "team": case_data.get('teamName'), "lead": case_data.get('missionLead'),
+        """), {"name": case_name, "team": case_data.get('teamName'), "lead": case_data.get('missionLead'),
                "country": case_data.get('country'), "groups": groups_csv,
                "support": case_data.get('support', 'N/A'), "personnel": case_data.get('personnel', '0'),
                "case_type": case_data.get('case_type', 'INVESTIGATION')})
+
+        local_dir = None
+        host_path = None
+        if case_data.get('create_local_dir'):
+            safe_name = re.sub(r'[^A-Za-z0-9_\-.]', '_', case_name or 'unnamed').strip('_') or 'unnamed'
+            local_dir = f"/app/cases/{safe_name}"
+            try:
+                os.makedirs(local_dir, exist_ok=True)
+                session.execute(text(
+                    "UPDATE public.cases SET local_dir = :dir WHERE name = :name"
+                ), {"dir": local_dir, "name": case_name})
+                # Build the host-side path for display in the UI
+                cases_dir_env = os.environ.get("CASES_DIR", "").strip()
+                if cases_dir_env:
+                    host_path = cases_dir_env.rstrip("/\\") + os.sep + safe_name
+                else:
+                    host_path = f"<ORCA folder>{os.sep}cases{os.sep}{safe_name}"
+            except OSError as e:
+                logging.warning(f"[cases] Could not create local dir {local_dir}: {e}")
+                local_dir = None
+
         session.commit()
-        return {"status": "SUCCESS", "message": "CASE_UPSERTED"}
+        return {"status": "SUCCESS", "message": "CASE_UPSERTED", "local_dir": local_dir, "host_path": host_path}
     except Exception as e:
         session.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -880,17 +972,17 @@ async def query_mft(
     # ── Build and execute queries ────────────────────────────────────────────
     where_sql = " AND ".join(where)
 
-    row_sql = f"""
-        SELECT entry_num, parent_num, file_name, full_path,
-               is_dir, in_use, has_ads, si_lt_fn, copied, file_size, alt_names,
-               si_created, si_modified, si_accessed, si_rc,
-               fn_created, fn_modified, fn_accessed
-        FROM mft_entries
-        WHERE {where_sql}
-        ORDER BY {order}
-        LIMIT :limit OFFSET :offset
-    """
-    count_sql = f"SELECT COUNT(*) FROM mft_entries WHERE {where_sql}"
+    row_sql = (
+        "SELECT entry_num, parent_num, file_name, full_path,"
+        " is_dir, in_use, has_ads, si_lt_fn, copied, file_size, alt_names,"
+        " si_created, si_modified, si_accessed, si_rc,"
+        " fn_created, fn_modified, fn_accessed"
+        " FROM mft_entries"
+        f" WHERE {where_sql}"  # nosec B608 — where_sql built from hardcoded column conditions; user values are :parameterized
+        f" ORDER BY {order}"  # nosec B608 — order is one of hardcoded column names validated server-side
+        " LIMIT :limit OFFSET :offset"
+    )
+    count_sql = f"SELECT COUNT(*) FROM mft_entries WHERE {where_sql}"  # nosec B608 — same as above
 
     # Get total file/meta counts from sentinel evidence row
     with db.engine.connect() as conn:
@@ -1141,21 +1233,20 @@ async def delete_case(case_name: str, db: Session = Depends(get_db), current_use
         p = {"name": case_name}
         asset_subq = "SELECT id FROM assets WHERE case_name = :name"
 
-        db.execute(text(f"DELETE FROM artifact_results  WHERE asset_id IN ({asset_subq})"), p)
-        db.execute(text(f"DELETE FROM evidence          WHERE asset_id IN ({asset_subq})"), p)
-        db.execute(text(f"DELETE FROM mft_entries       WHERE asset_id IN ({asset_subq})"), p)
-        db.execute(text(f"DELETE FROM asset_evidence    WHERE asset_id IN ({asset_subq})"), p)
-        db.execute(text(f"DELETE FROM tcode_notes       WHERE asset_id IN ({asset_subq})"), p)
-        db.execute(text(f"DELETE FROM technique_locks   WHERE asset_id IN ({asset_subq})"), p)
-        db.execute(text(f"DELETE FROM tool_locks        WHERE asset_id IN ({asset_subq})"), p)
-        db.execute(text(f"DELETE FROM mount_sessions    WHERE asset_id IN ({asset_subq})"), p)
-        db.execute(text(f"DELETE FROM package_tokens    WHERE asset_id IN ({asset_subq})"), p)
-        db.execute(text(f"DELETE FROM vuln_results      WHERE asset_id IN ({asset_subq})"), p)
-        db.execute(text(f"""
-            DELETE FROM network_links
-            WHERE source_id IN ({asset_subq})
-               OR target_id IN ({asset_subq})
-        """), p)
+        # nosec B608 — asset_subq is a hardcoded literal string; :name is parameterized
+        db.execute(text(f"DELETE FROM artifact_results  WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(f"DELETE FROM evidence          WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(f"DELETE FROM mft_entries       WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(f"DELETE FROM asset_evidence    WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(f"DELETE FROM tcode_notes       WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(f"DELETE FROM technique_locks   WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(f"DELETE FROM tool_locks        WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(f"DELETE FROM mount_sessions    WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(f"DELETE FROM package_tokens    WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(f"DELETE FROM vuln_results      WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(  # nosec B608 — asset_subq is hardcoded literal
+            f"DELETE FROM network_links WHERE source_id IN ({asset_subq}) OR target_id IN ({asset_subq})"  # nosec B608
+        ), p)
         db.execute(text("DELETE FROM ioc_scans  WHERE case_name = :name"), p)
         db.execute(text("DELETE FROM case_notes WHERE case_name = :name"), p)
         db.execute(text("DELETE FROM assets     WHERE case_name = :name"), p)
@@ -1295,7 +1386,7 @@ def get_case_assets(case_name: str, current_user: dict = Depends(get_current_use
         results = session.execute(text("""
             SELECT a.id, a.hostname, a.ip, a.os, a.type, a.country_focus,
                 a.os_version, a.form_factor, a.asset_notes, a.analysis_mode, a.mac_address,
-                a.asset_type, a.net_config_text, a.net_config_filename,
+                a.asset_type, a.net_config_text, a.net_config_filename, a.local_dir,
                 (SELECT string_agg(DISTINCT ar.t_code, ',')
                  FROM artifact_results ar WHERE ar.asset_id = a.id AND ar.evidence_imported = True) as found_t_codes
             FROM public.assets a WHERE a.case_name = :name
@@ -1359,13 +1450,14 @@ def add_asset(case_name: str, asset_data: dict, current_user: dict = Depends(get
         }
         asset_type = type_map.get(asset_data.get('type', 'Unknown'), 'Unknown')
 
-        session.execute(text("""
+        result = session.execute(text("""
             INSERT INTO public.assets
                 (case_name, hostname, ip, subnet_mask, gateway, mac_address,
                  os, os_version, form_factor, asset_notes, asset_type)
             VALUES
                 (:case, :host, :ip, :subnet, :gateway, :mac,
                  :os, :version, :form, :notes, :asset_type)
+            RETURNING id
         """), {
             "case":       case_name,
             "host":       asset_data.get('hostname'),
@@ -1379,6 +1471,24 @@ def add_asset(case_name: str, asset_data: dict, current_user: dict = Depends(get
             "notes":      asset_data.get('assetNotes'),
             "asset_type": asset_type,
         })
+        asset_id = result.scalar()
+
+        # If the parent investigation has a local working directory, create an asset subfolder
+        case_row = session.execute(text(
+            "SELECT local_dir FROM public.cases WHERE name = :name"
+        ), {"name": case_name}).mappings().first()
+        if case_row and case_row['local_dir']:
+            hostname = asset_data.get('hostname') or f"asset_{asset_id}"
+            safe_host = re.sub(r'[^A-Za-z0-9_\-.]', '_', hostname).strip('_') or f"asset_{asset_id}"
+            asset_dir = f"{case_row['local_dir']}/{safe_host}"
+            try:
+                os.makedirs(asset_dir, exist_ok=True)
+                session.execute(text(
+                    "UPDATE public.assets SET local_dir = :dir WHERE id = :id"
+                ), {"dir": asset_dir, "id": asset_id})
+            except OSError as e:
+                logging.warning(f"[assets] Could not create asset dir {asset_dir}: {e}")
+
         session.commit()
         return {"status": "SUCCESS"}
     except Exception as e:
@@ -1450,50 +1560,44 @@ async def get_threat_profile(identifier: str, asset_id: Optional[int] = None, cu
         else:
             return []
 
-        result = session.execute(text(f"""
-            SELECT mt.t_code, mt.name AS technique_name,
-                string_agg(DISTINCT ta.group_name, ', ') as associated_actors,
-                ref.live_analysis, ref.dead_disk_analysis, ref.collection_strategy AS bluf_text,
-                COALESCE(ar.verdict, 'Undetermined') as verdict,
-                COALESCE(ar.evidence_imported, False) as evidence_imported,
-                mt.platforms,
-                mt.parent_t_code,
-                COALESCE(mt.is_subtechnique, FALSE) as is_subtechnique,
-                (SELECT COUNT(*) > 0 FROM public.tcode_notes tn
-                 WHERE tn.asset_id = :asset_id AND tn.t_code = mt.t_code) AS has_notes,
-                (SELECT tn2.author_initials FROM public.tcode_notes tn2
-                 WHERE tn2.asset_id = :asset_id AND tn2.t_code = mt.t_code
-                 ORDER BY tn2.created_at DESC LIMIT 1) AS last_note_author
-            FROM threat_attribution ta
-            JOIN mitre_actors ma ON ta.group_name = ma.name
-            JOIN mitre_relationships ma_rel ON ma.stix_id = ma_rel.source_ref
-            JOIN mitre_techniques mt ON ma_rel.target_ref = mt.stix_id
-            JOIN ref_artifact_library ref ON mt.t_code = ref.t_code
-            LEFT JOIN artifact_results ar ON (mt.t_code = ar.t_code AND ar.asset_id = :asset_id)
-            WHERE {actor_filter}
-              AND ma_rel.relationship_type = 'uses'
-              AND NOT COALESCE(mt.is_deprecated, FALSE)
-              AND NOT COALESCE(mt.is_revoked, FALSE)
-              AND (
-                  :asset_id IS NULL
-                  OR mt.platforms IS NULL
-                  OR mt.platforms = '[]'::jsonb
-                  OR EXISTS (
-                      SELECT 1 FROM assets a
-                      WHERE a.id = :asset_id
-                      AND (
-                          a.os = 'Unknown'
-                          OR mt.platforms @> to_jsonb(ARRAY[
-                              CASE WHEN a.os = 'Network' THEN 'Network Devices' ELSE a.os END
-                          ]::text[])
-                      )
-                  )
-              )
-            GROUP BY mt.t_code, mt.name, ref.live_analysis, ref.dead_disk_analysis,
-                ref.collection_strategy, ar.verdict, ar.evidence_imported,
-                mt.platforms, mt.parent_t_code, mt.is_subtechnique
-            ORDER BY mt.t_code ASC
-        """), params).mappings().all()
+        result = session.execute(text(
+            "SELECT mt.t_code, mt.name AS technique_name,"
+            " string_agg(DISTINCT ta.group_name, ', ') as associated_actors,"
+            " ref.live_analysis, ref.dead_disk_analysis, ref.collection_strategy AS bluf_text,"
+            " COALESCE(ar.verdict, 'Undetermined') as verdict,"
+            " COALESCE(ar.evidence_imported, False) as evidence_imported,"
+            " mt.platforms, mt.parent_t_code,"
+            " COALESCE(mt.is_subtechnique, FALSE) as is_subtechnique,"
+            " (SELECT COUNT(*) > 0 FROM public.tcode_notes tn"
+            "  WHERE tn.asset_id = :asset_id AND tn.t_code = mt.t_code) AS has_notes,"
+            " (SELECT tn2.author_initials FROM public.tcode_notes tn2"
+            "  WHERE tn2.asset_id = :asset_id AND tn2.t_code = mt.t_code"
+            "  ORDER BY tn2.created_at DESC LIMIT 1) AS last_note_author"
+            " FROM threat_attribution ta"
+            " JOIN mitre_actors ma ON ta.group_name = ma.name"
+            " JOIN mitre_relationships ma_rel ON ma.stix_id = ma_rel.source_ref"
+            " JOIN mitre_techniques mt ON ma_rel.target_ref = mt.stix_id"
+            " JOIN ref_artifact_library ref ON mt.t_code = ref.t_code"
+            " LEFT JOIN artifact_results ar ON (mt.t_code = ar.t_code AND ar.asset_id = :asset_id)"
+            f" WHERE {actor_filter}"  # nosec B608 — actor_filter is one of two hardcoded literals; user values use :country/:groups params
+            " AND ma_rel.relationship_type = 'uses'"
+            " AND NOT COALESCE(mt.is_deprecated, FALSE)"
+            " AND NOT COALESCE(mt.is_revoked, FALSE)"
+            " AND ("
+            " :asset_id IS NULL OR mt.platforms IS NULL OR mt.platforms = '[]'::jsonb"
+            " OR EXISTS ("
+            "     SELECT 1 FROM assets a WHERE a.id = :asset_id AND ("
+            "         a.os = 'Unknown'"
+            "         OR mt.platforms @> to_jsonb(ARRAY["
+            "             CASE WHEN a.os = 'Network' THEN 'Network Devices' ELSE a.os END"
+            "         ]::text[])"
+            "     )"
+            " ))"
+            " GROUP BY mt.t_code, mt.name, ref.live_analysis, ref.dead_disk_analysis,"
+            " ref.collection_strategy, ar.verdict, ar.evidence_imported,"
+            " mt.platforms, mt.parent_t_code, mt.is_subtechnique"
+            " ORDER BY mt.t_code ASC"
+        ), params).mappings().all()
         return [dict(r) for r in result]
     finally:
         session.close()
@@ -1505,6 +1609,61 @@ async def get_threat_profile(identifier: str, asset_id: Optional[int] = None, cu
 # ═══════════════════════════════════════════════════════════════════════════════
 # MEMORY / VOLATILITY ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/memory/list-images")
+async def list_memory_images(dir: str = None, current_user: dict = Depends(get_current_user)):
+    image_exts = {".raw", ".mem", ".dmp", ".vmem", ".lime", ".bin", ".img", ".dd"}
+    results = []
+    seen = set()
+
+    def scan_flat(d, label=None):
+        if not os.path.isdir(d):
+            return
+        try:
+            for fname in sorted(os.listdir(d)):
+                fpath = os.path.join(d, fname)
+                if not os.path.isfile(fpath) or fpath in seen:
+                    continue
+                if os.path.splitext(fname)[1].lower() not in image_exts:
+                    continue
+                seen.add(fpath)
+                try:
+                    size = os.path.getsize(fpath)
+                except OSError:
+                    size = 0
+                results.append({"path": fpath, "filename": fname, "size": size, "dir": label or d})
+        except PermissionError:
+            pass
+
+    # Priority: the asset's own local dir first (so it appears at the top of BROWSE)
+    if dir and os.path.isdir(dir):
+        scan_flat(dir, dir)
+
+    # Fixed known locations
+    for d in ["/app/memory-dumps", "/app/evidence/memory-dumps"]:
+        scan_flat(d)
+
+    # Walk /app/cases/ two levels deep (case → asset subfolder)
+    cases_root = "/app/cases"
+    if os.path.isdir(cases_root):
+        try:
+            for case_dir in sorted(os.listdir(cases_root)):
+                case_path = os.path.join(cases_root, case_dir)
+                if not os.path.isdir(case_path):
+                    continue
+                scan_flat(case_path)
+                try:
+                    for asset_dir in sorted(os.listdir(case_path)):
+                        asset_path = os.path.join(case_path, asset_dir)
+                        if os.path.isdir(asset_path):
+                            scan_flat(asset_path)
+                except PermissionError:
+                    pass
+        except PermissionError:
+            pass
+
+    return results
+
 
 @router.get("/memory/plugins")
 async def get_vol_plugins(os_profile: str = "windows", current_user: dict = Depends(get_current_user)):
@@ -1556,8 +1715,11 @@ async def acquire_memory(payload: MemoryAcquireRequest, user: dict = Depends(get
 async def dump_process_memory(payload: MemoryDumpRequest, user: dict = Depends(get_current_user)):
     if not os.path.exists(cfg.VOL3_BASE):
         raise HTTPException(status_code=404, detail="Volatility3 not found — check ORCA_VOL3_BASE configuration")
+    resolved_img, path_err = _resolve_image_path(payload.image_path)
+    if path_err:
+        raise HTTPException(status_code=400, detail=path_err)
     os.makedirs(payload.destination_path, exist_ok=True)
-    cmd = _build_vol_cmd(cfg.VOL3_BASE, payload.image_path, "windows.dumpfiles",
+    cmd = _build_vol_cmd(cfg.VOL3_BASE, resolved_img, "windows.dumpfiles",
                          None, ["--pid", str(payload.pid), "--dump-dir", payload.destination_path])
 
     async def event_stream():

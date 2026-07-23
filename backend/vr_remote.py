@@ -18,7 +18,7 @@ from typing import AsyncGenerator
 import evidence_normalizer
 
 REMOTE_TEMP       = r"C:\Windows\Temp\orca_vr"
-REMOTE_TEMP_POSIX = "/tmp/orca_vr"
+REMOTE_TEMP_POSIX = "/tmp/orca_vr"  # nosec B108 — path on the REMOTE investigation target, not the local server
 
 
 def _sse(type_: str, data) -> str:
@@ -58,10 +58,10 @@ def build_fallback_vql(custom_vql):
     if evtx_path:
         select_cols = re.search(r'SELECT\s+(.+?)\s+FROM', custom_vql, re.IGNORECASE | re.DOTALL)
         cols = select_cols.group(1).strip() if select_cols else '*'
-        return f"SELECT {cols}\nFROM parse_evtx(filename='{evtx_path}')\nWHERE {eid_filter}"
+        return f"SELECT {cols}\nFROM parse_evtx(filename='{evtx_path}')\nWHERE {eid_filter}"  # nosec B608 — VQL for Velociraptor, not PostgreSQL; evtx_path from hardcoded map
     select_from = _WHERE_CLAUSE.sub('', custom_vql).strip()
     select_from = re.sub(r'\s+ORDER\s+BY\s+.*$', '', select_from, flags=re.IGNORECASE).strip()
-    return f"{select_from}\nWHERE {eid_filter}"
+    return f"{select_from}\nWHERE {eid_filter}"  # nosec B608 — VQL passthrough; eid_filter extracted from stored VQL, not raw user input
 
 
 def build_collection_files(target_list, tsource, output_dir, remap_mounted=None, remap_original=None):
@@ -85,7 +85,7 @@ def build_collection_files(target_list, tsource, output_dir, remap_mounted=None,
             content = lib.custom_vql.replace(":tsource", clean_tsource)
             fallback_content = build_fallback_vql(lib.custom_vql)
         else:
-            content = f"SELECT *, '{t_code}' AS TCode FROM glob(globs='{clean_tsource}/**/{item.get('orca_name', t_code)}*')"
+            content = f"SELECT *, '{t_code}' AS TCode FROM glob(globs='{clean_tsource}/**/{item.get('orca_name', t_code)}*')"  # nosec B608 — VQL for Velociraptor; all values from DB MITRE data or analyst-configured tsource
             fallback_content = None
         if remap_mounted and remap_original:
             content = content.replace(f"{remap_original}:", f"{remap_mounted}:")
@@ -123,16 +123,16 @@ async def _collect_ssh(ip, username, password, vr_exe, target_files, local_outpu
     try:
         await q(_log(f"SSH: connecting to {ip}..."))
         ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # nosec B507 — DFIR context: connecting to investigation targets whose keys aren't pre-registered
         await asyncio.get_event_loop().run_in_executor(None, lambda: ssh.connect(ip, username=username, password=password, timeout=15))
         sftp = await asyncio.get_event_loop().run_in_executor(None, ssh.open_sftp)
         await q(_log("SSH: connected"))
-        ssh.exec_command(f"mkdir -p {REMOTE_TEMP_POSIX}")
+        ssh.exec_command(f"mkdir -p {REMOTE_TEMP_POSIX}")  # nosec B601 — REMOTE_TEMP_POSIX is a module constant; no user input
         await asyncio.sleep(0.5)
         remote_vr = f"{REMOTE_TEMP_POSIX}/velociraptor"
         await q(_log("SSH: pushing velociraptor binary..."))
         await asyncio.get_event_loop().run_in_executor(None, lambda: sftp.put(vr_exe, remote_vr))
-        ssh.exec_command(f"chmod +x {remote_vr}")
+        ssh.exec_command(f"chmod +x {remote_vr}")  # nosec B601 — path built from module constant only
         for item in target_files: await q(_tech(item["t_code"], "QUEUED"))
         results = []
         for item in target_files:
@@ -141,7 +141,7 @@ async def _collect_ssh(ip, username, password, vr_exe, target_files, local_outpu
             remote_out = f"{REMOTE_TEMP_POSIX}/orca_{t_code}.jsonl"
             await asyncio.get_event_loop().run_in_executor(None, lambda: sftp.put(item["local_vql"], remote_vql))
             await q(_tech(t_code, "RUNNING"))
-            _, stdout, _ = ssh.exec_command(f'{remote_vr} query -f "{remote_vql}" --format jsonl --output "{remote_out}"')
+            _, stdout, _ = ssh.exec_command(f'{remote_vr} query -f "{remote_vql}" --format jsonl --output "{remote_out}"')  # nosec B601 — all path components derived from REMOTE_TEMP_POSIX constant
             await asyncio.get_event_loop().run_in_executor(None, stdout.channel.recv_exit_status)
             local_out = os.path.join(local_output_dir, f"orca_{t_code}.jsonl")
             try:

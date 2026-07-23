@@ -13,6 +13,7 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
   const [selectedGroups, setSelectedGroups] = useState([]);
   const [caseType, setCaseType]           = useState("INVESTIGATION");
   const [activeProfile, setActiveProfile] = useState(null); // set when a profile is selected
+  const [createLocalDir, setCreateLocalDir] = useState(false);
 
   // ── Delete case confirmation state ────────────────────────────────────────
   const [deleteTarget, setDeleteTarget]   = useState(null);  // case name
@@ -103,7 +104,7 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
   const resetForm = () => {
     setCaseName(""); setTeamName(""); setMissionLead("");
     setPersonnelList([]); setFocusCountry(""); setSelectedGroups([]);
-    setCaseType("INVESTIGATION"); setActiveProfile(null);
+    setCaseType("INVESTIGATION"); setActiveProfile(null); setCreateLocalDir(false);
   };
 
   const handleCommitInvestigation = () => {
@@ -120,6 +121,7 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
       country: activeProfile ? `[PROFILE] ${activeProfile.name}` : focusCountry,
       groups: selectedGroups,
       case_type: caseType,
+      create_local_dir: createLocalDir,
     });
     setShowModal(false);
     resetForm();
@@ -166,7 +168,18 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
               <div>
                 <label style={labelStyle}>CASE_IDENTIFIER</label>
                 <input value={caseName} onChange={(e) => setCaseName(e.target.value)} style={inputStyle} placeholder="e.g. OPERATION_SILENT_WHALE" />
-                
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16 }}>
+                  <input type="checkbox" checked={createLocalDir} onChange={e => setCreateLocalDir(e.target.checked)}
+                    style={{ accentColor: '#00ff41', width: 13, height: 13, cursor: 'pointer' }} />
+                  <span style={{ color: '#777', fontSize: 9, letterSpacing: 1, fontFamily: 'monospace' }}>
+                    CREATE_LOCAL_WORKING_DIRECTORY
+                  </span>
+                  <span style={{ color: '#333', fontSize: 8, fontFamily: 'monospace' }}>
+                    ({caseName.trim() ? caseName.trim().replace(/[^A-Za-z0-9_\-.]/g, '_') : 'CASE_NAME'}\)
+                  </span>
+                </label>
+
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
                   <div>
                     <label style={labelStyle}>TEAM_NAME</label>

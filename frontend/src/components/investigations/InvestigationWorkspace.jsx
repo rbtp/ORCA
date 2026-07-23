@@ -24,6 +24,7 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
   const [memSummaries, setMemSummaries]   = useState({});  // { [assetId]: memSummary }
   const [avSummaries, setAvSummaries]     = useState({});  // { [assetId]: avSummary }
   const [vulnSummaries, setVulnSummaries] = useState({});  // { [assetId]: vulnSummary }
+  const [dirToast, setDirToast]           = useState(null); // host path shown after local dir creation
 
   const isConnected = status === "CONNECTED_STABLE";
   const API_BASE = `${import.meta.env.VITE_API_URL}/api/mitre`;
@@ -135,9 +136,16 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
   const handleAddCase = async (newCase) => {
     setCases(prev => [...prev, newCase]);
     try {
-      await fetch(`${API_BASE}/cases`, {
+      const res = await fetch(`${API_BASE}/cases`, {
         method: 'POST', credentials: 'include', headers: getAuthHeaders(), body: JSON.stringify(newCase),
       });
+      if (res.ok && newCase.create_local_dir) {
+        const data = await res.json().catch(() => ({}));
+        if (data.host_path) {
+          setDirToast(data.host_path);
+          setTimeout(() => setDirToast(null), 6000);
+        }
+      }
     } catch (err) { console.error("DB_COMMIT_ERROR:", err); }
   };
 
@@ -153,6 +161,16 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
 
   return (
     <div style={{ width: '100%', height: '100%', minHeight: '100vh', background: '#000' }}>
+      {dirToast && (
+        <div style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 9999,
+          background: '#0a1a0a', border: '1px solid #00ff41', padding: '12px 18px',
+          fontFamily: 'monospace', fontSize: 11, color: '#00ff41', maxWidth: 420,
+          boxShadow: '0 0 20px rgba(0,255,65,0.15)' }}>
+          <div style={{ fontWeight: 'bold', marginBottom: 4, letterSpacing: 1 }}>✓ WORKING DIRECTORY CREATED</div>
+          <div style={{ color: '#aaa', wordBreak: 'break-all' }}>{dirToast}</div>
+          <div style={{ color: '#555', fontSize: 9, marginTop: 6 }}>Drop evidence files here — asset subfolders created automatically</div>
+        </div>
+      )}
       <div style={{
         background: isConnected ? 'rgba(0, 255, 65, 0.05)' : 'rgba(255, 68, 68, 0.05)',
         color: isConnected ? '#00ff41' : '#ff4444',

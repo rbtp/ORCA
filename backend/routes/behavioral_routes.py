@@ -43,7 +43,7 @@ def detect_file_type(filepath: str) -> Optional[str]:
     return None
 
 def compute_hashes(filepath: str):
-    md5 = hashlib.md5()
+    md5 = hashlib.md5(usedforsecurity=False)  # nosec B324 — file identification only, not used for auth/security
     sha256 = hashlib.sha256()
     with open(filepath, 'rb') as f:
         for chunk in iter(lambda: f.read(65536), b''):
@@ -70,8 +70,10 @@ def check_ioc(s: str) -> Optional[str]:
 # --- In-memory queue store for SSE ↔ pipeline coordination ---
 _job_queues: dict = {}
 
+_BEHAVIORAL_TMP_DIR = "/tmp/orca_behavioral"  # nosec B108 — path pre-created and owned by orca user in Dockerfile
+
 def cleanup_old_temp_files():
-    for d in glob.glob('/tmp/orca_behavioral/*/'):
+    for d in glob.glob(f'{_BEHAVIORAL_TMP_DIR}/*/'):
         try:
             if os.path.getmtime(d) < time.time() - 3600:
                 shutil.rmtree(d, ignore_errors=True)
@@ -92,7 +94,7 @@ async def submit_behavioral_analysis(
     current_user: dict = Depends(get_current_user),
 ):
     job_id = str(uuid.uuid4())
-    tmp_dir = f"/tmp/orca_behavioral/{job_id}"
+    tmp_dir = f"{_BEHAVIORAL_TMP_DIR}/{job_id}"
     is_temp = False
 
     _MAX_UPLOAD = 256 * 1024 * 1024  # 256 MB application-layer limit
@@ -355,7 +357,7 @@ async def delete_job(job_id: str, current_user: dict = Depends(get_current_user)
             raise HTTPException(status_code=404, detail="Job not found")
         conn.execute(text("DELETE FROM behavioral_jobs WHERE job_id=:jid"), {"jid": job_id})
         conn.commit()
-    tmp_dir = f"/tmp/orca_behavioral/{job_id}"
+    tmp_dir = f"{_BEHAVIORAL_TMP_DIR}/{job_id}"
     if os.path.exists(tmp_dir):
         shutil.rmtree(tmp_dir, ignore_errors=True)
     return {"status": "deleted"}
@@ -504,10 +506,14 @@ async def _run_capa(job_id: str, asset_id: int, filepath: str, queue: asyncio.Qu
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600.0)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800.0)
         except asyncio.TimeoutError:
             proc.kill()
-            raise Exception("CAPA timed out after 600s")
+            raise Exception(
+                "CAPA timed out after 1800s. Vivisect disassembly of complex or packed "
+                "binaries is CPU-intensive in a containerised environment. The file may "
+                "require a native Windows analysis environment for reliable results."
+            )
 
         if proc.returncode not in (0, 1) and not stdout.strip():
             raise Exception(f"CAPA exited {proc.returncode}: {stderr.decode(errors='replace')[:300]}")
@@ -604,21 +610,21 @@ async def _run_floss(job_id: str, asset_id: int, filepath: str, queue: asyncio.Q
 
     await queue.put({"phase": "FLOSS_START", "message": "Starting FLOSS string extraction..."})
     try:
-        # ELF binaries: FLOSS only supports static string extraction (no stack/decoded)
-        floss_cmd = [_FLOSS_BIN, '--json']
-        if ftype == 'ELF':
-            floss_cmd += ['--only', 'static']
-        floss_cmd.append(filepath)
+        # Static-only for all types: vivisect decoded/stack string extraction is too slow
+        # in a containerised Linux environment (100-600s+ per binary) and produces
+        # unpredictable timeouts. Static extraction still catches URLs, IPs, registry
+        # keys, file paths, and other IOC-bearing strings in seconds.
+        floss_cmd = [_FLOSS_BIN, '--only', 'static', '--json', filepath]
         proc = await asyncio.create_subprocess_exec(
             *floss_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=180.0)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300.0)
         except asyncio.TimeoutError:
             proc.kill()
-            raise Exception("FLOSS timed out after 180s")
+            raise Exception("FLOSS timed out after 300s")
 
         if proc.returncode not in (0, 1) and not stdout.strip():
             raise Exception(f"FLOSS exited {proc.returncode}")

@@ -64,7 +64,7 @@ def build_fallback_vql(custom_vql):
     if evtx_path:
         # Always SELECT * in fallback — named fields like EventData.Image don't resolve
         # against parse_evtx() directly; the raw dict comes through intact for analyst review
-        return f"SELECT *\nFROM parse_evtx(filename='{evtx_path}')\nWHERE {eid_filter}\nLIMIT 10000"
+        return f"SELECT *\nFROM parse_evtx(filename='{evtx_path}')\nWHERE {eid_filter}\nLIMIT 10000"  # nosec B608 — VQL for Velociraptor, not PostgreSQL; evtx_path from hardcoded channel map
     else:
         # No known evtx path — can't build a useful fallback
         return None
@@ -247,7 +247,7 @@ def run(job):
         else:
             vql_file = os.path.join(output_root, f"query_{t_code}.vql")
             with open(vql_file, 'w', encoding='utf-8') as f:
-                f.write(f"SELECT *, '{t_code}' AS TCode FROM glob(globs='{clean_tsource}/**/{t_code}*')")
+                f.write(f"SELECT *, '{t_code}' AS TCode FROM glob(globs='{clean_tsource}/**/{t_code}*')")  # nosec B608 — VQL for Velociraptor; t_code from MITRE DB, tsource from analyst config
             proc = subprocess.run(
                 [vr_exe, "query", "-f", vql_file, "--format", "jsonl", "--output", output_json],
                 capture_output=True, creationflags=creationflags

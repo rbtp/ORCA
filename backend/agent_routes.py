@@ -27,6 +27,29 @@ _job_streams: Dict[str, List[str]] = {}          # job_id -> list of raw JSON li
 _job_subscribers: Dict[str, List[asyncio.Queue]] = {}  # job_id -> list of SSE subscriber queues
 
 
+def _get_folder_sync_paths() -> list:
+    """Return Windows paths for all investigation/asset local dirs.
+    Uses CASES_DIR env var to convert container paths to Windows paths for analyst machines."""
+    cases_dir = os.environ.get("CASES_DIR", "").strip()
+    if not cases_dir:
+        return []
+    windows_base = cases_dir.replace("/", "\\").rstrip("\\")
+    paths = []
+    try:
+        with db.engine.connect() as conn:
+            for table in ("cases", "assets"):
+                rows = conn.execute(text(
+                    f"SELECT local_dir FROM {table} WHERE local_dir IS NOT NULL"  # nosec B608
+                )).fetchall()
+                for (local_dir,) in rows:
+                    if local_dir and local_dir.startswith("/app/cases/"):
+                        rel = local_dir[len("/app/cases/"):]
+                        paths.append(windows_base + "\\" + rel.replace("/", "\\"))
+    except Exception:
+        pass
+    return paths
+
+
 class RegisterRequest(BaseModel):
     hostname: str
     capabilities: List[str]
@@ -208,17 +231,37 @@ async def poll_jobs(
     if agent_id not in _job_queues:
         _job_queues[agent_id] = asyncio.Queue()
 
+    # Real analysis job takes priority — check queue without blocking first
     try:
-        job = await asyncio.wait_for(_job_queues[agent_id].get(), timeout=30.0)
-
-        # Mark job as started
+        job = _job_queues[agent_id].get_nowait()
         with db.engine.connect() as conn:
             conn.execute(text("""
                 UPDATE agent_jobs SET status = 'RUNNING', started_at = NOW()
                 WHERE job_id = :job_id
             """), {"job_id": job["job_id"]})
             conn.commit()
+        return job
+    except asyncio.QueueEmpty:
+        pass
 
+    # Inject folder structure sync on every checkin (idempotent on the agent side)
+    sync_paths = _get_folder_sync_paths()
+    if sync_paths:
+        return {
+            "job_id": uuid.uuid4().hex[:24],
+            "job_type": "folder_sync",
+            "params": {"paths": sync_paths},
+        }
+
+    # Nothing queued — long-poll up to 30s for new analysis jobs
+    try:
+        job = await asyncio.wait_for(_job_queues[agent_id].get(), timeout=30.0)
+        with db.engine.connect() as conn:
+            conn.execute(text("""
+                UPDATE agent_jobs SET status = 'RUNNING', started_at = NOW()
+                WHERE job_id = :job_id
+            """), {"job_id": job["job_id"]})
+            conn.commit()
         return job
     except asyncio.TimeoutError:
         return None

@@ -33,9 +33,14 @@ RUN chmod +x /entrypoint.sh
 
 # Drop to non-root user; pre-create writable directories with correct ownership
 RUN useradd -r -u 1000 -g root -s /bin/false orca && \
-    mkdir -p /app/certs /app/evidence /var/lib/clamav /tmp/orca_behavioral && \
+    mkdir -p /app/certs /app/evidence /app/.cache /var/lib/clamav /tmp/orca_behavioral && \
     chown -R orca:root /app /var/lib/clamav /tmp/orca_behavioral /entrypoint.sh && \
     chmod -R g+w /app /var/lib/clamav /tmp/orca_behavioral
+
+# Volatility3 resolves its cache via XDG_CACHE_HOME or expanduser("~").
+# The orca system user has no home dir, so point XDG_CACHE_HOME at a
+# pre-created path under /app that orca already owns.
+ENV XDG_CACHE_HOME=/app/.cache
 
 USER orca
 

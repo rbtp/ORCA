@@ -226,23 +226,7 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
   const fileInputRef = useRef(null);
   const logRef = useRef(null);
   const evtSourceRef = useRef(null);
-
-  // --- Load latest job on mount ---
-  useEffect(() => {
-    if (!assetId) return;
-    fetch(`${API}/api/behavioral/asset/${assetId}/latest`, { headers: getAuth(), credentials: 'include' })
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (!data) return;
-        setResults(data);
-        setJobId(data.job?.job_id);
-        const tc = data.capa?.technique_count || 0;
-        const ic = data.floss?.ioc_count || 0;
-        const ac = data.speakeasy?.api_calls?.length || 0;
-        if (onSummaryUpdate) onSummaryUpdate({ techniqueCount: tc, iocCount: ic, apiCallCount: ac });
-      })
-      .catch(() => {});
-  }, [assetId]);
+  const jobIdRef = useRef(null);  // always-current job ID for use inside stale closures
 
   // Auto-scroll live log
   useEffect(() => {
@@ -317,9 +301,9 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
     } else if (phase === 'PIPELINE_COMPLETE' || phase === 'PIPELINE_ERROR') {
       setIsRunning(false);
       if (evtSourceRef.current) evtSourceRef.current.close();
-      // Load full results from DB
-      if (jobId || phase === 'PIPELINE_COMPLETE') {
-        const jid = jobId;
+      // Load full results from DB — use ref to avoid stale closure on jobId
+      const jid = jobIdRef.current;
+      if (jid) {
         setTimeout(() => {
           fetch(`${API}/api/behavioral/job/${jid}`, { headers: getAuth(), credentials: 'include' })
             .then(r => r.ok ? r.json() : null)
@@ -334,9 +318,68 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
             .catch(() => {});
         }, 500);
       }
-      addLog(phase === 'PIPELINE_COMPLETE' ? 'Pipeline complete.' : `Pipeline error: ${evt.message}`, phase === 'PIPELINE_COMPLETE' ? 'success' : 'error');
+      if (phase === 'PIPELINE_COMPLETE' && evt.overall_status === 'running') {
+        addLog('Analysis was interrupted (server restarted while job was running).', 'error');
+      } else {
+        addLog(phase === 'PIPELINE_COMPLETE' ? 'Pipeline complete.' : `Pipeline error: ${evt.message}`, phase === 'PIPELINE_COMPLETE' ? 'success' : 'error');
+      }
     }
-  }, [jobId, addLog, onSummaryUpdate]);
+  }, [addLog, onSummaryUpdate]);
+
+  // --- Reconnect to an in-progress job (navigate-away recovery) ---
+  const reconnectToRunningJob = useCallback((jid) => {
+    fetch(`${API}/api/behavioral/job/${jid}`, { headers: getAuth(), credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data) return;
+        const j = data.job || {};
+        setRunStatus({
+          capa:      j.capa_status      || 'pending',
+          floss:     j.floss_status     || 'pending',
+          speakeasy: j.speakeasy_status || 'pending',
+        });
+        setJobId(jid);
+        jobIdRef.current = jid;
+        setIsRunning(true);
+        setResults(null);
+        setLiveLog([]);
+        addLog(`Reconnected to running job — ${jid.slice(0, 8)}…`, 'warn');
+        connectStream(jid);
+      })
+      .catch(() => {});
+  }, [addLog, connectStream]);
+
+  // --- Load latest job on mount; reconnect if one is still running ---
+  useEffect(() => {
+    if (!assetId) return;
+    fetch(`${API}/api/behavioral/asset/${assetId}/jobs`, { headers: getAuth(), credentials: 'include' })
+      .then(r => r.ok ? r.json() : [])
+      .then(jobs => {
+        const running = (jobs || []).find(j => j.overall_status === 'running');
+        if (running) {
+          reconnectToRunningJob(running.job_id);
+          return;
+        }
+        fetch(`${API}/api/behavioral/asset/${assetId}/latest`, { headers: getAuth(), credentials: 'include' })
+          .then(r => r.ok ? r.json() : null)
+          .then(data => {
+            if (!data) return;
+            setResults(data);
+            setJobId(data.job?.job_id || null);
+            jobIdRef.current = data.job?.job_id || null;
+            const tc = data.capa?.technique_count || 0;
+            const ic = data.floss?.ioc_count || 0;
+            const ac = data.speakeasy?.api_calls?.length || 0;
+            if (onSummaryUpdate) onSummaryUpdate({ techniqueCount: tc, iocCount: ic, apiCallCount: ac });
+          })
+          .catch(() => {});
+      })
+      .catch(() => {});
+
+    return () => {
+      if (evtSourceRef.current) { evtSourceRef.current.close(); evtSourceRef.current = null; }
+    };
+  }, [assetId, reconnectToRunningJob]);
 
   // --- Submit handler ---
   const handleSubmit = async () => {
@@ -373,6 +416,7 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
       }
       const { job_id } = await res.json();
       setJobId(job_id);
+      jobIdRef.current = job_id;
       addLog(`Job submitted — ID: ${job_id}`);
       connectStream(job_id);
     } catch (e) {
@@ -381,21 +425,26 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
     }
   };
 
-  // --- Load a specific historical job ---
-  const loadJob = (jid) => {
+  // --- Load a specific historical job (or reconnect if it's still running) ---
+  const loadJob = useCallback((jid) => {
     fetch(`${API}/api/behavioral/job/${jid}`, { headers: getAuth(), credentials: 'include' })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return;
+        if (data.job?.overall_status === 'running') {
+          reconnectToRunningJob(jid);
+          return;
+        }
         setResults(data);
         setJobId(jid);
+        jobIdRef.current = jid;
         const tc = data.capa?.technique_count || 0;
         const ic = data.floss?.ioc_count || 0;
         const ac = data.speakeasy?.api_calls?.length || 0;
         if (onSummaryUpdate) onSummaryUpdate({ techniqueCount: tc, iocCount: ic, apiCallCount: ac });
       })
       .catch(() => {});
-  };
+  }, [reconnectToRunningJob, onSummaryUpdate]);
 
   // --- File drop handling ---
   const handleDrop = (e) => {

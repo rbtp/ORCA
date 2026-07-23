@@ -87,6 +87,9 @@ class OrcaAgent:
                 self._run_memory(job_id, params)
             elif jtype == "vql_test":
                 self._run_vql_test(job_id, params)
+            elif jtype == "folder_sync":
+                self._run_folder_sync(params)
+                return  # fire-and-forget — no DB tracking for sync jobs
             else:
                 raise ValueError(f"Unknown job type: {jtype}")
             self._complete(job_id, "SUCCESS", {})
@@ -119,6 +122,20 @@ class OrcaAgent:
             )
         except Exception as e:
             print(f"[ORCA Agent] Complete error: {e}")
+
+    def _run_folder_sync(self, params):
+        paths = params.get("paths", [])
+        created = 0
+        for path in paths:
+            try:
+                if not os.path.exists(path):
+                    os.makedirs(path, exist_ok=True)
+                    print(f"[ORCA Agent] Created dir: {path}")
+                    created += 1
+            except Exception as e:
+                print(f"[ORCA Agent] mkdir failed ({path}): {e}")
+        if created:
+            print(f"[ORCA Agent] Folder sync: {created} new director{'y' if created == 1 else 'ies'} created")
 
     def _run_velociraptor(self, job_id, params):
         vql = params["vql"]

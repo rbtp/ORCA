@@ -64,11 +64,12 @@ async def update_profile(profile_id: int, req: ProfileUpdateRequest, current_use
 
     set_clause = ", ".join(f"{k} = :{k}" for k in fields)
     set_clause += ", updated_at = NOW()"
-    sql = text(f"""
-        UPDATE investigation_profiles SET {set_clause}
-        WHERE id = :profile_id
-        RETURNING id, name, tcodes, created_at, updated_at
-    """)
+    # nosec B608 — set_clause keys are only "name"/"tcodes" (hardcoded above); user values go into :params
+    sql = text(
+        "UPDATE investigation_profiles SET " + set_clause  # nosec B608
+        + " WHERE id = :profile_id"
+        " RETURNING id, name, tcodes, created_at, updated_at"
+    )
     try:
         with db.engine.begin() as conn:
             result = conn.execute(sql, {**fields, "profile_id": profile_id})

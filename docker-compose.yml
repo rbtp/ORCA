@@ -16,10 +16,13 @@ services:
       - TLS_KEY_PATH=/app/certs/orca.key
       - ORCA_SERVER_URL=${ORCA_SERVER_URL:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-https://localhost}
+      - CASES_DIR=${CASES_DIR:-}
     volumes:
       - orca-certs:/app/certs          # shared TLS certs (writable — backend generates on first boot)
       - ./backend/bin:/app/bin:ro
       - orca-evidence:/app/evidence
+      - ${MEMORY_DUMPS_DIR:-./memory-dumps}:/app/memory-dumps:ro  # host dir for memory images (set MEMORY_DUMPS_DIR in .env)
+      - ${CASES_DIR:-./cases}:/app/cases:rw                       # investigation working dirs (set CASES_DIR in .env)
     networks:
       - orca-net
     depends_on:

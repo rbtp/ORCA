@@ -1187,7 +1187,7 @@ export default function CaseDetail({
         )}
       </div>
 
-      <EvidenceWindow caseType={caseData?.case_type || 'INVESTIGATION'} assetId={investigatingAssetId} assetName={currentAsset?.hostname} tCode={null} isOpen={isEvidenceOpen} onClose={handleCloseEvidence} tacticList={evidenceTacticList} caseName={caseName} collab={collab} analysisMode={assetModes[String(investigatingAssetId)] || currentAsset?.analysis_mode || 'UNKNOWN'} assetIp={currentAsset?.ip || ''} assetType={currentAsset?.asset_type || currentAsset?.type || ''}
+      <EvidenceWindow caseType={caseData?.case_type || 'INVESTIGATION'} assetId={investigatingAssetId} assetName={currentAsset?.hostname} tCode={null} isOpen={isEvidenceOpen} onClose={handleCloseEvidence} tacticList={evidenceTacticList} caseName={caseName} collab={collab} analysisMode={assetModes[String(investigatingAssetId)] || currentAsset?.analysis_mode || 'UNKNOWN'} assetIp={currentAsset?.ip || ''} assetType={currentAsset?.asset_type || currentAsset?.type || ''} localDir={currentAsset?.local_dir || null}
         memSummary={memSummaries[String(investigatingAssetId)] || null}
         avSummary={avSummaries[String(investigatingAssetId)] || null}
         vulnSummary={vulnSummaries[String(investigatingAssetId)] || null}

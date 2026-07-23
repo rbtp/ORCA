@@ -686,7 +686,7 @@ if __name__ == "__main__":
     ssl_ctx.load_cert_chain(ssl_cert, ssl_key)
 
     config = uvicorn.Config(
-        app, host="0.0.0.0", port=8000,
+        app, host="0.0.0.0", port=8000,  # nosec B104 — intentional Docker container binding; nginx controls external access
         ssl_certfile=ssl_cert, ssl_keyfile=ssl_key,
         access_log=True,
     )

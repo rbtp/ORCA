@@ -190,7 +190,7 @@ async def proxy(path: str, request: Request):
                if k.lower() not in ("host", "content-length", "transfer-encoding")}
 
     # verify=False is intentional: Velociraptor manages its own self-signed cert; this is localhost-only
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, verify=False) as client:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, verify=False) as client:  # nosec B501
         try:
             resp = await client.request(
                 method=request.method,

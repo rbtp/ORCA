@@ -2324,7 +2324,7 @@ const RegistryTreeViewer = ({ rows }) => {
 // ══════════════════════════════════════════════════════════════════════════════
 // MEMORY ANALYSIS TAB
 // ══════════════════════════════════════════════════════════════════════════════
-const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'UNKNOWN' }) => {
+const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'UNKNOWN', localDir = null }) => {
   const [mode, setMode]                     = useState('single');
   const [os, setOs]                         = useState('windows');
   const [imgPath, setImgPath]               = useState('');
@@ -2353,6 +2353,9 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
   const readerRef = useRef(null);
   const [agents, setAgents]               = useState([]);
   const [selectedAgent, setSelectedAgent] = useState(null);
+  const [browseOpen, setBrowseOpen]       = useState(false);
+  const [browseFiles, setBrowseFiles]     = useState([]);
+  const [browseLoading, setBrowseLoading] = useState(false);
 
   // Load persisted results on mount
   useEffect(() => {
@@ -2374,6 +2377,20 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
         addLog(`Restored ${data.length} plugin result(s) from database.`, 'success');
       }).catch(() => {});
   }, [assetId]);
+
+  // Auto-populate image path from the asset's local working directory
+  useEffect(() => {
+    if (!localDir || imgPath) return;
+    fetch(`${import.meta.env.VITE_API_URL}/api/mitre/memory/list-images?dir=${encodeURIComponent(localDir)}`, { headers: getAuth() })
+      .then(r => r.ok ? r.json() : [])
+      .then(files => {
+        const inDir = files.filter(f => f.dir === localDir);
+        if (inDir.length === 1) setImgPath(inDir[0].path);   // exactly one image — fill it in
+        else if (inDir.length > 1) setImgPath(localDir);     // multiple — set dir as hint, user picks via BROWSE
+        else setImgPath(localDir);                            // none yet — set dir as hint
+      })
+      .catch(() => setImgPath(localDir));
+  }, [localDir]);
 
   useEffect(() => {
     if (analysisMode !== 'DEAD_DISK_LOCAL') return;
@@ -2581,6 +2598,17 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
     } catch (e) { addLog('DUMP_ERROR: ' + e.message, 'error'); setIsDumping(false); }
   };
 
+  const openBrowse = () => {
+    setBrowseOpen(true);
+    setBrowseLoading(true);
+    setBrowseFiles([]);
+    const dirParam = localDir ? `?dir=${encodeURIComponent(localDir)}` : '';
+    fetch(`${import.meta.env.VITE_API_URL}/api/mitre/memory/list-images${dirParam}`, { headers: getAuth() })
+      .then(r => r.ok ? r.json() : [])
+      .then(data => { setBrowseFiles(data); setBrowseLoading(false); })
+      .catch(() => setBrowseLoading(false));
+  };
+
   const pluginGroups = VOL_PLUGINS[os] || VOL_PLUGINS.windows;
   // Replace lines 810-812
   const dispCols = (activeSection && sections[activeSection]?.columns) || [];
@@ -2662,11 +2690,55 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
               <div style={{ flex: 2, display: 'flex', flexDirection: 'column', gap: 7 }}>
                 {/* Image path */}
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <span style={Lbl}>MEMORY_IMAGE:</span>
-                  <input value={imgPath} onChange={e => setImgPath(e.target.value)}
-                    placeholder="C:\\path\\to\\memory.raw"
-                    style={{ ...Inp, flex: 1 }} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <span style={Lbl}>MEMORY_IMAGE:</span>
+                    <input value={imgPath} onChange={e => setImgPath(e.target.value)}
+                      placeholder="/app/memory-dumps/dump.raw"
+                      style={{ ...Inp, flex: 1 }} />
+                    <button onClick={openBrowse}
+                      style={{ ...Btn, background: 'transparent', color: C.green, border: `1px solid ${C.green}`, padding: '4px 10px', fontSize: 9 }}>
+                      BROWSE
+                    </button>
+                  </div>
+                  {browseOpen && (
+                    <div style={{ border: `1px solid ${C.border}`, background: C.bgCard, marginLeft: 123 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        padding: '4px 8px', borderBottom: `1px solid ${C.border}` }}>
+                        <span style={{ color: C.greyDim, fontSize: 9, fontFamily: 'monospace' }}>
+                          FILES IN /app/memory-dumps
+                        </span>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <span onClick={openBrowse} style={{ color: C.amber, fontSize: 9, cursor: 'pointer', fontFamily: 'monospace' }}>↺ REFRESH</span>
+                          <span onClick={() => setBrowseOpen(false)} style={{ color: C.greyDim, fontSize: 9, cursor: 'pointer', fontFamily: 'monospace' }}>✕</span>
+                        </div>
+                      </div>
+                      {browseLoading && (
+                        <div style={{ padding: '8px', color: C.greyDim, fontSize: 9, fontFamily: 'monospace' }}>Scanning...</div>
+                      )}
+                      {!browseLoading && browseFiles.length === 0 && (
+                        <div style={{ padding: '8px 10px', color: C.greyDim, fontSize: 9, fontFamily: 'monospace', lineHeight: 1.6 }}>
+                          No image files found.<br />
+                          Copy your dump into <span style={{ color: C.white }}>.\memory-dumps\</span> on the host,<br />
+                          then click Refresh.
+                        </div>
+                      )}
+                      {browseFiles.map(f => (
+                        <div key={f.path} onClick={() => { setImgPath(f.path); setBrowseOpen(false); }}
+                          style={{ padding: '5px 10px', cursor: 'pointer', borderBottom: `1px solid #0a0a0a`,
+                            display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+                          onMouseEnter={e => e.currentTarget.style.background = C.bgHover}
+                          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                          <span style={{ color: C.white, fontSize: 10, fontFamily: 'monospace' }}>{f.filename}</span>
+                          <span style={{ color: C.greyDim, fontSize: 9, fontFamily: 'monospace', flexShrink: 0, marginLeft: 12 }}>
+                            {f.size >= 1073741824 ? (f.size / 1073741824).toFixed(1) + ' GB'
+                              : f.size >= 1048576 ? (f.size / 1048576).toFixed(0) + ' MB'
+                              : (f.size / 1024).toFixed(0) + ' KB'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                   <span style={Lbl}>SYMBOL_PATHS:</span>
@@ -3690,7 +3762,7 @@ const ReportTab = ({ caseName, assetId }) => {
 // MalwareSignaturesTab, and ArtifactAnalysisTab are NEVER unmounted when
 // switching tabs — their state, refs, and active SSE streams all survive.
 // ══════════════════════════════════════════════════════════════════════════════
-const EvidenceWindow = ({ assetId, assetName, tCode, isOpen, onClose, tacticList, caseName, collab, analysisMode = 'UNKNOWN', assetIp = '', caseType = 'INVESTIGATION', assetType = '', memSummary: memSummaryProp = null, avSummary: avSummaryProp = null, vulnSummary: vulnSummaryProp = null, behavioralSummary: behavioralSummaryProp = null, onSummaryUpdate }) => {
+const EvidenceWindow = ({ assetId, assetName, tCode, isOpen, onClose, tacticList, caseName, collab, analysisMode = 'UNKNOWN', assetIp = '', caseType = 'INVESTIGATION', assetType = '', localDir = null, memSummary: memSummaryProp = null, avSummary: avSummaryProp = null, vulnSummary: vulnSummaryProp = null, behavioralSummary: behavioralSummaryProp = null, onSummaryUpdate }) => {
   const isIR = caseType === 'INCIDENT_RESPONSE';
   const NETWORK_TYPES = ['FIREWALL', 'ROUTER', 'SWITCH', 'NETWORK', 'AP', 'LOAD_BALANCER', 'PROXY', 'VPN', 'IDS', 'IPS', 'WAF'];
   const isNetworkDevice = NETWORK_TYPES.some(t => (assetType || '').toUpperCase().includes(t));
@@ -3880,6 +3952,7 @@ useEffect(() => {
               assetId={assetId}
               collab={collab}
               analysisMode={analysisMode}
+              localDir={localDir}
               onSummaryUpdate={(type, data) => {
                 if (type === 'memory') setMemSummary(data);
                 else if (type === 'av') setAvSummary(data);
@@ -3910,6 +3983,7 @@ useEffect(() => {
 
           <div style={tabStyle('BEHAVIORAL_ANALYSIS')}>
             <BehavioralAnalysisTab
+              key={assetId}
               assetId={assetId}
               onSummaryUpdate={setBehavioralSummary}
             />
