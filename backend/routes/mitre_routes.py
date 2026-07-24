@@ -336,7 +336,15 @@ def _resolve_image_path(image_path: str):
 
 def _build_vol_cmd(vol3_base, image_path, plugin, symbol_paths, args):
     vol_py = os.path.join(vol3_base, "vol.py")
-    cmd = ["python", vol_py, "--offline", "-f", image_path]
+    # -r quick: tab-separated output required by the tab-based parser.
+    # --parallelism threads: uses multiple cores for the PDB signature scan
+    # (the scan that finds the kernel PDB GUID in the dump — bottleneck for
+    # large files).  "processes" is unsafe in containers; "threads" is safe.
+    # -u: force unbuffered stdout/stderr so progress writes flush immediately
+    # through the pipe instead of accumulating until process exit.
+    # NOTE: --parallelism threads breaks the PageMapScanner DTB detection on
+    # raw physical dumps and must NOT be used.
+    cmd = ["python", "-u", vol_py, "--offline", "-r", "quick", "-f", image_path]
     if symbol_paths:
         cmd.extend(["-s", symbol_paths])
     cmd.append(plugin)
@@ -351,41 +359,125 @@ async def _stream_plugin(vol3_base, image_path, plugin, symbol_paths, extra_args
     if path_err:
         yield {"type": "plugin_error", "data": {"plugin": plugin, "error": path_err}}
         return
+
+    # Show file size upfront so the user knows why scanning takes time
+    try:
+        size_gb = os.path.getsize(resolved) / (1024 ** 3)
+        yield {"type": "log", "data": f"Image: {resolved} ({size_gb:.1f} GB) — scanning for kernel PDB…"}
+    except OSError:
+        yield {"type": "log", "data": f"Image: {resolved}"}
+
     cmd = _build_vol_cmd(vol3_base, resolved, plugin, symbol_paths, extra_args)
     plugin_key = plugin.split(".")[-1]
     mapped_techs = pmap.get(plugin_key, [])
     confidence_map = pconf.get(plugin_key, {})
+
     try:
+        # 10 MB line limit — Volatility3's quick renderer puts one row per line;
+        # some fields (raw bytes, long paths) exceed the default 64 KB limit and
+        # raise asyncio.LimitOverrunError ("Separator is not found, and chunk
+        # exceed the limit").
         process = await asyncio.create_subprocess_exec(
             *cmd, cwd=vol3_base,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            limit=10 * 1024 * 1024
         )
-        async for raw_line in process.stdout:
-            line = raw_line.decode("utf-8", errors="replace").rstrip()
-            if not line:
-                continue
-            if columns is None and '\t' not in line:
-                continue
-            if columns is None:
-                columns = [c.strip() for c in line.split("\t")]
-                yield {"type": "columns", "data": columns}
-            else:
-                values = [v.strip() for v in line.split("\t")]
-                if len(values) < len(columns):
-                    values += [''] * (len(columns) - len(values))
-                row = dict(zip(columns, values))
-                row["_mitre_techniques"] = [
-                    {"t_code": t, "confidence": confidence_map.get(t, "M")}
-                    for t in mapped_techs
-                ]
-                row_count += 1
-                yield {"type": "row", "data": row}
-        stderr_raw = await process.stderr.read()
-        for err_line in stderr_raw.decode("utf-8", errors="replace").splitlines():
-            if err_line.strip():
-                yield {"type": "log", "data": f"[WARN] {err_line}"}
+
+        # Interleave stdout and stderr reads so Volatility3's progress messages
+        # (written to stderr) appear in real-time instead of only after the
+        # plugin finishes.  This also prevents the stderr pipe from filling up
+        # and causing a deadlock on large dumps.
+        # stdout: readline() — rows are newline-terminated
+        # stderr: read(4096) — Volatility3 progress uses \r (no newline), so
+        #         readline() would block until program exit; read() returns as
+        #         soon as any bytes are available.
+        stdout_fut = asyncio.ensure_future(process.stdout.readline())
+        stderr_fut = asyncio.ensure_future(process.stderr.read(4096))
+
+        # Throttle state: only emit "Updating caches" progress every 5 %
+        _last_cache_pct: float = -5.0
+        # True when Volatility3 outputs a requirements-check table instead of
+        # real plugin data (happens when the symbol table isn't found).  In that
+        # case we route every stdout line to the log rather than the data table.
+        _requirements_error: bool = False
+
+        while stdout_fut is not None or stderr_fut is not None:
+            active = [f for f in (stdout_fut, stderr_fut) if f is not None]
+            done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+
+            if stdout_fut in done:
+                raw = stdout_fut.result()
+                if raw:
+                    line = raw.decode("utf-8", errors="replace").rstrip()
+                    if line:
+                        if _requirements_error:
+                            # Already flagged as error output — log every line
+                            yield {"type": "log", "data": f"[PLUGIN] {line.replace(chr(9), ' ')}" }
+                        elif columns is None and '\t' not in line:
+                            pass  # skip non-tab banner lines
+                        elif columns is None:
+                            first_col = line.split("\t")[0].strip()
+                            # Real column headers are short identifiers (PID, PPID…).
+                            # Volatility3's requirements-check output starts with
+                            # long sentences like "A file was provided to create…"
+                            if len(first_col) > 40 or ' was ' in first_col or 'requirement' in first_col.lower():
+                                _requirements_error = True
+                                yield {"type": "log", "data": f"[PLUGIN] {line.replace(chr(9), ' ')}"}
+                            else:
+                                columns = [c.strip() for c in line.split("\t")]
+                                yield {"type": "columns", "data": columns}
+                        else:
+                            values = [v.strip() for v in line.split("\t")]
+                            if len(values) < len(columns):
+                                values += [''] * (len(columns) - len(values))
+                            row = dict(zip(columns, values))
+                            row["_mitre_techniques"] = [
+                                {"t_code": t, "confidence": confidence_map.get(t, "M")}
+                                for t in mapped_techs
+                            ]
+                            row_count += 1
+                            yield {"type": "row", "data": row}
+                    stdout_fut = asyncio.ensure_future(process.stdout.readline())
+                else:
+                    stdout_fut = None  # EOF
+
+            if stderr_fut in done:
+                raw = stderr_fut.result()
+                if raw:
+                    # Split on both \r and \n so \r-based progress updates each
+                    # become their own log line.
+                    parts = raw.decode("utf-8", errors="replace").replace('\r\n', '\n').replace('\r', '\n').split('\n')
+                    for part in parts:
+                        part = part.strip()
+                        if not part:
+                            continue
+                        # Throttle symbol-cache rebuild progress to one line per 5%
+                        m = re.search(r'Progress:\s+([\d.]+)\s+Updating caches', part)
+                        if m:
+                            pct = float(m.group(1))
+                            if pct - _last_cache_pct < 5.0:
+                                continue
+                            _last_cache_pct = pct
+                        yield {"type": "log", "data": part}
+                    stderr_fut = asyncio.ensure_future(process.stderr.read(4096))
+                else:
+                    stderr_fut = None  # EOF
+
         await process.wait()
-        yield {"type": "plugin_done", "data": {"plugin": plugin, "rows": row_count}}
+        if _requirements_error:
+            yield {"type": "plugin_error", "data": {
+                "plugin": plugin,
+                "error": (
+                    "Symbol table not found for this memory image. "
+                    "Volatility3 needs a pre-built Windows ISF symbol file that matches the "
+                    "exact kernel build in the dump. Download the Volatility3 Windows symbol "
+                    "pack (windows.zip from the Volatility Foundation releases) and extract it "
+                    "into the Volatility3 symbols/windows/ directory inside the container, or "
+                    "specify the path via the Symbol Paths field."
+                ),
+            }}
+        else:
+            yield {"type": "plugin_done", "data": {"plugin": plugin, "rows": row_count}}
     except Exception as e:
         yield {"type": "plugin_error", "data": {"plugin": plugin, "error": str(e)}}
 

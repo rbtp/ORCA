@@ -36,6 +36,9 @@
 - Memory acquisition via WinPMem
 - Process memory dump by PID
 - Results written to database and displayed per MITRE T-code
+- SSE-streamed execution log with real-time Volatility3 progress (PDB scan %, stacking %, cache updates)
+- Volatility3 stderr streamed live so long-running scans (large dumps) show progress instead of silence
+- Symbol table auto-detected from local ISF pack; diagnostic error shown if the kernel build is not in the pack
 
 ### Malware Scanning (ClamAV)
 - Recursive directory scan against bundled ClamAV signatures
@@ -65,7 +68,9 @@
 
 ### IOC Management
 - Store discovered IOCs (IP, domain, hash, etc.) against a case
-- Cross-reference IOC values against evidence table via substring search
+- Cross-reference IOC values against all evidence via SSE-streamed correlation scan — results stream in as each IOC is checked; scan continues in the background if you navigate away and results are restored when you return
+- Per-IOC hit table: case, hostname, T-code, artifact alias
+- Promote evidence directly to the IOC library from any technique row
 
 ### Behavioral Analysis (CAPA / FLOSS / Speakeasy)
 - Static capability analysis via **Mandiant CAPA** — maps binary capabilities to MITRE ATT&CK techniques; badges appear on the matching technique rows in the investigation checklist
