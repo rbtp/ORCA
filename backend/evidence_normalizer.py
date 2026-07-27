@@ -72,20 +72,69 @@ _TCODE_TO_CATEGORY = {
 }
 
 
+def _parse_reg_values(raw):
+    """Convert any serialization of a registry values field to a list of dicts."""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        # Velociraptor sometimes serializes Go slices as {"0": {...}, "1": {...}}
+        try:
+            return [raw[str(i)] for i in range(len(raw)) if str(i) in raw] or list(raw.values())
+        except Exception:
+            return []
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+    return []
+
+
+_REGISTRY_ROW_META_KEYS = {
+    'Key', '_Source', 'KeyPath', 'KeyModTime', 'Values', 'FullPath', 'ModTime',
+    'ValueName', 'ValueType', 'ValueData',
+}
+
+
+def _values_from_row_columns(item):
+    """
+    read_reg_key()'s actual output has no Key.Values array — each named registry
+    value under a key comes back as its own dynamically-named top-level column on
+    the row, alongside Key (path/modtime only). Build a values list from those.
+    """
+    return [{'Name': k, 'Type': '', 'Data': v}
+            for k, v in item.items() if k not in _REGISTRY_ROW_META_KEYS]
+
+
 def _extract_registry_row(item):
     """
-    Normalize a single read_reg_key() row into (key_path, mod_time, values).
+    Normalize a single row into (key_path, mod_time, values).
 
-    Handles both VQL shapes:
-      - New explicit SELECT: KeyPath, KeyModTime, Values fields present directly
-      - Legacy SELECT *: Key blob containing FileInfo + Values nested inside
-    Returns (key_path: str, mod_time: str, values: list)
+    Handles VQL output shapes:
+    1. Per-value foreach shape: {KeyPath, KeyModTime, ValueName, ValueType, ValueData}
+       One row per registry value — produced by the foreach VQL.
+    2. Per-key explicit SELECT: {KeyPath, KeyModTime, Values: [{Name, Type, Data}...]}
+       One row per key with Values as a JSON array (or ordereddict).
+    3. Key-blob with flattened value columns: {Key: {FileInfo: {FullPath, ModTime}},
+       <ValueName1>: <data1>, <ValueName2>: <data2>, ...} — this is what
+       read_reg_key() actually emits; there is no Key.Values field, so any VQL
+       selecting Key.Values AS Values silently gets NULL for every row.
     """
-    key_path = ''
-    mod_time = ''
-    values = []
+    # Shape 1 — per-value row from foreach VQL
+    if 'ValueName' in item or 'ValueType' in item or 'ValueData' in item:
+        key_path = item.get('KeyPath') or item.get('FullPath') or ''
+        mod_time = item.get('KeyModTime') or item.get('ModTime') or ''
+        val_name = item.get('ValueName') or ''
+        val_type = item.get('ValueType') or ''
+        val_data = item.get('ValueData')
+        values = [{'Name': val_name, 'Type': val_type, 'Data': val_data}] \
+            if (val_name or val_data is not None) else []
+        return key_path, mod_time, values
 
-    # Legacy path — Key blob present
+    # Shape 3 — Key blob present; real values (if any) are sibling top-level
+    # columns on the row (see docstring), not nested inside Key.
     key_raw = item.get('Key')
     if key_raw is not None:
         try:
@@ -94,25 +143,19 @@ def _extract_registry_row(item):
                 file_info = key_obj.get('FileInfo', {}) or {}
                 key_path = file_info.get('FullPath', '') or item.get('FullPath', '')
                 mod_time = file_info.get('ModTime', '') or item.get('ModTime', '')
-                values = key_obj.get('Values') or []
+                values = _parse_reg_values(key_obj.get('Values'))
+                if not values:
+                    values = _values_from_row_columns(item)
+                return key_path, mod_time, values
         except Exception:
-            key_path = str(key_raw)[:512]
+            pass
 
-    # New explicit SELECT path — fields already at top level
-    if not key_path:
-        key_path = item.get('KeyPath') or item.get('FullPath') or ''
-    if not mod_time:
-        mod_time = item.get('KeyModTime') or item.get('ModTime') or ''
+    # Shape 2 — explicit SELECT with KeyPath/KeyModTime/Values at top level, no Key blob
+    key_path = item.get('KeyPath') or item.get('FullPath') or ''
+    mod_time = item.get('KeyModTime') or item.get('ModTime') or ''
+    values = _parse_reg_values(item.get('Values'))
     if not values:
-        v = item.get('Values')
-        if isinstance(v, list):
-            values = v
-        elif isinstance(v, str):
-            try:
-                values = json.loads(v)
-            except Exception:
-                values = []
-
+        values = _values_from_row_columns(item)
     return key_path, mod_time, values
 
 
@@ -144,20 +187,32 @@ def _insert_into_tree(tree, key_path, mod_time, values):
 
 def _build_registry_tree(rows):
     """
-    Convert a flat list of read_reg_key() rows into a nested regedit-style tree.
+    Convert flat rows into a nested regedit-style tree.
+
+    Works with both per-key rows (one row = one key, Values is a list) and
+    per-value rows (one row = one value at a key, from the foreach VQL).
+    Multiple rows for the same key_path have their values merged.
     Returns (tree dict, hive_root string).
     """
     tree = {}
     hive_root = ''
+    # key_path -> {'mod_time': str, 'values': list}
+    key_groups: dict = {}
 
     for item in rows:
         key_path, mod_time, values = _extract_registry_row(item)
         if not key_path:
             continue
         if not hive_root:
-            # Grab the top-level hive name (first path component)
             hive_root = key_path.replace('/', '\\').split('\\')[0]
-        _insert_into_tree(tree, key_path, mod_time, values)
+        if key_path not in key_groups:
+            key_groups[key_path] = {'mod_time': mod_time or '', 'values': []}
+        elif mod_time and not key_groups[key_path]['mod_time']:
+            key_groups[key_path]['mod_time'] = mod_time
+        key_groups[key_path]['values'].extend(values)
+
+    for key_path, group in key_groups.items():
+        _insert_into_tree(tree, key_path, group['mod_time'], group['values'])
 
     return tree, hive_root
 
@@ -278,10 +333,16 @@ def _normalize_triage(file_path, asset_id, t_code='TRIAGE', is_fallback=False):
                 """), {"aid": asset_id, "s": json.dumps({
                     "message": f"Registry: {doc['key_count']} total keys across {len(doc.get('hives', []))} hives",
                 })})
-                # Remove individual hive row from artifact_results — only REGISTRY should exist
+                # Mark sub-technique row as processed (merged into REGISTRY rollup)
                 conn.execute(text("""
-                    DELETE FROM artifact_results WHERE asset_id = :aid AND t_code = :t
-                """), {"aid": asset_id, "t": category})
+                    INSERT INTO artifact_results (asset_id, t_code, verdict, evidence_summary, evidence_imported)
+                    VALUES (:aid, :t, 'Evidence Found', :s, TRUE)
+                    ON CONFLICT (asset_id, t_code)
+                    DO UPDATE SET
+                        verdict = 'Evidence Found',
+                        evidence_summary = EXCLUDED.evidence_summary,
+                        evidence_imported = TRUE
+                """), {"aid": asset_id, "t": category, "s": json.dumps({"message": f"{category}: {row_count} keys merged into REGISTRY rollup"})})
                 total += 1
                 continue
 
@@ -420,10 +481,16 @@ def normalize_and_ingest(file_path, asset_id, t_code, target_name_hint=None, is_
                 """), {"aid": asset_id, "s": json.dumps({
                     "message": f"Registry: {doc['key_count']} total keys across {len(doc.get('hives', []))} hives",
                 })})
-                # Remove individual hive row from artifact_results — only REGISTRY should exist
+                # Mark sub-technique row as processed (merged into REGISTRY rollup)
                 conn.execute(text("""
-                    DELETE FROM artifact_results WHERE asset_id = :aid AND t_code = :t
-                """), {"aid": asset_id, "t": t_code})
+                    INSERT INTO artifact_results (asset_id, t_code, verdict, evidence_summary, evidence_imported)
+                    VALUES (:aid, :t, 'Evidence Found', :s, TRUE)
+                    ON CONFLICT (asset_id, t_code)
+                    DO UPDATE SET
+                        verdict = 'Evidence Found',
+                        evidence_summary = EXCLUDED.evidence_summary,
+                        evidence_imported = TRUE
+                """), {"aid": asset_id, "t": t_code, "s": json.dumps({"message": f"{t_code}: {row_count} keys merged into REGISTRY rollup"})})
             print(f"[+] SUCCESS: {t_code} merged into REGISTRY ({row_count} keys, hive={hive_root}).")
             return 1
 

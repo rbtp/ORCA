@@ -17,6 +17,7 @@ services:
       - ORCA_SERVER_URL=${ORCA_SERVER_URL:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-https://localhost}
       - CASES_DIR=${CASES_DIR:-}
+      - ORCA_DATA_ROOT=/app/evidence
     volumes:
       - orca-certs:/app/certs          # shared TLS certs (writable — backend generates on first boot)
       - ./backend/bin:/app/bin:ro

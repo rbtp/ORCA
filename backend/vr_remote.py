@@ -371,11 +371,12 @@ async def _collect_smb_task(ip, username, password, domain, vr_exe, target_files
     async def run_task(dce, task_name, cmd):
         xml = f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <Triggers><TimeTrigger><StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Triggers/>
   <Actions context="Author"><Exec><Command>cmd.exe</Command><Arguments>/c {cmd}</Arguments></Exec></Actions>
   <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT1H</ExecutionTimeLimit><Priority>7</Priority></Settings>
 </Task>"""
-        await asyncio.get_event_loop().run_in_executor(None, lambda: tsch.hSchRpcRegisterTask(dce, task_name, xml, tsch.TASK_CREATE_OR_UPDATE, None, tsch.TASK_LOGON_NONE))
+        await asyncio.get_event_loop().run_in_executor(None, lambda: tsch.hSchRpcRegisterTask(dce, task_name, xml, (tsch.TASK_CREATE | tsch.TASK_UPDATE), tsch.NULL, tsch.TASK_LOGON_SERVICE_ACCOUNT))
         await asyncio.get_event_loop().run_in_executor(None, lambda: tsch.hSchRpcRun(dce, task_name))
         for _ in range(60):
             await asyncio.sleep(1)
@@ -391,10 +392,14 @@ async def _collect_smb_task(ip, username, password, domain, vr_exe, target_files
         try: await asyncio.get_event_loop().run_in_executor(None, lambda: smb.createDirectory(share, remote_dir))
         except: pass
         await smb_put(smb, vr_exe, "velociraptor.exe")
+        from impacket.dcerpc.v5 import rpcrt
         string_binding = f"ncacn_np:{ip}[\\pipe\\atsvc]"
         rpctransport = dce_transport.DCERPCTransportFactory(string_binding)
         rpctransport.set_credentials(username, password, domain or "", "", "", None)
         dce = await asyncio.get_event_loop().run_in_executor(None, lambda: rpctransport.get_dce_rpc())
+        dce.set_credentials(*rpctransport.get_credentials())
+        dce.set_auth_type(rpcrt.RPC_C_AUTHN_WINNT)
+        dce.set_auth_level(rpcrt.RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
         await asyncio.get_event_loop().run_in_executor(None, dce.connect)
         await asyncio.get_event_loop().run_in_executor(None, lambda: dce.bind(tsch.MSRPC_UUID_TSCHS))
         for item in target_files: await q(_tech(item["t_code"], "QUEUED"))
@@ -462,34 +467,52 @@ async def _run_remote_command_smb_task(ip, username, password, domain, command, 
     affect the already-launched process, since Task Scheduler deletion only
     removes the task's metadata, not any process it already started.
     """
-    from impacket.dcerpc.v5 import tsch, transport as dce_transport
+    from impacket.smbconnection import SMBConnection
+    from impacket.dcerpc.v5 import scmr, transport as dce_transport
+    import io as _io
 
-    task_name = f"\\orca_trigger_{uuid.uuid4().hex[:12]}"
-    xml = f"""<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <Triggers><TimeTrigger><StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
-  <Actions context="Author"><Exec><Command>cmd.exe</Command><Arguments>/c {command}</Arguments></Exec></Actions>
-  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT2H</ExecutionTimeLimit><Priority>7</Priority></Settings>
-</Task>"""
+    svc_name = f"orca{uuid.uuid4().hex[:8]}"
+    bat_name = f"orca_{uuid.uuid4().hex[:8]}.bat"
+    # Write the oneliner into a BAT file so quote escaping in lpBinaryPathName
+    # is avoided entirely.  start /b detaches PowerShell from cmd.exe so
+    # cmd.exe exits immediately — the service "stops" from SCM's point of view
+    # but the PowerShell collection process keeps running independently.
+    bat_content = f"@echo off\r\nstart \"\" /b {command}\r\ndel \"%~f0\"\r\n".encode("utf-8")
+    bat_remote = f"Temp\\{bat_name}"
 
     def _trigger():
-        string_binding = f"ncacn_np:{ip}[\\pipe\\atsvc]"
-        rpctransport = dce_transport.DCERPCTransportFactory(string_binding)
+        # 1. Upload BAT launcher via SMB ADMIN$
+        smb = SMBConnection(ip, ip)
+        smb.login(username, password, domain or "")
+        smb.putFile("ADMIN$", bat_remote, _io.BytesIO(bat_content).read)
+        smb.logoff()
+
+        # 2. Run the BAT via svcctl — no quoting issues in lpBinaryPathName
+        rpctransport = dce_transport.DCERPCTransportFactory(f"ncacn_np:{ip}[\\pipe\\svcctl]")
         rpctransport.set_credentials(username, password, domain or "", "", "", None)
         dce = rpctransport.get_dce_rpc()
         dce.connect()
+        dce.bind(scmr.MSRPC_UUID_SCMR)
+        sc = scmr.hROpenSCManagerW(dce)['lpScHandle']
+        bin_path = f'C:\\Windows\\System32\\cmd.exe /c "C:\\Windows\\Temp\\{bat_name}"'
+        svc = scmr.hRCreateServiceW(
+            dce, sc, svc_name, svc_name,
+            lpBinaryPathName=bin_path,
+            dwStartType=scmr.SERVICE_DEMAND_START,
+            dwErrorControl=scmr.SERVICE_ERROR_IGNORE,
+        )['lpServiceHandle']
         try:
-            dce.bind(tsch.MSRPC_UUID_TSCHS)
-            tsch.hSchRpcRegisterTask(dce, task_name, xml, tsch.TASK_CREATE_OR_UPDATE, None, tsch.TASK_LOGON_NONE)
-            tsch.hSchRpcRun(dce, task_name)
-            # Give the Task Scheduler service a moment to actually spawn the
-            # process before we remove the task's registration.
-            time.sleep(2)
             try:
-                tsch.hSchRpcDelete(dce, task_name)
+                scmr.hRStartServiceW(dce, svc)
             except Exception:
-                pass  # best-effort — the triggered process is unaffected either way
+                pass  # timeout expected — cmd.exe doesn't call SetServiceStatus
         finally:
+            try:
+                scmr.hRDeleteService(dce, svc)
+            except Exception:
+                pass
+            scmr.hRCloseServiceHandle(dce, svc)
+            scmr.hRCloseServiceHandle(dce, sc)
             dce.disconnect()
 
     loop = asyncio.get_event_loop()

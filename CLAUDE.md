@@ -23,7 +23,7 @@
 - **Fully portable, no hardcoded IPs (as of 2026-06-18)**: frontend builds with `VITE_API_URL` empty, so all `fetch()` calls resolve to relative `/api/...` paths against whatever host served the page; nginx proxies `/api/` to the backend by Docker service name (`orca-backend:8000`); CORS reads allowed origins from `CORS_ORIGINS` in `.env` (comma-separated, default `https://localhost`); TLS cert auto-generates on first boot for whatever IP/hostname the container has. Moving to a new server requires editing only `.env` (`CORS_ORIGINS`) and running `docker compose up --build` — no source changes.
 
 ## Current Task
-**Documentation written (2026-07-14). System is functional; awaiting next task.**
+**Remote collection pipeline fully working (2026-07-27). End-to-end verified: Registry collected from SANS-SIFT, 634,939 keys ingested. Awaiting next task.**
 
 ## Progress Log
 - [x] Documentation (2026-07-14):
@@ -135,7 +135,11 @@
   - Bug fix found during verification: `backend/main.py`'s `/api/auth/login` caught its own deliberately-raised `HTTPException(401)` in a broad `except Exception` and rewrapped it as a 500 — bad credentials returned 500 instead of 401. Fixed by re-raising `HTTPException` before the generic catch-all.
 
 ## Last Completed Step
-Remote collection trigger switched from WinRM-only to SMB+Task Scheduler (default) with WinRM as opt-in fallback, fully implemented, rebuilt, deployed, and verified (2026-06-18).
+Remote collection pipeline end-to-end verified working (2026-07-27). Three root-cause fixes applied:
+1. `orca-postgres` container had exited (exit 255, ~17 hours); `docker start orca-postgres` restored it.
+2. Docker Desktop port forwarding for `orca-frontend` was stale after the backend's crash-loop restart cycles; `docker restart orca-frontend` restored port 443/80 forwarding. **This can recur — if port 443 is unreachable externally, restart the frontend container.**
+3. `ORCA_SERVER_URL` was `https://192.168.16.1` (VMware VMnet8 gateway IP — completely unreachable from the VM because VMware's virtual switch does not forward L2 traffic from VMs to the host's own VMnet8 interface IP); changed to `https://10.11.110.60` (the host's main Ethernet IP, reachable via VMware NAT hairpin). Set in `.env` and picked up by `docker compose up -d --no-deps orca-backend`.
+Also: `vmnetnat.conf` `resetConnectionOnDestLocalHost` changed from 1 → 0 (allows VM→host TCP on NAT daemon IP 192.168.16.2; effect on main Ethernet IP reachability is indirect); Docker Desktop Backend Block-TCP-Public firewall rules disabled (were blocking VMnet8 traffic before the `ORCA_SERVER_URL` fix made them irrelevant). The ORCA Allow-port-443 firewall rule added earlier remains in place.
 
 ## Decisions Made
 - `requirements.txt` generated from backend imports: fastapi, uvicorn, sqlalchemy, pydantic, python-jose, passlib, psycopg2-binary, python-multipart, pyyaml, pandas, httpx, aiofiles, python-dotenv

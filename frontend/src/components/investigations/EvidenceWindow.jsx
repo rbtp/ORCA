@@ -1041,6 +1041,11 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
           {/* Evidence records — unchanged from original */}
           {sel && (
             <Card title="EVIDENCE_RECORDS" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+              {REGISTRY_TCODES.has(sel) ? (
+                evidenceRows.length > 0
+                  ? <RegistryTreeViewer rows={evidenceRows} />
+                  : <div style={{ color: C.greyDim, fontSize: 12, padding: 14 }}>NO_REGISTRY_DATA_COLLECTED</div>
+              ) : (<>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 12px', borderBottom: `1px solid ${C.border}`, flexShrink: 0, gap: 8 }}>
                 <span style={{ color: C.greyDim, fontSize: 10 }}>{dispRows.length}/{filteredRows.length} RECORDS</span>
                 <input placeholder="FILTER..." value={filter} onChange={e => { setFilter(e.target.value); setVisibleCount(50); }}
@@ -1193,6 +1198,7 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
                   </div>
                 )}
               </div>
+              </>)}
             </Card>
           )}
         </div>
@@ -2129,7 +2135,12 @@ const MftViewer = ({ assetId }) => {
 // REGISTRY TREE VIEWER
 // ══════════════════════════════════════════════════════════════════════════════
 
-const REGISTRY_TCODES = new Set(['REGISTRY']);
+const REGISTRY_TCODES = new Set([
+  'REGISTRY',
+  'REGISTRY_CLASSES_ROOT', 'REGISTRY_CURRENT_CONFIG',
+  'REGISTRY_NTUSER', 'REGISTRY_SAM', 'REGISTRY_SECURITY',
+  'REGISTRY_SOFTWARE', 'REGISTRY_SYSTEM', 'REGISTRY_USRCLASS',
+]);
 
 const HIVE_ORDER = ['HKEY_CLASSES_ROOT','HKEY_CURRENT_USER','HKEY_LOCAL_MACHINE','HKEY_USERS','HKEY_CURRENT_CONFIG'];
 
@@ -4032,6 +4043,20 @@ const ALL_SOURCES = [
   'EVENT_LOGS_TASKSCHEDULER','PREFETCH','LNK_JUMPLISTS','SCHEDULED_TASKS',
 ];
 
+const _hlEsc = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const highlight = (text, terms) => {
+  if (!text || !terms || terms.length === 0) return text;
+  const esc = terms.map(_hlEsc);
+  const parts = String(text).split(new RegExp(`(${esc.join('|')})`, 'gi'));
+  if (parts.length <= 1) return text;
+  const isMatch = new RegExp(`^(${esc.join('|')})$`, 'i');
+  return parts.map((p, i) =>
+    isMatch.test(p)
+      ? <span key={i} style={{ background: '#ffaa00', color: '#000', borderRadius: 2, padding: '0 1px' }}>{p}</span>
+      : p
+  );
+};
+
 export const TimelineViewer = ({ assetId }) => {
   const [entries, setEntries]         = useState([]);
   const [total, setTotal]             = useState(0);
@@ -4389,7 +4414,7 @@ export const TimelineViewer = ({ assetId }) => {
                   whiteSpace: isExp ? 'normal' : 'nowrap',
                   overflow: isExp ? 'visible' : 'hidden',
                   textOverflow: isExp ? 'unset' : 'ellipsis' }}>
-                  {e.title}
+                  {highlight(e.title, filters)}
                 </div>
                 {(isExp || e.detail) && (
                   <div style={{ color: C.greyDim, fontSize: 9, marginTop: 2,
@@ -4397,12 +4422,12 @@ export const TimelineViewer = ({ assetId }) => {
                     overflow: isExp ? 'visible' : 'hidden',
                     textOverflow: isExp ? 'unset' : 'ellipsis',
                     maxWidth: '100%' }}>
-                    {e.detail}
+                    {highlight(e.detail, filters)}
                   </div>
                 )}
               </div>
               <span style={{ width: 100, flexShrink: 0, textAlign: 'right',
-                color: C.greyDim, fontSize: 9 }}>{e.extra}</span>
+                color: C.greyDim, fontSize: 9 }}>{highlight(e.extra, filters)}</span>
             </div>
           );
         })}

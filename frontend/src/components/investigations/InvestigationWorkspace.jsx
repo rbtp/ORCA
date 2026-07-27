@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import InvestigationGallery from './InvestigationGallery';
 import CaseDetail from './CaseDetail';
 
-export default function InvestigationWorkspace({ activeNodes, activeLinks, updateNodeData }) {
+export default function InvestigationWorkspace({ activeNodes, activeLinks, updateNodeData, pendingCase, onPendingCaseHandled }) {
   const [mitreData, setMitreData] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [cases, setCases] = useState([]);
@@ -70,6 +70,9 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
       if (r.ok) {
         const data = await r.json();
         setPkgProgress(prev => ({ ...prev, [String(assetId)]: data }));
+        // No active token left means nothing more can ever check in — stop polling
+        // instead of spinning forever on techniques that lost the race and got shut out.
+        if (!data.package_active || data.pending === 0) stopProgressPolling(assetId);
       }
     } catch {}
   };
@@ -132,6 +135,14 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
       setStatus("CONNECTED_STABLE");
     }
   };
+
+  // Jumping in from the dashboard's ACTIVE_INVESTIGATIONS list — open that case directly
+  // instead of landing on the gallery.
+  useEffect(() => {
+    if (!pendingCase) return;
+    handleSelectCase(pendingCase);
+    onPendingCaseHandled && onPendingCaseHandled();
+  }, [pendingCase]);
 
   const handleAddCase = async (newCase) => {
     setCases(prev => [...prev, newCase]);

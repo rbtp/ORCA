@@ -26,6 +26,7 @@ export default function App() {
   const [agentFleetOpen, setAgentFleetOpen] = useState(false);
   const [agentFleet, setAgentFleet] = useState([]);
   const [selectedIntel, setSelectedIntel] = useState(null);
+  const [pendingCase, setPendingCase] = useState(null);
 
   const [cases, setCases] = useState([]);
   const [dbStatus, setDbStatus] = useState("INITIALIZING...");
@@ -207,7 +208,7 @@ export default function App() {
           <div style={{ color: '#00ff41', fontSize: '10px', marginBottom: '20px', letterSpacing: '2px' }}>[ ACTIVE_INVESTIGATIONS ]</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
             {cases.length > 0 ? cases.map((c, i) => (
-              <div key={i} onClick={() => setActiveNav('Investigations')} style={{ border: '1px solid #111', padding: '15px', cursor: 'pointer', background: 'rgba(255,255,255,0.02)' }}>
+              <div key={i} onClick={() => { setPendingCase(c); setActiveNav('Investigations'); }} style={{ border: '1px solid #111', padding: '15px', cursor: 'pointer', background: 'rgba(255,255,255,0.02)' }}>
                 <div style={{ fontSize: '13px', color: '#eee', marginBottom: '5px' }}>{c.name}</div>
                 <div style={{ fontSize: '9px', color: '#444' }}>LEAD: {c.missionLead}</div>
               </div>
@@ -345,7 +346,8 @@ export default function App() {
         {activeNav === 'Reports' ? (
           <ReportsView />
         ) : activeNav === 'Investigations' ? (
-          <InvestigationWorkspace activeNodes={activeNodes} activeLinks={activeLinks} updateNodeData={updateNodeData} />
+          <InvestigationWorkspace activeNodes={activeNodes} activeLinks={activeLinks} updateNodeData={updateNodeData}
+            pendingCase={pendingCase} onPendingCaseHandled={() => setPendingCase(null)} />
         ) : (
           <div style={{ padding: '60px' }}>
             {activeNav === 'Dashboard' ? renderDashboard() :

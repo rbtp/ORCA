@@ -245,6 +245,24 @@ async def technique_status(
     return {"status": "ok"}
 
 
+# ── Agent completion + auto-revoke ────────────────────────────────────────────
+# Must be defined BEFORE /{t_code} so FastAPI matches /complete literally first.
+
+@router.post("/api/ingest/remote/{asset_id}/complete")
+async def agent_complete(
+    asset_id: int,
+    x_orca_token: str = Header(..., alias="X-ORCA-Token"),
+):
+    token_row = validate_package_token(x_orca_token, asset_id)
+    if not token_row:
+        return {"status": "ok", "message": "Token already inactive"}
+
+    revoke_token(x_orca_token)
+    logger.info("Agent self-reported complete, token auto-revoked: asset=%d token=%s",
+                asset_id, x_orca_token[:8])
+    return {"status": "ok", "message": "Token revoked. Collection complete."}
+
+
 # ── Evidence ingest ───────────────────────────────────────────────────────────
 
 @router.post("/api/ingest/remote/{asset_id}/{t_code}")
@@ -310,28 +328,6 @@ async def ingest_remote_evidence(
 
     logger.info("Remote ingest: asset=%d t_code=%s rows=%d mode=%s", asset_id, t_code, rows_written, x_mode)
     return {"status": "ok", "rows": rows_written, "is_fallback": is_fallback}
-
-
-# ── Agent completion + auto-revoke ────────────────────────────────────────────
-
-@router.post("/api/ingest/remote/{asset_id}/complete")
-async def agent_complete(
-    asset_id: int,
-    x_orca_token: str = Header(..., alias="X-ORCA-Token"),
-):
-    """
-    Called by the PS1 agent just before self-delete.
-    Revokes the token so it cannot be reused.
-    Returns 200 even if already revoked — agent does not need to retry.
-    """
-    token_row = validate_package_token(x_orca_token, asset_id)
-    if not token_row:
-        return {"status": "ok", "message": "Token already inactive"}
-
-    revoke_token(x_orca_token)
-    logger.info("Agent self-reported complete, token auto-revoked: asset=%d token=%s",
-                asset_id, x_orca_token[:8])
-    return {"status": "ok", "message": "Token revoked. Collection complete."}
 
 
 # ── Progress poll ─────────────────────────────────────────────────────────────

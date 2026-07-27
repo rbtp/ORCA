@@ -72,7 +72,28 @@
       "Bash(echo \"exit: $?\")",
       "Bash(MSYS_NO_PATHCONV=1 docker cp \"C:\\\\Users\\\\Sentinel\\\\Desktop\\\\Tests\\\\ORCAWEB\\\\frontend\\\\dist\\\\.\" orca-frontend:/usr/share/nginx/html/)",
       "Bash(curl -sk https://10.11.110.60/ -o /tmp/idx.html -w \"HTTP %{http_code}\\\\n\")",
-      "Bash(curl -sk \"https://10.11.110.60/assets/index-mTeS_P03.js\" -o /tmp/bundle.js -w \"HTTP %{http_code}\\\\n\")"
+      "Bash(curl -sk \"https://10.11.110.60/assets/index-mTeS_P03.js\" -o /tmp/bundle.js -w \"HTTP %{http_code}\\\\n\")",
+      "PowerShell(New-Item *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh repo *)",
+      "PowerShell(docker run *)",
+      "Bash(gh api *)",
+      "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\(c['sha'][:8], c['commit']['author']['date'][:10], c['commit']['message'][:80]\\) for c in data]\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('tag:', d.get\\('tag_name'\\)\\); print\\('date:', d.get\\('published_at',''\\)[:10]\\); print\\('name:', d.get\\('name',''\\)\\)\")",
+      "PowerShell(gh api *)",
+      "WebFetch(domain:api.github.com)",
+      "PowerShell(Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/BushidoCyb3r/Remora/main/remora.py\" -OutFile \"C:\\\\Users\\\\Sentinel\\\\Desktop\\\\Tests\\\\ORCAWEB\\\\backend\\\\bin\\\\remora\\\\volatility3\\\\remora.py\" -UseBasicParsing; Write-Host \"Done, size: $\\(\\(Get-Item 'C:\\\\Users\\\\Sentinel\\\\Desktop\\\\Tests\\\\ORCAWEB\\\\backend\\\\bin\\\\remora\\\\volatility3\\\\remora.py'\\).Length\\) bytes\")",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\Sentinel\\\\Desktop\\\\Tests\\\\ORCAWEB\\\\backend\\\\bin\\\\remora\\\\volatility3\" | Select-Object Name, LastWriteTime, @{N='Size\\(KB\\)';E={[math]::Round\\($_.Length/1KB,1\\)}})",
+      "Bash(xargs grep -l \"CREATE TABLE\")",
+      "Bash(xargs ls -lh)",
+      "Bash(docker stats *)",
+      "Skill(claude-in-chrome)",
+      "Bash(awk -F: '$1<739')",
+      "Bash(awk -F: '$1>=452 && $1<=2260')",
+      "Bash(grep -n \"EVIDENCE_RECORDS\\\\|RECORDS\\\\`\\\\|MftViewer\\\\|sel === 'MFT'\" frontend/src/components/investigations/EvidenceWindow.jsx)",
+      "Bash(awk -F: '$1<1202')"
     ]
   }
 }

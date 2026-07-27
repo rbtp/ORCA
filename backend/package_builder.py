@@ -91,6 +91,38 @@ def revoke_token(token: str):
 
 def get_asset_techniques(asset_id: int) -> list[dict]:
     with db.engine.connect() as conn:
+        # Resolve case focus to detect custom investigation profiles
+        focus_row = conn.execute(text("""
+            SELECT c.focus_country
+            FROM assets a
+            JOIN cases c ON c.name = a.case_name
+            WHERE a.id = :asset_id
+        """), {"asset_id": asset_id}).mappings().fetchone()
+
+        focus = str((focus_row or {}).get("focus_country") or "")
+
+        if focus.startswith("[PROFILE]"):
+            # Custom investigation profile — bypass the MITRE attribution chain
+            profile_name = focus[len("[PROFILE] "):]
+            profile_row = conn.execute(text("""
+                SELECT tcodes FROM investigation_profiles WHERE name = :name
+            """), {"name": profile_name}).mappings().fetchone()
+            t_codes = list(profile_row["tcodes"]) if profile_row else []
+            if not t_codes:
+                return []
+            rows = conn.execute(text("""
+                SELECT t_code,
+                       COALESCE(name, t_code) AS technique_name,
+                       custom_vql,
+                       surgical_yaml
+                FROM ref_artifact_library
+                WHERE t_code = ANY(:codes)
+                  AND (custom_vql IS NOT NULL OR surgical_yaml IS NOT NULL)
+                ORDER BY t_code
+            """), {"codes": t_codes}).mappings().fetchall()
+            return [dict(r) for r in rows]
+
+        # Standard path — MITRE geopolitical attribution chain
         rows = conn.execute(text("""
             SELECT DISTINCT
                 mt.t_code,

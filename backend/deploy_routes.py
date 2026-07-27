@@ -42,6 +42,9 @@ _build_executor = ThreadPoolExecutor(max_workers=20)
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _get_orca_base_url() -> str:
+    configured = os.environ.get("ORCA_SERVER_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))

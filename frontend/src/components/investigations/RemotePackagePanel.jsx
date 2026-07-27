@@ -46,6 +46,9 @@ export default function RemotePackagePanel({ assetId, hostname, caseName }) {
       if (!resp.ok) return;
       const data = await resp.json();
       setProgress(data);
+      // No active token left means nothing more can ever check in — stop polling
+      // instead of spinning forever on techniques that lost the race and got shut out.
+      if (!data.package_active || data.pending === 0) stopPoll();
     } catch (_) {}
   };
 

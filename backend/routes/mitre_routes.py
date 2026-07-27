@@ -689,6 +689,58 @@ async def get_unified_timeline(
     return {"total": total, "page": page, "page_size": page_size, "entries": entries}
 
 
+# Maps each REGISTRY_* sub-technique to (hive_root, path_segments), mirroring the
+# `globs=` path each sub-technique's own VQL actually collects. path_segments is a
+# list walked one level at a time:
+#   '*'      matches (and keeps) every child at that level
+#   callable matches (and keeps) only children whose key name passes the predicate
+#   str      matches that one literal child key
+# Empty list = whole hive.
+#
+# HKEY_USERS mounts two hives per user, as siblings: the SID key itself is
+# NTUSER.DAT; a second "<SID>_Classes" key is UsrClass.dat — a genuinely separate
+# hive file, not a subtree of the SID key. NTUSER/USRCLASS must partition on that
+# suffix or each one's view bleeds into the other's.
+_NOT_CLASSES_HIVE = lambda k: not k.endswith('_Classes')
+_CLASSES_HIVE     = lambda k: k.endswith('_Classes')
+
+_REGISTRY_SUBTREE_MAP = {
+    'REGISTRY_CLASSES_ROOT':   ('HKEY_CLASSES_ROOT', []),
+    'REGISTRY_NTUSER':         ('HKEY_USERS', [_NOT_CLASSES_HIVE]),
+    'REGISTRY_USRCLASS':       ('HKEY_USERS', [_CLASSES_HIVE]),
+    'REGISTRY_SAM':            ('HKEY_LOCAL_MACHINE', ['SAM']),
+    'REGISTRY_SECURITY':       ('HKEY_LOCAL_MACHINE', ['SECURITY']),
+    'REGISTRY_SOFTWARE':       ('HKEY_LOCAL_MACHINE', ['SOFTWARE']),
+    'REGISTRY_SYSTEM':         ('HKEY_LOCAL_MACHINE', ['SYSTEM']),
+    'REGISTRY_CURRENT_CONFIG': ('HKEY_LOCAL_MACHINE',
+                                ['SYSTEM', 'CurrentControlSet', 'Hardware Profiles', 'Current']),
+}
+
+
+def _slice_registry_subtree(node, path_segments):
+    """Walk `node` along path_segments, returning only the matched branches
+    (still keyed by their real names) instead of the whole node. '*' keeps
+    every child at that level; a callable keeps children whose name it accepts."""
+    if not path_segments:
+        return node
+    seg, rest = path_segments[0], path_segments[1:]
+    items = [(k, v) for k, v in node.items() if k not in ('_values', '_meta')]
+    if seg == '*':
+        candidates = items
+    elif callable(seg):
+        candidates = [(k, v) for k, v in items if seg(k)]
+    else:
+        candidates = [(seg, node[seg])] if seg in node else []
+    result = {}
+    for k, v in candidates:
+        if not isinstance(v, dict):
+            continue
+        sliced = _slice_registry_subtree(v, rest) if rest else v
+        if sliced:
+            result[k] = sliced
+    return result
+
+
 @router.get("/evidence/{asset_id}/{t_code}")
 async def get_modular_evidence(asset_id: int, t_code: str, current_user: dict = Depends(get_current_user)):
     session = db.get_session()
@@ -705,6 +757,30 @@ async def get_modular_evidence(asset_id: int, t_code: str, current_user: dict = 
             FROM evidence WHERE asset_id = :aid AND t_code = :t
         """), {"aid": asset_id, "t": t_code}).mappings().all()
         evidence_list = [json.loads(r['data']) if isinstance(r['data'], str) else r['data'] for r in rows]
+
+        # For REGISTRY_* sub-techniques with no direct rows, slice from the merged REGISTRY rollup.
+        if not evidence_list and t_code in _REGISTRY_SUBTREE_MAP:
+            rollup = session.execute(text("""
+                SELECT raw_data FROM evidence
+                WHERE asset_id = :aid AND t_code = 'REGISTRY'
+                LIMIT 1
+            """), {"aid": asset_id}).mappings().first()
+            if rollup:
+                try:
+                    doc = json.loads(rollup['raw_data']) if isinstance(rollup['raw_data'], str) else rollup['raw_data']
+                    hive_root, path_segments = _REGISTRY_SUBTREE_MAP[t_code]
+                    full_tree = doc.get('tree', {})
+                    hive_tree = full_tree.get(hive_root, {})
+                    subtree = {hive_root: _slice_registry_subtree(hive_tree, path_segments)}
+                    evidence_list = [{
+                        'tree': subtree,
+                        'key_count': doc.get('key_count', 0),
+                        'hives': [hive_root],
+                        '_sliced_from': 'REGISTRY',
+                    }]
+                except Exception:
+                    pass
+
         return {"t_code": t_code, "summary": summary_text, "rows": evidence_list}
     finally:
         session.close()

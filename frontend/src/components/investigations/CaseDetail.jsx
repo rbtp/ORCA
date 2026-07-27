@@ -1030,7 +1030,7 @@ export default function CaseDetail({
                     })}
                   </div>
                   <div style={{ marginTop: 8, color: '#555', fontSize: 9, lineHeight: 1.8 }}>
-                    Requires psexec.exe in backend/bin/ · Targets must have SMB (445) reachable · Runs as SYSTEM via PsExec -s -d
+                    Requires SMB (port 445) reachable · Local admin credentials · Runs via impacket SCM (no psexec required)
                   </div>
                 </div>
               )}
