@@ -81,6 +81,7 @@
 - Full results persisted to database; history picker lets analysts compare runs across multiple samples on the same asset
 - Behavioral summary card in the asset Overview tab; BEHAVIORAL ANALYSIS tab badge shows live technique count
 - Behavioral data included in DOCX/PDF report exports
+- **Uploaded samples are stored on a `noexec,nosuid,nodev` tmpfs mount** (`/tmp/orca_behavioral`, see `docker-compose.yml`) — kernel-enforced, not just file-permission bits, so a submitted sample can never be executed on the host or in the container regardless of application-level bugs. tmpfs also means samples live in RAM only: they never touch disk and are wiped on every container restart, independent of the app's own per-job cleanup
 
 ### Reporting
 - DOCX report export via Node.js + `docx` library with a terminal/dark theme

@@ -139,20 +139,29 @@ async def submit_behavioral_analysis(
             "message": "Behavioral analysis supports PE32/PE64 and ELF binaries only.",
         })
 
-    with db.engine.connect() as conn:
-        conn.execute(text("""
-            INSERT INTO behavioral_jobs
-                (job_id, asset_id, submitted_file, file_path, file_type, submitted_by,
-                 overall_status, capa_status, floss_status, speakeasy_status)
-            VALUES
-                (:jid, :aid, :sfile, :fpath, :ftype, :by,
-                 'running', 'pending', 'pending', 'pending')
-        """), {
-            "jid": job_id, "aid": asset_id, "sfile": display_name,
-            "fpath": actual_path, "ftype": ftype,
-            "by": analyst_initials or current_user.get("initials", ""),
-        })
-        conn.commit()
+    try:
+        with db.engine.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO behavioral_jobs
+                    (job_id, asset_id, submitted_file, file_path, file_type, submitted_by,
+                     overall_status, capa_status, floss_status, speakeasy_status)
+                VALUES
+                    (:jid, :aid, :sfile, :fpath, :ftype, :by,
+                     'running', 'pending', 'pending', 'pending')
+            """), {
+                "jid": job_id, "aid": asset_id, "sfile": display_name,
+                "fpath": actual_path, "ftype": ftype,
+                "by": analyst_initials or current_user.get("initials", ""),
+            })
+            conn.commit()
+    except Exception as e:
+        # Confirmed live 2026-08-18: this insert failing (behavioral_jobs
+        # not existing yet, in this case) previously left the just-uploaded
+        # file orphaned in tmp_dir forever -- nothing past the upload step
+        # cleaned it up on this specific failure path.
+        if is_temp:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"Could not create analysis job: {e}")
 
     q: asyncio.Queue = asyncio.Queue()
     _job_queues[job_id] = q

@@ -24,6 +24,14 @@ services:
       - orca-evidence:/app/evidence
       - ${MEMORY_DUMPS_DIR:-./memory-dumps}:/app/memory-dumps:ro  # host dir for memory images (set MEMORY_DUMPS_DIR in .env)
       - ${CASES_DIR:-./cases}:/app/cases:rw                       # investigation working dirs (set CASES_DIR in .env)
+    tmpfs:
+      # Uploaded behavioral-analysis samples are live malware -- noexec/nosuid/nodev
+      # is kernel-enforced, unlike file permission bits alone (644 already isn't
+      # executable, but that doesn't stop a bug or a compromised process from
+      # chmod +x-ing something and running it). tmpfs also means the samples never
+      # touch the host disk or the container's persistent layer at all -- gone on
+      # container stop, not just on job delete.
+      - /tmp/orca_behavioral:noexec,nosuid,nodev,mode=1770,uid=1000,gid=0,size=4g
     networks:
       - orca-net
     depends_on:
