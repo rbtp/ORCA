@@ -8,6 +8,7 @@ import DetectionCoverage from "./components/Tools/DetectionCoverage";
 import IOCManager from "./components/IOCManager.jsx";
 import ReportsView from "./components/investigations/ReportsView";
 import UserManagement from "./components/management/UserManagement";
+import AuditTrail from "./components/management/AuditTrail";
 import NetworkSettings from "./components/Options/NetworkSettings";
 import GeneralSettings from "./components/Options/GeneralSettings";
 import VelociraptorModal from "./components/VelociraptorModal";
@@ -130,7 +131,7 @@ export default function App() {
       <div style={{ marginBottom: '40px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
           <h1 style={{ fontSize: '32px', fontWeight: '900', margin: '0', color: '#00ff41' }}>COMMAND_CENTER</h1>
-          <div style={{ color: '#444', fontSize: '10px', fontFamily: 'monospace' }}>ORCA_WEB_v1.0.6 // OPERATOR: {user.username.toUpperCase()}</div>
+          <div style={{ color: '#aaa', fontSize: '10px', fontFamily: 'monospace' }}>ORCA_WEB_v1.0.6 // OPERATOR: {user.username.toUpperCase()}</div>
         </div>
         <button onClick={logout} style={{ background: 'none', border: '1px solid #ff4141', color: '#ff4141', padding: '5px 15px', cursor: 'pointer', fontFamily: 'monospace', fontSize: '10px' }}>
           TERMINATE_SESSION
@@ -163,19 +164,19 @@ export default function App() {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
             <div style={{ border: '1px solid #111', padding: '20px' }}>
-              <div style={{ fontSize: '10px', color: '#444', marginBottom: '10px' }}>DATABASE_STATUS</div>
+              <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '10px' }}>DATABASE_STATUS</div>
               <div style={{ fontSize: '18px', color: dbStatus.includes('STABLE') ? '#00ff41' : '#ff4141' }}>{dbStatus}</div>
             </div>
             <div style={{ border: '1px solid #111', padding: '20px', background: 'rgba(255,255,255,0.01)' }}>
-              <div style={{ fontSize: '10px', color: '#444', marginBottom: '10px' }}>SYSTEM_INFO</div>
-              <div style={{ fontSize: '12px', color: '#555' }}>AUTH_ROLE: {user.role?.toUpperCase() || "USER"}</div>
+              <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '10px' }}>SYSTEM_INFO</div>
+              <div style={{ fontSize: '12px', color: '#bbb' }}>AUTH_ROLE: {user.role?.toUpperCase() || "USER"}</div>
             </div>
           </div>
 
           {/* Agent Fleet Widget */}
           <div style={{ border: '1px solid #111', padding: '16px 20px', background: 'rgba(0,255,65,0.01)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div style={{ fontSize: '10px', color: '#444', fontFamily: 'monospace', letterSpacing: 1 }}>AGENT_FLEET</div>
+              <div style={{ fontSize: '10px', color: '#aaa', fontFamily: 'monospace', letterSpacing: 1 }}>AGENT_FLEET</div>
               <button
                 onClick={() => setAgentFleetOpen(true)}
                 style={{ background: '#00ff41', color: '#000', border: 'none', padding: '5px 14px', cursor: 'pointer', fontFamily: 'monospace', fontSize: '10px', fontWeight: 'bold' }}>
@@ -183,20 +184,20 @@ export default function App() {
               </button>
             </div>
             {agentFleet.length === 0 ? (
-              <div style={{ fontSize: '11px', color: '#333', fontFamily: 'monospace' }}>NO AGENTS REGISTERED</div>
+              <div style={{ fontSize: '11px', color: '#999', fontFamily: 'monospace' }}>NO AGENTS REGISTERED</div>
             ) : (
               <div style={{ display: 'flex', gap: 24 }}>
                 <div style={{ fontFamily: 'monospace', fontSize: 11 }}>
                   <span style={{ color: '#00ff41' }}>● </span>
-                  <span style={{ color: '#555' }}>ONLINE: </span>
+                  <span style={{ color: '#bbb' }}>ONLINE: </span>
                   <span style={{ color: '#00ff41', fontWeight: 'bold' }}>{agentFleet.filter(a => a.status === 'ONLINE').length}</span>
                 </div>
                 <div style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                  <span style={{ color: '#444' }}>○ </span>
-                  <span style={{ color: '#555' }}>OFFLINE: </span>
-                  <span style={{ color: '#555', fontWeight: 'bold' }}>{agentFleet.filter(a => a.status === 'OFFLINE').length}</span>
+                  <span style={{ color: '#aaa' }}>○ </span>
+                  <span style={{ color: '#bbb' }}>OFFLINE: </span>
+                  <span style={{ color: '#bbb', fontWeight: 'bold' }}>{agentFleet.filter(a => a.status === 'OFFLINE').length}</span>
                 </div>
-                <div style={{ fontFamily: 'monospace', fontSize: 10, color: '#333' }}>
+                <div style={{ fontFamily: 'monospace', fontSize: 10, color: '#999' }}>
                   {agentFleet.filter(a => a.status === 'ONLINE').map(a => a.hostname).join(' · ') || ''}
                 </div>
               </div>
@@ -210,10 +211,10 @@ export default function App() {
             {cases.length > 0 ? cases.map((c, i) => (
               <div key={i} onClick={() => { setPendingCase(c); setActiveNav('Investigations'); }} style={{ border: '1px solid #111', padding: '15px', cursor: 'pointer', background: 'rgba(255,255,255,0.02)' }}>
                 <div style={{ fontSize: '13px', color: '#eee', marginBottom: '5px' }}>{c.name}</div>
-                <div style={{ fontSize: '9px', color: '#444' }}>LEAD: {c.missionLead}</div>
+                <div style={{ fontSize: '9px', color: '#aaa' }}>LEAD: {c.missionLead}</div>
               </div>
             )) : (
-              <div style={{ color: '#222', fontSize: '10px' }}>NO_DATA_RECORDS</div>
+              <div style={{ color: '#888', fontSize: '10px' }}>NO_DATA_RECORDS</div>
             )}
           </div>
         </div>
@@ -222,7 +223,7 @@ export default function App() {
   );
 
   const renderMitreDossier = () => {
-    if (!selectedIntel) return <div style={{ color: '#444', fontFamily: 'monospace' }}>SELECT_INTEL_OBJECT_TO_DECODE...</div>;
+    if (!selectedIntel) return <div style={{ color: '#aaa', fontFamily: 'monospace' }}>SELECT_INTEL_OBJECT_TO_DECODE...</div>;
     const techs = selectedIntel.linkedTechniques || selectedIntel.techniques || [];
     const hierarchy = getMatrixHierarchy(techs);
 
@@ -232,7 +233,7 @@ export default function App() {
           <h1 style={{ fontSize: '36px', fontWeight: '900', margin: '0 0 10px 0', color: '#00ff41', letterSpacing: '-1px' }}>
             {(selectedIntel?.name || selectedIntel?.id || "UNKNOWN_THREAT").toUpperCase()}
           </h1>
-          <div style={{ color: '#444', fontSize: '10px', fontFamily: 'monospace', letterSpacing: '2px' }}>
+          <div style={{ color: '#aaa', fontSize: '10px', fontFamily: 'monospace', letterSpacing: '2px' }}>
             ID: {selectedIntel.id} // STIX: {selectedIntel.stix_id}
           </div>
         </div>
@@ -254,7 +255,7 @@ export default function App() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '40px' }}>
             {Object.entries(hierarchy).map(([tactic, techniques]) => (
               <div key={tactic} style={{ border: '1px solid #111', padding: '30px', background: 'rgba(0,0,0,0.3)' }}>
-                <div style={{ fontSize: '11px', color: '#444', marginBottom: '25px', borderBottom: '1px solid #222', paddingBottom: '10px', fontWeight: '900' }}>
+                <div style={{ fontSize: '11px', color: '#aaa', marginBottom: '25px', borderBottom: '1px solid #222', paddingBottom: '10px', fontWeight: '900' }}>
                   TACTIC // {tactic.toUpperCase()}
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(450px, 1fr))', gap: '20px' }}>
@@ -286,17 +287,17 @@ export default function App() {
   };
 
   const renderStaging = (name) => (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '60px', border: '1px dashed #111', color: '#222', fontSize: '10px', fontFamily: 'monospace' }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '60px', border: '1px dashed #111', color: '#888', fontSize: '10px', fontFamily: 'monospace' }}>
       SYSTEM_STAGING: {name}_MODULE_OFFLINE
     </div>
   );
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: '#020202', color: '#eee', overflow: 'hidden', filter: 'brightness(var(--text-brightness))' }}>
+    <div style={{ display: 'flex', height: '100vh', background: '#020202', color: '#eee', overflow: 'hidden' }}>
       <aside style={{ width: isCollapsed ? '80px' : '240px', borderRight: '1px solid #111', display: 'flex', flexDirection: 'column', transition: 'width 0.2s ease' }}>
         <div style={{ padding: '30px', borderBottom: '1px solid #111', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           {!isCollapsed && <span style={{ color: '#00ff41', fontWeight: 'bold', letterSpacing: '4px' }}>ORCA_WEB</span>}
-          <button onClick={() => setIsCollapsed(!isCollapsed)} style={{ background: 'none', border: 'none', color: '#333', cursor: 'pointer' }}>{isCollapsed ? '>' : '<'}</button>
+          <button onClick={() => setIsCollapsed(!isCollapsed)} style={{ background: 'none', border: 'none', color: '#999', cursor: 'pointer' }}>{isCollapsed ? '>' : '<'}</button>
         </div>
         <nav style={{ flex: 1, padding: '20px 0' }}>
           {['Dashboard', 'Investigations', 'Tools', 'IOCs', 'Reports', 'Options'].map(item => (
@@ -309,7 +310,7 @@ export default function App() {
 
       {activeNav === 'Tools' && (
         <section style={{ width: '220px', borderRight: '1px solid #111', background: '#030303' }}>
-          <div style={{ padding: '30px', color: '#333', fontSize: '9px', letterSpacing: '2px' }}>SUB_MODULES</div>
+          <div style={{ padding: '30px', color: '#999', fontSize: '9px', letterSpacing: '2px' }}>SUB_MODULES</div>
           <nav>
             {['MITRE ATT&CK', 'Detection Coverage', 'Artifact Library Editor', 'Investigation Profiles'].map(item => (
               <div key={item} onClick={() => setActiveSubNav(item)} style={{ padding: '12px 30px', cursor: 'pointer', fontSize: '11px', color: activeSubNav === item ? '#eee' : '#333', background: activeSubNav === item ? 'rgba(0, 255, 65, 0.03)' : 'transparent', borderLeft: activeSubNav === item ? '2px solid #00ff41' : '2px solid transparent' }}>{item}</div>
@@ -320,7 +321,7 @@ export default function App() {
 
       {activeNav === 'Options' && (
         <section style={{ width: '220px', borderRight: '1px solid #111', background: '#030303' }}>
-          <div style={{ padding: '30px', color: '#333', fontSize: '9px', letterSpacing: '2px' }}>SYSTEM_PREFERENCES</div>
+          <div style={{ padding: '30px', color: '#999', fontSize: '9px', letterSpacing: '2px' }}>SYSTEM_PREFERENCES</div>
           <nav>
             {['General', 'Network'].map(item => (
               <div key={item} onClick={() => setActiveOptionNav(item)} style={{ padding: '12px 30px', cursor: 'pointer', fontSize: '11px', color: activeOptionNav === item ? '#eee' : '#333', background: activeOptionNav === item ? 'rgba(0, 255, 65, 0.03)' : 'transparent', borderLeft: activeOptionNav === item ? '2px solid #00ff41' : '2px solid transparent' }}>{item.toUpperCase()}</div>
@@ -328,6 +329,11 @@ export default function App() {
             {user?.role === 'admin' && (
               <div onClick={() => setActiveOptionNav('User Management')} style={{ padding: '12px 30px', cursor: 'pointer', fontSize: '11px', color: activeOptionNav === 'User Management' ? '#00ff41' : '#ffb400', background: activeOptionNav === 'User Management' ? 'rgba(0, 255, 65, 0.03)' : 'transparent', borderLeft: activeOptionNav === 'User Management' ? '2px solid #00ff41' : '2px solid transparent' }}>
                 USER_REGISTRY
+              </div>
+            )}
+            {user?.role === 'admin' && (
+              <div onClick={() => setActiveOptionNav('Audit Trail')} style={{ padding: '12px 30px', cursor: 'pointer', fontSize: '11px', color: activeOptionNav === 'Audit Trail' ? '#00ff41' : '#ffb400', background: activeOptionNav === 'Audit Trail' ? 'rgba(0, 255, 65, 0.03)' : 'transparent', borderLeft: activeOptionNav === 'Audit Trail' ? '2px solid #00ff41' : '2px solid transparent' }}>
+                AUDIT_TRAIL
               </div>
             )}
             <div
@@ -354,6 +360,7 @@ export default function App() {
               activeNav === 'IOCs' ? <IOCManager cases={cases} /> :
               activeNav === 'Options' ? (
                 activeOptionNav === 'User Management' ? <UserManagement /> :
+              activeOptionNav === 'Audit Trail' ? <AuditTrail /> :
               activeOptionNav === 'Network' ? <NetworkSettings /> :
               activeOptionNav === 'General' ? <GeneralSettings /> :
               renderStaging(activeOptionNav.toUpperCase())

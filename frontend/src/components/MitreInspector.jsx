@@ -120,7 +120,7 @@ export default function MitreInspector() {
   return (
     <div style={{ width: '240px', background: '#080808', borderRight: '1px solid #1a1a1a', height: '100vh', overflowY: 'auto', fontFamily: 'monospace', flexShrink: 0 }}>
       <div style={{ padding: '15px', borderBottom: '1px solid #1a1a1a', position: 'sticky', top: 0, background: '#080808', zIndex: 10 }}>
-        <div style={{ fontSize: '9px', color: '#333', letterSpacing: '1px', marginBottom: '8px', fontWeight: 900 }}>INTEL_ENGINE</div>
+        <div style={{ fontSize: '9px', color: '#999', letterSpacing: '1px', marginBottom: '8px', fontWeight: 900 }}>INTEL_ENGINE</div>
         <input
           placeholder="FILTER..."
           value={searchTerm}

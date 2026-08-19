@@ -174,7 +174,7 @@ const ArtifactLibraryEditor = () => {
         <StatusBanner />
         <div style={{ maxWidth: '600px', border: '1px solid #111', padding: '30px', background: '#080808' }}>
           <div style={{ marginBottom: '25px' }}>
-            <label style={{ display: 'block', fontSize: '10px', color: '#444', marginBottom: '10px' }}>INTENT_MODE</label>
+            <label style={{ display: 'block', fontSize: '10px', color: '#aaa', marginBottom: '10px' }}>INTENT_MODE</label>
             <select 
               style={{ width: '100%', padding: '12px', background: '#000', border: '1px solid #222', color: '#eee', fontFamily: 'monospace' }}
               value={mode} 
@@ -185,7 +185,7 @@ const ArtifactLibraryEditor = () => {
             </select>
           </div>
           <div style={{ marginBottom: '30px' }}>
-            <label style={{ display: 'block', fontSize: '10px', color: '#444', marginBottom: '10px' }}>TECHNIQUE_SELECTION</label>
+            <label style={{ display: 'block', fontSize: '10px', color: '#aaa', marginBottom: '10px' }}>TECHNIQUE_SELECTION</label>
             <select 
               style={{ width: '100%', padding: '12px', background: '#000', border: '1px solid #222', color: '#eee', fontFamily: 'monospace' }}
               value={selectedTCode} 
@@ -215,10 +215,10 @@ const ArtifactLibraryEditor = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '40px', borderBottom: '1px solid #111', paddingBottom: '20px' }}>
         <div>
           <h2 style={{ fontSize: '24px', fontWeight: '900', color: '#00ff41', margin: 0 }}>LOGIC_CONFIG: {selectedTCode}</h2>
-          <div style={{ fontSize: '10px', color: '#444', marginTop: '5px' }}>GLOBAL_LIBRARY_UPLINK_ACTIVE</div>
+          <div style={{ fontSize: '10px', color: '#aaa', marginTop: '5px' }}>GLOBAL_LIBRARY_UPLINK_ACTIVE</div>
         </div>
         <div style={{ display: 'flex', gap: '15px' }}>
-          <button onClick={() => setStep(1)} style={{ background: 'none', border: '1px solid #222', color: '#555', padding: '8px 20px', cursor: 'pointer', fontFamily: 'monospace' }}>ABORT</button>
+          <button onClick={() => setStep(1)} style={{ background: 'none', border: '1px solid #222', color: '#bbb', padding: '8px 20px', cursor: 'pointer', fontFamily: 'monospace' }}>ABORT</button>
           <button onClick={handleSave} style={{ background: '#00ff41', border: 'none', color: '#000', padding: '8px 25px', cursor: 'pointer', fontFamily: 'monospace', fontWeight: 'bold' }}>COMMIT_CHANGES</button>
         </div>
       </div>
@@ -279,7 +279,7 @@ const ArtifactLibraryEditor = () => {
         </div>
 
         <div style={{ marginTop: '20px', background: '#050505', border: '1px solid #111', padding: '20px', fontFamily: 'monospace', fontSize: '12px' }}>
-          <div style={{ color: '#555', marginBottom: '10px', fontSize: '10px' }}>DEBUG_CONSOLE_FEEDBACK</div>
+          <div style={{ color: '#bbb', marginBottom: '10px', fontSize: '10px' }}>DEBUG_CONSOLE_FEEDBACK</div>
           <pre style={{ color: '#00ff41', whiteSpace: 'pre-wrap', margin: 0 }}>{consoleOutput || "READY_FOR_VALIDATION..."}</pre>
           
           {testData.length > 0 && (
@@ -503,7 +503,7 @@ const FILTER_OPERATORS = [
   { op: '<', label: 'less than' },
 ];
 
-const WLabel = { fontSize: 10, color: '#555', letterSpacing: 1, fontWeight: 'bold', display: 'block', marginBottom: 8 };
+const WLabel = { fontSize: 10, color: '#bbb', letterSpacing: 1, fontWeight: 'bold', display: 'block', marginBottom: 8 };
 const WInput = { width: '100%', background: '#050505', border: '1px solid #222', color: '#eee', padding: '10px', fontFamily: 'monospace', fontSize: 12, outline: 'none', boxSizing: 'border-box' };
 const WBtn = { padding: '8px 20px', fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', cursor: 'pointer', border: 'none' };
 
@@ -563,11 +563,11 @@ function VQLWizard({ onClose, onAccept, tCode, target }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 30, borderBottom: '1px solid #111', paddingBottom: 20 }}>
         <div>
           <h2 style={{ color: '#ffaa00', margin: 0, fontSize: 22, fontWeight: 900 }}>VQL_WIZARD</h2>
-          <div style={{ color: '#444', fontSize: 10, marginTop: 4 }}>
+          <div style={{ color: '#aaa', fontSize: 10, marginTop: 4 }}>
             {'BUILD ' + (target === 'YAML' ? 'YAML ARTIFACT' : 'VQL QUERY') + ' FOR ' + (tCode || 'SELECTED TCODE')}
           </div>
         </div>
-        <button onClick={onClose} style={{ ...WBtn, background: 'none', border: '1px solid #222', color: '#555' }}>CANCEL</button>
+        <button onClick={onClose} style={{ ...WBtn, background: 'none', border: '1px solid #222', color: '#bbb' }}>CANCEL</button>
       </div>
 
       <div style={{ display: 'flex', gap: 2, marginBottom: 30 }}>
@@ -594,7 +594,7 @@ function VQLWizard({ onClose, onAccept, tCode, target }) {
                   background: source && source.id === src.id ? 'rgba(255,170,0,0.05)' : '#050505', cursor: 'pointer' }}>
                 <div style={{ fontSize: 18, marginBottom: 4 }}>{src.icon}</div>
                 <div style={{ color: source && source.id === src.id ? '#ffaa00' : '#aaa', fontWeight: 'bold', fontSize: 11, marginBottom: 4 }}>{src.label}</div>
-                <div style={{ color: '#444', fontSize: 9 }}>{src.description}</div>
+                <div style={{ color: '#aaa', fontSize: 9 }}>{src.description}</div>
               </div>
             ))}
           </div>
@@ -660,16 +660,16 @@ function VQLWizard({ onClose, onAccept, tCode, target }) {
                     color: active ? '#ffaa00' : '#555',
                   }}>
                     {active ? '✓' : '○'} {f.label}
-                    <div style={{ fontSize: 9, color: '#333', marginTop: 2 }}>{f.vql}</div>
+                    <div style={{ fontSize: 9, color: '#999', marginTop: 2 }}>{f.vql}</div>
                   </div>
                 );
               })}
             </div>
           ) : (
-            <div style={{ color: '#555', fontSize: 11, marginBottom: 20 }}>SELECT * — all fields returned</div>
+            <div style={{ color: '#bbb', fontSize: 11, marginBottom: 20 }}>SELECT * — all fields returned</div>
           )}
           <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={() => setWStep(1)} style={{ ...WBtn, background: 'none', border: '1px solid #333', color: '#555' }}>BACK</button>
+            <button onClick={() => setWStep(1)} style={{ ...WBtn, background: 'none', border: '1px solid #333', color: '#bbb' }}>BACK</button>
             <button onClick={() => setWStep(3)} style={{ ...WBtn, background: '#ffaa00', color: '#000' }}>NEXT: FILTERS</button>
           </div>
         </div>
@@ -710,7 +710,7 @@ function VQLWizard({ onClose, onAccept, tCode, target }) {
             </div>
           )}
           <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={() => setWStep(2)} style={{ ...WBtn, background: 'none', border: '1px solid #333', color: '#555' }}>BACK</button>
+            <button onClick={() => setWStep(2)} style={{ ...WBtn, background: 'none', border: '1px solid #333', color: '#bbb' }}>BACK</button>
             <button onClick={goToPreview} style={{ ...WBtn, background: '#ffaa00', color: '#000' }}>PREVIEW VQL</button>
           </div>
         </div>
@@ -723,7 +723,7 @@ function VQLWizard({ onClose, onAccept, tCode, target }) {
             style={{ width: '100%', height: 220, background: '#020202', border: '1px solid #003300',
               color: '#00ff41', padding: 15, fontFamily: 'monospace', fontSize: 13, outline: 'none',
               resize: 'vertical', boxSizing: 'border-box', marginBottom: 20 }} />
-          <div style={{ background: '#050505', border: '1px solid #1a1a1a', padding: 14, marginBottom: 20, fontSize: 10, color: '#555' }}>
+          <div style={{ background: '#050505', border: '1px solid #1a1a1a', padding: 14, marginBottom: 20, fontSize: 10, color: '#bbb' }}>
             <div style={{ color: '#ffaa00', marginBottom: 6 }}>REVIEW BEFORE ACCEPTING</div>
             <div>- Plugin name is correct for your Velociraptor version</div>
             <div>- Field names match plugin output</div>
@@ -732,7 +732,7 @@ function VQLWizard({ onClose, onAccept, tCode, target }) {
             <div>- Test with TEST_VQL after accepting</div>
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={() => setWStep(3)} style={{ ...WBtn, background: 'none', border: '1px solid #333', color: '#555' }}>BACK</button>
+            <button onClick={() => setWStep(3)} style={{ ...WBtn, background: 'none', border: '1px solid #333', color: '#bbb' }}>BACK</button>
             <button onClick={handleAccept} style={{ ...WBtn, background: '#00ff41', color: '#000', fontSize: 13 }}>
               ACCEPT — DROP INTO {target === 'YAML' ? 'YAML' : 'VQL'} EDITOR
             </button>

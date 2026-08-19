@@ -170,13 +170,13 @@ export default function UserManagement() {
 const ContainerStyle = { padding: '20px', background: '#050505', border: '1px solid #111' };
 const HeaderStyle = { color: '#00ff41', fontSize: '14px', letterSpacing: '2px', margin: 0 };
 const TableStyle = { width: '100%', borderCollapse: 'collapse', fontFamily: 'monospace', fontSize: '12px' };
-const HeadRow = { textAlign: 'left', color: '#444', borderBottom: '1px solid #111' };
+const HeadRow = { textAlign: 'left', color: '#aaa', borderBottom: '1px solid #111' };
 const BodyRow = { borderBottom: '1px solid #0a0a0a', height: '40px' };
 const ActivePulse = { display: 'inline-block', width: '8px', height: '8px', background: '#00ff41', borderRadius: '50%', marginRight: '10px', boxShadow: '0 0 5px #00ff41' };
 
 const FormStyle = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', padding: '20px', border: '1px solid #111', background: '#080808' };
 const InputGroup = { display: 'flex', flexDirection: 'column', gap: '8px' };
-const LabelStyle = { color: '#444', fontSize: '9px', fontFamily: 'monospace' };
+const LabelStyle = { color: '#aaa', fontSize: '9px', fontFamily: 'monospace' };
 const InputStyle = { background: '#000', border: '1px solid #222', color: '#00ff41', padding: '10px', fontSize: '12px', fontFamily: 'monospace', outline: 'none' };
 const AddBtn = { background: 'none', border: '1px dashed #00ff41', color: '#00ff41', padding: '10px 20px', cursor: 'pointer', fontFamily: 'monospace' };
 const CancelBtn = { background: 'none', border: '1px solid #ff4141', color: '#ff4141', padding: '10px 20px', cursor: 'pointer', fontFamily: 'monospace' };

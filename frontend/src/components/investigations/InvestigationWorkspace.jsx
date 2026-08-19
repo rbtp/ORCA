@@ -179,7 +179,7 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
           boxShadow: '0 0 20px rgba(0,255,65,0.15)' }}>
           <div style={{ fontWeight: 'bold', marginBottom: 4, letterSpacing: 1 }}>✓ WORKING DIRECTORY CREATED</div>
           <div style={{ color: '#aaa', wordBreak: 'break-all' }}>{dirToast}</div>
-          <div style={{ color: '#555', fontSize: 9, marginTop: 6 }}>Drop evidence files here — asset subfolders created automatically</div>
+          <div style={{ color: '#bbb', fontSize: 9, marginTop: 6 }}>Drop evidence files here — asset subfolders created automatically</div>
         </div>
       )}
       <div style={{

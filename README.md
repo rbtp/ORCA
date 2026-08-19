@@ -12,6 +12,11 @@
 - Interactive network map with drag-and-drop node placement saved to the case
 - Per-case BLUF notes and technique-level analyst notes with author attribution
 - 4-step deletion confirmation with a math challenge and typed confirmation phrase
+- Edit investigation details (mission lead, team, support unit, personnel, country) from the case header at any time
+- Add Asset fields cascade top-to-bottom (Asset Type → Operating System → Form Factor); Operating System is the only field that actually drives MITRE technique association (see below), so a Network Device asset locks OS to `Network` automatically instead of leaving it as an independently-settable field that could silently mismatch and pull in the wrong platform's techniques
+- Network map: new nodes spawn near-center with slight jitter (no more stacking directly on top of existing nodes or flinging in from a default off-screen point); a hidden hit-area under each icon means dragging a node no longer falls through to panning the canvas
+- Network map: optional background image (upload / replace / clear), rendered behind nodes and links
+- Network map: devices (routers, switches, firewalls, etc.) can be renamed independently of their hostname
 
 ### MITRE ATT&CK Integration
 - Full ATT&CK knowledge base (groups, techniques, sub-techniques, tactics, campaigns) loaded from STIX data
@@ -28,6 +33,7 @@
 - **Three-path collection fallback** per technique: surgical YAML → custom VQL → generic fallback VQL
 - Tokenised ingest pipeline: each package uses a single-use time-limited token; the agent auto-revokes it on completion
 - Real-time progress polling shows per-technique status as evidence arrives
+- Manual evidence upload (JSON / JSONL / CSV / TXT) is available for any technique that doesn't yet have evidence — not gated behind a prior automatic-collection attempt
 
 ### Memory Forensics (Volatility3)
 - Run individual Volatility3 plugins (Windows, Linux, macOS) against a memory image
@@ -104,7 +110,12 @@
 - JWT authentication (HS256, 60-minute expiry)
 - `admin` and `analyst` roles
 - Rate-limited login: 5 requests per minute per IP
-- Admin-only routes: user creation/deletion, cert regeneration, agent deletion
+- Admin-only routes: user creation/deletion, cert regeneration, agent deletion, evidence deletion
+
+### Audit Trail
+- Evidence deletion is admin-only and gated behind three sequential confirmations — an explicit "are you sure", a math-problem verification, and a final warning that the action is logged and attributed to the operator's account — before the delete is issued
+- Every evidence deletion writes an `audit_log` row (operator, timestamp, investigation, asset, technique, and what was removed); the table is general-purpose so future admin actions can log into it too
+- Admin-only Audit Trail view (Options → Audit Trail) lists all logged activity, filterable by investigation and by asset
 
 ---
 
@@ -127,6 +138,13 @@ Shared volume: orca-evidence ← collected artifacts, SBOM files, vuln results
 ```
 
 All API calls from the browser are relative `/api/...` paths. nginx proxies them to the backend by Docker service name (`orca-backend:8000`). Moving to a new host requires only editing `CORS_ORIGINS` in `.env` and running `docker compose up --build`.
+
+### Database Schema
+
+`backend/schema.sql` is a schema-only `pg_dump` snapshot of `orca_db` (tables, columns, constraints, indexes — no data). It's a reference/bootstrap artifact, not a migration tool: the backend reflects the live database via SQLAlchemy `automap_base()` rather than declared ORM models, and incremental changes ship as standalone `*_migration.sql` files (e.g. `backend/audit_log_migration.sql`) applied directly with `psql`. Regenerate the snapshot after a schema change with:
+```bash
+docker exec orca-postgres pg_dump -U postgres -d orca_db --schema-only --no-owner --no-privileges > backend/schema.sql
+```
 
 ---
 

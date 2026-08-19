@@ -540,10 +540,10 @@ async def _run_capa(job_id: str, asset_id: int, filepath: str, queue: asyncio.Qu
             for tech in techniques:
                 conn.execute(text("""
                     INSERT INTO capa_results
-                        (job_id, technique_id, technique_name, tactic_name, namespace, severity, raw_result)
-                    VALUES (:jid, :tid, :tn, :tac, :ns, :sev, :raw)
+                        (job_id, asset_id, technique_id, technique_name, tactic_name, namespace, severity, raw_result)
+                    VALUES (:jid, :aid, :tid, :tn, :tac, :ns, :sev, :raw)
                 """), {
-                    "jid": job_id,
+                    "jid": job_id, "aid": asset_id,
                     "tid": tech["technique_id"], "tn": tech["technique_name"],
                     "tac": tech["tactic_name"], "ns": tech.get("namespace"),
                     "sev": tech.get("severity"), "raw": json.dumps(tech.get("raw", {})),
@@ -702,8 +702,8 @@ def _insert_floss_batch(conn, batch: list):
     for item in batch:
         conn.execute(text("""
             INSERT INTO floss_results
-                (job_id, string_value, string_type, is_ioc, ioc_type, string_offset)
-            VALUES (:jid, :val, :stype, :is_ioc, :ioc_type, :offset)
+                (job_id, asset_id, string_value, string_type, is_ioc, ioc_type, string_offset)
+            VALUES (:jid, :aid, :val, :stype, :is_ioc, :ioc_type, :offset)
         """), item)
 
 
@@ -757,10 +757,10 @@ async def _run_speakeasy(job_id: str, asset_id: int, filepath: str, queue: async
                     args = api.get('args', [])
                     conn.execute(text("""
                         INSERT INTO speakeasy_results
-                            (job_id, result_type, entry_point, func_name, args, ret_val, pc)
-                        VALUES (:jid, 'api_call', :ep, :fn, :args, :rv, :pc)
+                            (job_id, asset_id, result_type, entry_point, func_name, args, ret_val, pc)
+                        VALUES (:jid, :aid, 'api_call', :ep, :fn, :args, :rv, :pc)
                     """), {
-                        "jid": job_id, "ep": ep_idx,
+                        "jid": job_id, "aid": asset_id, "ep": ep_idx,
                         "fn": fn, "args": json.dumps(args if isinstance(args, list) else []),
                         "rv": str(api.get('ret_val', ''))[:200],
                         "pc": str(api.get('pc', ''))[:50],
@@ -780,10 +780,10 @@ async def _run_speakeasy(job_id: str, asset_id: int, filepath: str, queue: async
                     url = str(traffic.get('url', ''))[:1000]
                     conn.execute(text("""
                         INSERT INTO speakeasy_results
-                            (job_id, result_type, entry_point, protocol, host, port, url)
-                        VALUES (:jid, 'network', :ep, :proto, :host, :port, :url)
+                            (job_id, asset_id, result_type, entry_point, protocol, host, port, url)
+                        VALUES (:jid, :aid, 'network', :ep, :proto, :host, :port, :url)
                     """), {
-                        "jid": job_id, "ep": ep_idx,
+                        "jid": job_id, "aid": asset_id, "ep": ep_idx,
                         "proto": proto, "host": host, "port": port, "url": url,
                     })
                     net_count += 1

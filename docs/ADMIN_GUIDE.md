@@ -14,7 +14,8 @@ This guide covers installation, configuration, maintenance, and troubleshooting 
 6. [Database Backup and Restore](#database-backup-and-restore)
 7. [Updating ORCA](#updating-orca)
 8. [User Management](#user-management)
-9. [Troubleshooting](#troubleshooting)
+9. [Audit Trail](#audit-trail)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -117,7 +118,15 @@ docker exec -i orca-postgres psql -U postgres -d orca_db < migrations/add_packag
 
 # Agent tables
 docker exec -i orca-postgres psql -U postgres -d orca_db < backend/agent_migration.sql
+
+# Behavioral analysis tables (CAPA / FLOSS / Speakeasy)
+docker exec -i orca-postgres psql -U postgres -d orca_db < backend/behavioral_analysis_migration.sql
+
+# Audit log (evidence deletion and future admin-action logging)
+docker exec -i orca-postgres psql -U postgres -d orca_db < backend/audit_log_migration.sql
 ```
+
+`backend/schema.sql` is a full schema-only snapshot of a running `orca_db` (see [Database Schema](../README.md#database-schema) in the README) — useful as a reference for what the database should look like after all migrations are applied, but the migration files above are still the source of truth for a fresh install.
 
 Create the initial admin user:
 ```bash
@@ -361,7 +370,39 @@ curl -k -X DELETE https://localhost:8000/api/admin/users/alice \
 | Role | Permissions |
 |------|-------------|
 | `analyst` | Full read/write access to cases, evidence, notes, verdicts, collection |
-| `admin` | All analyst permissions + user management, certificate regeneration, agent deletion |
+| `admin` | All analyst permissions + user management, certificate regeneration, agent deletion, evidence deletion, audit trail access |
+
+---
+
+## Audit Trail
+
+Deleting evidence is destructive and, unlike most actions in ORCA, is restricted to `admin` — an analyst can upload, review, and set verdicts on evidence, but only an admin can flush it. Every deletion is written to the `audit_log` table so there's a durable record of who removed what, from where.
+
+### Deleting Evidence (Admin)
+
+In the Evidence Window, a technique that already has evidence shows a `⚠ FLUSH_EVIDENCE` button next to its verdict selector — visible only to admins. Clicking it steps through three gates before the delete fires:
+
+1. **Confirm** — plain "are you sure" prompt.
+2. **Verify** — a randomly generated math problem (e.g. `23 + 17 = ?`); an incorrect answer regenerates the problem rather than locking the action out.
+3. **Acknowledge** — an explicit warning that the deletion is logged and attributed to your account, with a final `CONFIRM_DELETE`.
+
+The backend endpoint (`DELETE /api/mitre/evidence/{asset_id}/{t_code}`) rejects non-admins with `403` regardless of what the UI shows, and writes the `audit_log` row in the same transaction as the delete — a deletion can't happen without being logged, even via direct API calls.
+
+### Reviewing the Log
+
+**Options → Audit Trail** (admin only) lists every logged action — timestamp, operator, action, investigation, asset, technique, and details — with dropdown filters to narrow by investigation and by asset. It calls `GET /api/admin/audit-log`, which also accepts `case_name`/`asset_id` query params directly:
+
+```bash
+TOKEN="<admin-jwt>"
+
+# Full log (most recent 1000)
+curl -k -H "Authorization: Bearer $TOKEN" https://localhost:8000/api/admin/audit-log
+
+# Scoped to one investigation
+curl -k -H "Authorization: Bearer $TOKEN" "https://localhost:8000/api/admin/audit-log?case_name=Op%20Phantom"
+```
+
+The `audit_log` table (`backend/audit_log_migration.sql`) is general-purpose — `action` is free text — so future admin-gated actions can log into the same table without another migration.
 
 ---
 

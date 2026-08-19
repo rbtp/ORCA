@@ -136,7 +136,7 @@ export default function InvestigationProfileManager() {
       <div style={headerFlex}>
         <div>
           <h2 style={titleGlow}>INVESTIGATION_PROFILES</h2>
-          <div style={{ color: '#222', fontSize: '10px', letterSpacing: '2px', marginTop: '8px' }}>
+          <div style={{ color: '#888', fontSize: '10px', letterSpacing: '2px', marginTop: '8px' }}>
             NAMED T-CODE SETS // APPEAR IN INVESTIGATION CREATE DROPDOWN
           </div>
         </div>
@@ -145,7 +145,7 @@ export default function InvestigationProfileManager() {
 
       {/* Profile list */}
       {profiles.length === 0 ? (
-        <div style={{ color: '#111', textAlign: 'center', marginTop: '100px', fontSize: '20px', letterSpacing: '10px' }}>
+        <div style={{ color: '#777', textAlign: 'center', marginTop: '100px', fontSize: '20px', letterSpacing: '10px' }}>
           NO_PROFILES_DEFINED
         </div>
       ) : (
@@ -169,13 +169,13 @@ export default function InvestigationProfileManager() {
                   <span key={t} style={tchipStyle}>{t}</span>
                 ))}
                 {(p.tcodes || []).length > 6 && (
-                  <span style={{ fontSize: '8px', color: '#444' }}>+{p.tcodes.length - 6} MORE</span>
+                  <span style={{ fontSize: '8px', color: '#aaa' }}>+{p.tcodes.length - 6} MORE</span>
                 )}
                 {(p.tcodes || []).length === 0 && (
-                  <span style={{ fontSize: '9px', color: '#333' }}>NO_TCODES</span>
+                  <span style={{ fontSize: '9px', color: '#999' }}>NO_TCODES</span>
                 )}
               </div>
-              <div style={{ color: '#1a1a1a', fontSize: '9px', marginTop: '16px' }}>
+              <div style={{ color: '#777', fontSize: '9px', marginTop: '16px' }}>
                 {(p.tcodes || []).length} T-CODE(S) // UPDATED {new Date(p.updated_at).toLocaleDateString()}
               </div>
             </div>
@@ -191,7 +191,7 @@ export default function InvestigationProfileManager() {
               <div style={panelTitle}>
                 {editingProfile ? 'EDIT_PROFILE' : 'NEW_PROFILE'}
               </div>
-              <div style={{ color: '#111', fontSize: '10px' }}>ORCA_PROFILE_PROTOCOL</div>
+              <div style={{ color: '#777', fontSize: '10px' }}>ORCA_PROFILE_PROTOCOL</div>
             </div>
 
             <label style={labelStyle}>PROFILE_NAME</label>
@@ -208,14 +208,14 @@ export default function InvestigationProfileManager() {
             </label>
             <div style={chipAreaStyle}>
               {formTcodes.length === 0 && (
-                <span style={{ color: '#222', fontSize: '10px' }}>NO_TCODES_SELECTED</span>
+                <span style={{ color: '#888', fontSize: '10px' }}>NO_TCODES_SELECTED</span>
               )}
               {formTcodes.map(t => {
                 const meta = availableTcodes.find(x => x.t_code === t);
                 return (
                   <div key={t} style={selectedChipStyle}>
                     <span style={{ color: '#00ff41' }}>{t}</span>
-                    {meta?.name && <span style={{ color: '#555', fontSize: '9px', marginLeft: '6px' }}>{meta.name.slice(0, 25)}</span>}
+                    {meta?.name && <span style={{ color: '#bbb', fontSize: '9px', marginLeft: '6px' }}>{meta.name.slice(0, 25)}</span>}
                     <span onClick={() => removeTcode(t)} style={removeXStyle}>×</span>
                   </div>
                 );
@@ -231,7 +231,7 @@ export default function InvestigationProfileManager() {
             />
             <div style={tcodeListStyle}>
               {filteredTcodes.length === 0 && (
-                <div style={{ color: '#333', fontSize: '10px', padding: '20px', textAlign: 'center' }}>
+                <div style={{ color: '#999', fontSize: '10px', padding: '20px', textAlign: 'center' }}>
                   NO_MATCHING_TCODES
                 </div>
               )}
@@ -285,7 +285,7 @@ export default function InvestigationProfileManager() {
             <p style={{ color: '#ff4141', fontSize: '14px', fontWeight: 'bold', marginBottom: '24px' }}>
               {deleteTarget.name}
             </p>
-            <p style={{ color: '#555', fontSize: '10px', marginBottom: '24px' }}>
+            <p style={{ color: '#bbb', fontSize: '10px', marginBottom: '24px' }}>
               This only removes the profile definition. No investigation data is affected.
             </p>
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
@@ -308,13 +308,13 @@ const gridStyle       = { display: 'grid', gridTemplateColumns: 'repeat(auto-fil
 const cardStyle       = { background: '#050505', border: '1px solid #0a1a2a', padding: '32px' };
 const tchipStyle      = { fontSize: '8px', color: '#00b8ff', border: '1px solid #0a1a2a', padding: '2px 6px' };
 const btnDeploy       = { background: '#00ff41', color: '#000', border: 'none', padding: '14px 32px', fontWeight: 900, cursor: 'pointer', letterSpacing: '1px', fontFamily: 'monospace', fontSize: '11px' };
-const btnAbort        = { background: 'none', color: '#333', border: '1px solid #222', padding: '14px 32px', cursor: 'pointer', fontFamily: 'monospace', fontSize: '11px' };
-const btnEdit         = { background: 'none', color: '#444', border: '1px solid #1a1a1a', padding: '6px 14px', cursor: 'pointer', fontFamily: 'monospace', fontSize: '10px' };
+const btnAbort        = { background: 'none', color: '#999', border: '1px solid #222', padding: '14px 32px', cursor: 'pointer', fontFamily: 'monospace', fontSize: '11px' };
+const btnEdit         = { background: 'none', color: '#aaa', border: '1px solid #1a1a1a', padding: '6px 14px', cursor: 'pointer', fontFamily: 'monospace', fontSize: '10px' };
 const btnDelete       = { background: 'none', color: '#ff4444', border: '1px solid #2a0a0a', padding: '6px 14px', cursor: 'pointer', fontFamily: 'monospace', fontSize: '10px' };
 const overlayStyle    = { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.98)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 };
 const panelStyle      = { background: '#000', border: '1px solid #111', padding: '60px', width: '900px', maxHeight: '90vh', overflowY: 'auto' };
 const panelTitle      = { color: '#00b8ff', fontSize: '18px', fontWeight: 900, letterSpacing: '2px' };
-const labelStyle      = { color: '#222', fontSize: '10px', fontWeight: 'bold', display: 'block', marginBottom: '10px', letterSpacing: '1px' };
+const labelStyle      = { color: '#888', fontSize: '10px', fontWeight: 'bold', display: 'block', marginBottom: '10px', letterSpacing: '1px' };
 const inputStyle      = { width: '100%', background: '#050505', border: '1px solid #1a1a1a', color: '#eee', padding: '14px', marginBottom: '24px', fontSize: '13px', outline: 'none', fontFamily: 'monospace', boxSizing: 'border-box' };
 const chipAreaStyle   = { background: '#050505', border: '1px solid #111', minHeight: '80px', padding: '12px', display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '0px' };
 const selectedChipStyle = { background: '#0a150a', border: '1px solid #1a3a1a', padding: '5px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' };

@@ -283,7 +283,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
                     ...mono, fontSize: 10, lineHeight: 1.7,
                     color: l.type === 'error' ? C.red : l.type === 'success' ? C.green : C.grey,
                   }}>
-                    <span style={{ color: '#333', marginRight: 8 }}>[{l.t}]</span>{l.m}
+                    <span style={{ color: '#999', marginRight: 8 }}>[{l.t}]</span>{l.m}
                   </div>
                 ))}
                 {deployDone && (

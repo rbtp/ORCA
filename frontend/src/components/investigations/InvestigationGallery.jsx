@@ -142,7 +142,7 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
           <div style={modalContent}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
               <div style={modalHeader}>INIT_CASE_FILE</div>
-              <div style={{ color: '#222', fontSize: '10px' }}>ORCA_PROTOCOL_v4.2</div>
+              <div style={{ color: '#888', fontSize: '10px' }}>ORCA_PROTOCOL_v4.2</div>
             </div>
 
             {/* ── CASE TYPE TOGGLE ── */}
@@ -158,7 +158,7 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
                     <div style={{ color: caseType === val ? (val === 'INCIDENT_RESPONSE' ? '#ff4141' : '#00ff41') : '#444', fontSize: 11, fontWeight: 'bold', letterSpacing: 2, marginBottom: 6 }}>
                       {caseType === val ? '◉' : '○'} {label}
                     </div>
-                    <div style={{ color: '#555', fontSize: 9 }}>{sub}</div>
+                    <div style={{ color: '#bbb', fontSize: 9 }}>{sub}</div>
                   </div>
                 ))}
               </div>
@@ -175,7 +175,7 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
                   <span style={{ color: '#777', fontSize: 9, letterSpacing: 1, fontFamily: 'monospace' }}>
                     CREATE_LOCAL_WORKING_DIRECTORY
                   </span>
-                  <span style={{ color: '#333', fontSize: 8, fontFamily: 'monospace' }}>
+                  <span style={{ color: '#999', fontSize: 8, fontFamily: 'monospace' }}>
                     ({caseName.trim() ? caseName.trim().replace(/[^A-Za-z0-9_\-.]/g, '_') : 'CASE_NAME'}\)
                   </span>
                 </label>
@@ -195,7 +195,7 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
                 <input value={staffInput} onChange={(e) => setStaffInput(e.target.value)} onKeyDown={handleStaffCommit} style={inputStyle} />
                 
                 <div style={staffStorageBox}>
-                  {personnelList.length === 0 && <div style={{ color: '#1a1a1a', fontSize: '10px' }}>NO_PERSONNEL_ASSIGNED</div>}
+                  {personnelList.length === 0 && <div style={{ color: '#777', fontSize: '10px' }}>NO_PERSONNEL_ASSIGNED</div>}
                   {personnelList.map(p => (
                     <div key={p} style={staffChip}>
                       {p} <span onClick={() => setPersonnelList(personnelList.filter(x => x !== p))} style={removeX}>×</span>
@@ -239,7 +239,7 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
                         </div>
                       </div>
                     )) : (
-                      <div style={{ color: '#333', fontSize: '10px', padding: '20px', textAlign: 'center', border: '1px dashed #111' }}>
+                      <div style={{ color: '#999', fontSize: '10px', padding: '20px', textAlign: 'center', border: '1px dashed #111' }}>
                         PROFILE_EMPTY: NO_TCODES_DEFINED
                       </div>
                     )
@@ -275,7 +275,7 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
 
       {/* GALLERY VIEW */}
       <div style={gridStyle}>
-        {cases.length === 0 && <div style={{ color: '#111', gridColumn: '1/-1', textAlign: 'center', marginTop: '100px', fontSize: '20px', letterSpacing: '10px' }}>NO_ACTIVE_INVESTIGATIONS</div>}
+        {cases.length === 0 && <div style={{ color: '#777', gridColumn: '1/-1', textAlign: 'center', marginTop: '100px', fontSize: '20px', letterSpacing: '10px' }}>NO_ACTIVE_INVESTIGATIONS</div>}
         {cases.map((c, i) => (
           <div key={i} style={{ position: 'relative' }}>
             <button 
@@ -293,8 +293,8 @@ export default function InvestigationGallery({ cases = [], onSelectCase, onAddCa
               </div>
               <div style={cardTitle}>{c.name || c.case_name || "UNTITLED_CASE"}</div>
               <div style={{ marginTop: '20px', display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
-                {c.groups?.slice(0, 3).map(g => <span key={g} style={{ fontSize: '8px', color: '#444', border: '1px solid #111', padding: '2px 5px' }}>{g}</span>)}
-                {c.groups?.length > 3 && <span style={{ fontSize: '8px', color: '#444' }}>+{c.groups.length - 3} MORE</span>}
+                {c.groups?.slice(0, 3).map(g => <span key={g} style={{ fontSize: '8px', color: '#aaa', border: '1px solid #111', padding: '2px 5px' }}>{g}</span>)}
+                {c.groups?.length > 3 && <span style={{ fontSize: '8px', color: '#aaa' }}>+{c.groups.length - 3} MORE</span>}
               </div>
             </div>
           </div>
@@ -382,11 +382,11 @@ const inputStyle     = { width: '100%', background: '#050505', border: '1px soli
 const staffStorageBox= { background: '#050505', border: '1px solid #111', minHeight: '140px', padding: '15px', display: 'flex', flexWrap: 'wrap', gap: '10px' };
 const scrollBox      = { height: '380px', overflowY: 'auto', background: '#050505', border: '1px solid #111', padding: '15px' };
 const itemStyle      = { padding: '12px', border: '1px solid #111', fontSize: '11px', cursor: 'pointer', marginBottom: '8px', transition: 'all 0.2s' };
-const labelStyle     = { color: '#222', fontSize: '10px', fontWeight: 'bold', display: 'block', marginBottom: '10px', letterSpacing: '1px' };
+const labelStyle     = { color: '#888', fontSize: '10px', fontWeight: 'bold', display: 'block', marginBottom: '10px', letterSpacing: '1px' };
 const headerFlex     = { display: 'flex', justifyContent: 'space-between', marginBottom: '80px', alignItems: 'center' };
 const titleGlow      = { color: '#00ff41', letterSpacing: '8px', fontSize: '24px', margin: 0 };
 const btnDeploy      = { background: '#00ff41', color: '#000', border: 'none', padding: '18px 40px', fontWeight: 900, cursor: 'pointer', letterSpacing: '1px', fontFamily: 'monospace' };
-const btnAbort       = { background: 'none', color: '#333', border: '1px solid #222', padding: '18px 40px', cursor: 'pointer', fontFamily: 'monospace' };
+const btnAbort       = { background: 'none', color: '#999', border: '1px solid #222', padding: '18px 40px', cursor: 'pointer', fontFamily: 'monospace' };
 const btnTerminate   = { position: 'absolute', top: '20px', right: '20px', background: 'none', border: 'none', color: '#ff4444', fontSize: '24px', cursor: 'pointer', zIndex: 10, fontWeight: 'bold' };
 const footerRow      = { display: 'flex', gap: '20px', marginTop: '50px' };
 const gridStyle      = { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: '30px' };

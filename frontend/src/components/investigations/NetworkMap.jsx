@@ -52,14 +52,23 @@ export default function NetworkMap({
   techniqueStatuses = {},
   onToggleMaximize,
   isMaximized = false,
+  mapBackgroundUrl,
+  onUploadMapBackground,
+  onClearMapBackground,
 }) {
   const d3Container   = useRef(null);
   const svgRef        = useRef(null);
-  const zoomRef       = useRef(null);
+  const zoomRef        = useRef(null);
+  const bgFileInputRef = useRef(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [hoveredLink, setHoveredLink] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
   const [searchQuery, setSearchQuery]   = useState('');
+  // Whether mapBackgroundUrl actually resolves to a real image -- there's no
+  // upfront "does this case have a background" flag from the backend, so
+  // this is discovered by trying to load it and watching for onerror/onload
+  // (see the <image> element below), same as any optional-image pattern.
+  const [hasBackground, setHasBackground] = useState(false);
 
   // ─── Search highlight: dim non-matching nodes ────────────────────────────
   useEffect(() => {
@@ -69,7 +78,8 @@ export default function NetworkMap({
       .selectAll('#node-group g')
       .attr('opacity', d => {
         if (!q) return 1;
-        return d.hostname.toLowerCase().includes(q) ? 1 : 0.08;
+        const haystack = `${d.displayName || ''} ${d.hostname}`.toLowerCase();
+        return haystack.includes(q) ? 1 : 0.08;
       });
   }, [searchQuery]);
 
@@ -86,21 +96,38 @@ export default function NetworkMap({
 
   // ─── Main D3 effect ──────────────────────────────────────────────────────
   useEffect(() => {
-    if (!d3Container.current || activeNodes.length === 0) return;
+    // No longer bails out on zero nodes -- a case with a map background but
+    // no devices placed yet should still show the backdrop, not a blank div.
+    if (!d3Container.current) return;
 
-    const nodes = activeNodes.map(d => ({
-      ...d,
-      id: d.hostname,
-      fx: (d.fx != null) ? d.fx : (d.x != null ? d.x : undefined),
-      fy: (d.fy != null) ? d.fy : (d.y != null ? d.y : undefined),
-    }));
+    const width  = d3Container.current.clientWidth  || 800;
+    const height = d3Container.current.clientHeight || 500;
+
+    const nodes = activeNodes.map(d => {
+      const hasSavedPos = d.x != null && d.y != null;
+      return {
+        ...d,
+        id: d.hostname,
+        // Only a node with an explicitly saved (dragged) position gets
+        // pinned via fx/fy -- everything else stays a free node so the
+        // collision force can still separate overlapping ones. But give a
+        // free node a starting x/y near canvas center (with a little
+        // jitter so several new nodes don't start exactly coincident)
+        // instead of letting d3 fall back to its own default spawn point,
+        // which can land far from center depending on the node's index --
+        // confirmed live 2026-08-18, that's what made newly-added nodes
+        // visibly rocket/fling across the canvas into place instead of
+        // gently settling.
+        x: hasSavedPos ? d.x : width / 2 + (Math.random() - 0.5) * 40,
+        y: hasSavedPos ? d.y : height / 2 + (Math.random() - 0.5) * 40,
+        fx: hasSavedPos ? d.x : undefined,
+        fy: hasSavedPos ? d.y : undefined,
+      };
+    });
 
     const links = activeLinks.map(d => ({ ...d }));
 
     d3.select(d3Container.current).selectAll('*').remove();
-
-    const width  = d3Container.current.clientWidth  || 800;
-    const height = d3Container.current.clientHeight || 500;
 
     // ── SVG + zoom container ─────────────────────────────────────────────
     const svg = d3.select(d3Container.current)
@@ -137,6 +164,28 @@ export default function NetworkMap({
       d3Container.current._zoomTransform = event.transform;
       gZoom.attr('transform', event.transform);
     });
+
+    // ── Background image (floor plan / diagram backdrop) ──────────────────
+    // Lives inside gZoom, before the link/node layers, so it pans and zooms
+    // together with the diagram instead of staying fixed to the viewport --
+    // devices dragged onto a spot on the floor plan should stay anchored to
+    // that spot as the user pans/zooms around. Sized generously around the
+    // simulation's own center point rather than fit to the SVG's current
+    // viewBox, so it doesn't need to be re-sized every time the container
+    // resizes.
+    if (mapBackgroundUrl) {
+      gZoom.insert('image', ':first-child')
+        .attr('href', mapBackgroundUrl)
+        .attr('x', width / 2 - 800)
+        .attr('y', height / 2 - 600)
+        .attr('width', 1600)
+        .attr('height', 1200)
+        .attr('preserveAspectRatio', 'xMidYMid meet')
+        .attr('opacity', 0.55)
+        .style('pointer-events', 'none')
+        .on('load', () => setHasBackground(true))
+        .on('error', () => setHasBackground(false));
+    }
 
     const gLinks = gZoom.append('g').attr('id', 'link-group');
     const gNodes = gZoom.append('g').attr('id', 'node-group');
@@ -208,7 +257,7 @@ export default function NetworkMap({
         setSelectedNode(null);
         const potentialTargets = activeNodes
           .filter(n => n.hostname !== d.hostname)
-          .sort((a, b) => a.hostname.localeCompare(b.hostname));
+          .sort((a, b) => (a.displayName || a.hostname).localeCompare(b.displayName || b.hostname));
         setContextMenu({ x: event.pageX, y: event.pageY, node: d, targets: potentialTargets });
       })
       .call(d3.drag()
@@ -228,6 +277,19 @@ export default function NetworkMap({
           }
         })
       );
+
+    // Invisible hit area, sized to the node's full visual footprint (out to
+    // the pulse ring's radius) -- drag/click/contextmenu are bound to the
+    // <g> itself, which has no hit-testing of its own without a filled
+    // shape under the pointer. The solid circle below is only r=24, and the
+    // pulse ring is stroke-only (fill:none doesn't register hits), so the
+    // ring-shaped gap between them fell through to the SVG's own pan/zoom
+    // handler -- confirmed live 2026-08-18: grabbing a node in that gap
+    // panned the whole canvas instead of dragging the node, which reads as
+    // "everything moves" since a pan shifts every node at once.
+    node.append('circle')
+      .attr('r', 34)
+      .attr('fill', 'transparent');
 
     // Pulse ring (shown when this node is being investigated)
     node.append('circle')
@@ -275,9 +337,9 @@ export default function NetworkMap({
       .attr('stroke', '#020202')
       .attr('stroke-width', 1.5);
 
-    // Hostname label
+    // Display label (custom name if set, else the real hostname)
     node.append('text')
-      .text(d => d.hostname)
+      .text(d => d.displayName || d.hostname)
       .attr('text-anchor', 'middle')
       .attr('y', 42)
       .attr('fill', '#00ff41')
@@ -297,8 +359,32 @@ export default function NetworkMap({
       node.attr('transform', d => `translate(${d.x},${d.y})`);
     });
 
-    return () => simulation.stop();
-  }, [activeNodes, activeLinks, updateNodeData, caseAssets, techniqueStatuses]);
+    // Keep the SVG's internal coordinate system (viewBox) matched to the
+    // container's actual rendered size. Without this, width/height were
+    // only ever measured once when this effect ran, so toggling
+    // MAXIMIZE_MAP (or any other container resize -- window resize,
+    // sidebar collapse) left the viewBox stuck at the old, usually much
+    // smaller, dimensions while the <svg width="100%" height="100%">
+    // itself filled the new size -- confirmed live 2026-08-18, that
+    // viewBox/actual-size mismatch is exactly what made zoom/pan feel like
+    // it jumped to "some crazy place": mouse-drag deltas get interpreted
+    // in the stale, disproportionate viewBox space.
+    const resizeObserver = new ResizeObserver(entries => {
+      const entry = entries[0];
+      if (!entry) return;
+      const newWidth = entry.contentRect.width || width;
+      const newHeight = entry.contentRect.height || height;
+      svg.attr('viewBox', `0 0 ${newWidth} ${newHeight}`);
+      simulation.force('center', d3.forceCenter(newWidth / 2, newHeight / 2));
+      simulation.alpha(0.3).restart();
+    });
+    resizeObserver.observe(d3Container.current);
+
+    return () => {
+      simulation.stop();
+      resizeObserver.disconnect();
+    };
+  }, [activeNodes, activeLinks, updateNodeData, caseAssets, techniqueStatuses, mapBackgroundUrl]);
 
   // ─── Flyout: resolve full asset data from caseAssets ────────────────────
   const flyoutAsset = selectedNode
@@ -336,7 +422,7 @@ export default function NetworkMap({
         position: 'absolute', top: 12, left: 12, zIndex: 100,
         display: 'flex', alignItems: 'center', gap: 6,
       }}>
-        <span style={{ color: '#333', fontFamily: 'monospace', fontSize: '10px' }}>SEARCH:</span>
+        <span style={{ color: '#999', fontFamily: 'monospace', fontSize: '10px' }}>SEARCH:</span>
         <input
           value={searchQuery}
           onChange={e => setSearchQuery(e.target.value)}
@@ -351,7 +437,7 @@ export default function NetworkMap({
         {searchQuery && (
           <span
             onClick={e => { e.stopPropagation(); setSearchQuery(''); }}
-            style={{ color: '#444', cursor: 'pointer', fontSize: '10px', fontFamily: 'monospace' }}
+            style={{ color: '#aaa', cursor: 'pointer', fontSize: '10px', fontFamily: 'monospace' }}
           >✕</span>
         )}
       </div>
@@ -381,7 +467,7 @@ export default function NetworkMap({
       {/* ── Link type legend ── */}
       <div style={{
         position: 'absolute', bottom: 16, left: 12, zIndex: 100,
-        fontFamily: 'monospace', fontSize: '9px', color: '#333',
+        fontFamily: 'monospace', fontSize: '9px', color: '#999',
         display: 'flex', flexDirection: 'column', gap: 4,
       }}>
         {[
@@ -406,18 +492,57 @@ export default function NetworkMap({
         position: 'absolute', top: 12, right: 16, zIndex: 200,
         display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8,
       }}>
-        {onToggleMaximize && (
-          <button
-            onClick={e => { e.stopPropagation(); onToggleMaximize(); }}
-            style={{
-              background: '#00ff41', color: '#000', border: 'none',
-              padding: '6px 12px', fontSize: '9px', fontWeight: 'bold',
-              cursor: 'pointer', fontFamily: 'monospace', letterSpacing: 1,
-            }}
-          >
-            {isMaximized ? '[ EXIT_FULLSCREEN ]' : '[ MAXIMIZE_MAP ]'}
-          </button>
-        )}
+        <div style={{ display: 'flex', gap: 6 }}>
+          {onUploadMapBackground && (
+            <>
+              <input
+                ref={bgFileInputRef}
+                type="file"
+                accept="image/*"
+                style={{ display: 'none' }}
+                onClick={e => { e.target.value = null; }}
+                onChange={e => {
+                  const f = e.target.files[0];
+                  if (f) onUploadMapBackground(f);
+                }}
+              />
+              {hasBackground && onClearMapBackground && (
+                <button
+                  onClick={e => { e.stopPropagation(); onClearMapBackground(); }}
+                  style={{
+                    background: 'none', color: '#999', border: '1px solid #333',
+                    padding: '6px 10px', fontSize: '9px', fontWeight: 'bold',
+                    cursor: 'pointer', fontFamily: 'monospace', letterSpacing: 1,
+                  }}
+                >
+                  [ CLEAR_BACKGROUND ]
+                </button>
+              )}
+              <button
+                onClick={e => { e.stopPropagation(); bgFileInputRef.current?.click(); }}
+                style={{
+                  background: 'none', color: '#00ff41', border: '1px solid #00ff41',
+                  padding: '6px 10px', fontSize: '9px', fontWeight: 'bold',
+                  cursor: 'pointer', fontFamily: 'monospace', letterSpacing: 1,
+                }}
+              >
+                [ {hasBackground ? 'CHANGE' : 'UPLOAD'}_MAP_BACKGROUND ]
+              </button>
+            </>
+          )}
+          {onToggleMaximize && (
+            <button
+              onClick={e => { e.stopPropagation(); onToggleMaximize(); }}
+              style={{
+                background: '#00ff41', color: '#000', border: 'none',
+                padding: '6px 12px', fontSize: '9px', fontWeight: 'bold',
+                cursor: 'pointer', fontFamily: 'monospace', letterSpacing: 1,
+              }}
+            >
+              {isMaximized ? '[ EXIT_FULLSCREEN ]' : '[ MAXIMIZE_MAP ]'}
+            </button>
+          )}
+        </div>
         <div style={{
           fontFamily: 'monospace', fontSize: '9px',
           display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end',
@@ -440,13 +565,13 @@ export default function NetworkMap({
           fontFamily: 'monospace', color: '#00ff41', fontSize: '11px',
           pointerEvents: 'none', zIndex: 3000, whiteSpace: 'nowrap',
         }}>
-          <span style={{ color: '#444' }}>SRC </span>{hoveredLink.source.id || hoveredLink.source}
-          <span style={{ color: '#444', margin: '0 8px' }}>↔</span>
-          <span style={{ color: '#444' }}>DST </span>{hoveredLink.target.id || hoveredLink.target}
-          <span style={{ color: '#333', margin: '0 8px' }}>|</span>
+          <span style={{ color: '#aaa' }}>SRC </span>{hoveredLink.source.id || hoveredLink.source}
+          <span style={{ color: '#aaa', margin: '0 8px' }}>↔</span>
+          <span style={{ color: '#aaa' }}>DST </span>{hoveredLink.target.id || hoveredLink.target}
+          <span style={{ color: '#999', margin: '0 8px' }}>|</span>
           {(hoveredLink.link_type || 'WIRED')}
-          <span style={{ color: '#333', margin: '0 8px' }}>|</span>
-          <span style={{ color: '#444' }}>VLAN </span>{hoveredLink.vlan || '1'}
+          <span style={{ color: '#999', margin: '0 8px' }}>|</span>
+          <span style={{ color: '#aaa' }}>VLAN </span>{hoveredLink.vlan || '1'}
         </div>
       )}
 
@@ -467,7 +592,7 @@ export default function NetworkMap({
             padding: '8px 12px', borderBottom: '1px solid #111', background: '#0a0a0a',
           }}>
             <span style={{ fontWeight: 'bold', letterSpacing: 1 }}>
-              {flyoutAsset.hostname}
+              {selectedNode?.displayName || flyoutAsset.hostname}
             </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <div style={{
@@ -476,7 +601,7 @@ export default function NetworkMap({
               }} />
               <span
                 onClick={() => setSelectedNode(null)}
-                style={{ color: '#444', cursor: 'pointer', fontSize: '13px', lineHeight: 1 }}
+                style={{ color: '#aaa', cursor: 'pointer', fontSize: '13px', lineHeight: 1 }}
               >✕</span>
             </div>
           </div>
@@ -492,16 +617,16 @@ export default function NetworkMap({
               ['GATEWAY',  flyoutAsset.gateway],
             ].filter(([, v]) => v).map(([label, value]) => (
               <div key={label} style={{ display: 'flex', gap: 8 }}>
-                <span style={{ color: '#333', minWidth: 60 }}>{label}</span>
+                <span style={{ color: '#999', minWidth: 60 }}>{label}</span>
                 <span style={{ color: '#aaa' }}>{value}</span>
               </div>
             ))}
 
             {(flyoutAsset.asset_notes || flyoutAsset.nodeNote) && (
               <div style={{ marginTop: 4, paddingTop: 6, borderTop: '1px solid #111' }}>
-                <div style={{ color: '#333', marginBottom: 3 }}>NOTE</div>
+                <div style={{ color: '#999', marginBottom: 3 }}>NOTE</div>
                 <div style={{
-                  color: '#555', fontSize: '10px', lineHeight: 1.5,
+                  color: '#bbb', fontSize: '10px', lineHeight: 1.5,
                   maxHeight: 60, overflowY: 'auto',
                 }}>
                   {flyoutAsset.asset_notes || flyoutAsset.nodeNote}
@@ -513,7 +638,7 @@ export default function NetworkMap({
           {/* Investigate button */}
           <div style={{ padding: '8px 12px', borderTop: '1px solid #111' }}>
             {isFetchingTactics && isBeingInvestigated ? (
-              <div style={{ color: '#444', fontSize: '10px', textAlign: 'center', padding: '4px 0' }}>
+              <div style={{ color: '#aaa', fontSize: '10px', textAlign: 'center', padding: '4px 0' }}>
                 LOADING_THREAT_PROFILE...
               </div>
             ) : (
@@ -550,11 +675,15 @@ export default function NetworkMap({
           onClick={e => e.stopPropagation()}
         >
           <div style={{
-            padding: '6px 12px 4px', fontSize: '9px', color: '#333',
+            padding: '6px 12px 4px', fontSize: '9px', color: '#999',
             borderBottom: '1px solid #111', marginBottom: '2px', letterSpacing: 1,
           }}>
-            {contextMenu.node.hostname}
+            {contextMenu.node.displayName || contextMenu.node.hostname}
           </div>
+
+          <MenuBtn onClick={() => { updateNodeData(contextMenu.node, 'RENAME'); setContextMenu(null); }}>
+            RENAME_DEVICE
+          </MenuBtn>
 
           <MenuBtn onClick={() => { updateNodeData(contextMenu.node, 'IP'); setContextMenu(null); }}>
             SET_IP_ADDRESS
@@ -578,10 +707,10 @@ export default function NetworkMap({
               maxHeight: '250px', overflowY: 'auto', minWidth: '150px',
             }} className="group-hover">
               {contextMenu.targets.length === 0
-                ? <div style={{ padding: '8px 12px', fontSize: '10px', color: '#333' }}>NO_OTHER_NODES</div>
+                ? <div style={{ padding: '8px 12px', fontSize: '10px', color: '#999' }}>NO_OTHER_NODES</div>
                 : contextMenu.targets.map(t => (
                     <MenuBtn key={t.hostname} onClick={() => { onInitiateLink(contextMenu.node, t); setContextMenu(null); }}>
-                      {t.hostname}
+                      {t.displayName || t.hostname}
                     </MenuBtn>
                   ))
               }
@@ -593,7 +722,7 @@ export default function NetworkMap({
             <>
               <div style={{ height: '1px', background: '#111', margin: '4px 0' }} />
               {isFetchingTactics && String(investigatingAssetId) === String(contextMenu.node.id)
-                ? <div style={{ padding: '8px 12px', fontSize: '10px', color: '#444' }}>LOADING...</div>
+                ? <div style={{ padding: '8px 12px', fontSize: '10px', color: '#aaa' }}>LOADING...</div>
                 : (
                   <MenuBtn
                     style={{ color: '#00ff41', fontWeight: 'bold' }}

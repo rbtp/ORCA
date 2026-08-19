@@ -803,10 +803,10 @@ function TacticGroup({ tactic, techs }) {
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
-              <th style={{ padding: '5px 14px', textAlign: 'left', fontSize: 9, color: '#555', fontFamily: 'monospace', fontWeight: 'bold', letterSpacing: 1, background: C.bgHeader, borderBottom: `1px solid ${C.border}`, width: 110 }}>TECHNIQUE ID</th>
-              <th style={{ padding: '5px 14px', textAlign: 'left', fontSize: 9, color: '#555', fontFamily: 'monospace', fontWeight: 'bold', letterSpacing: 1, background: C.bgHeader, borderBottom: `1px solid ${C.border}` }}>TECHNIQUE NAME</th>
-              <th style={{ padding: '5px 14px', textAlign: 'left', fontSize: 9, color: '#555', fontFamily: 'monospace', fontWeight: 'bold', letterSpacing: 1, background: C.bgHeader, borderBottom: `1px solid ${C.border}`, width: 200 }}>NAMESPACE</th>
-              <th style={{ padding: '5px 14px', textAlign: 'left', fontSize: 9, color: '#555', fontFamily: 'monospace', fontWeight: 'bold', letterSpacing: 1, background: C.bgHeader, borderBottom: `1px solid ${C.border}`, width: 100 }}>SEVERITY</th>
+              <th style={{ padding: '5px 14px', textAlign: 'left', fontSize: 9, color: '#bbb', fontFamily: 'monospace', fontWeight: 'bold', letterSpacing: 1, background: C.bgHeader, borderBottom: `1px solid ${C.border}`, width: 110 }}>TECHNIQUE ID</th>
+              <th style={{ padding: '5px 14px', textAlign: 'left', fontSize: 9, color: '#bbb', fontFamily: 'monospace', fontWeight: 'bold', letterSpacing: 1, background: C.bgHeader, borderBottom: `1px solid ${C.border}` }}>TECHNIQUE NAME</th>
+              <th style={{ padding: '5px 14px', textAlign: 'left', fontSize: 9, color: '#bbb', fontFamily: 'monospace', fontWeight: 'bold', letterSpacing: 1, background: C.bgHeader, borderBottom: `1px solid ${C.border}`, width: 200 }}>NAMESPACE</th>
+              <th style={{ padding: '5px 14px', textAlign: 'left', fontSize: 9, color: '#bbb', fontFamily: 'monospace', fontWeight: 'bold', letterSpacing: 1, background: C.bgHeader, borderBottom: `1px solid ${C.border}`, width: 100 }}>SEVERITY</th>
             </tr>
           </thead>
           <tbody>

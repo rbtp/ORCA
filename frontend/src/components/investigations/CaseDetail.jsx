@@ -6,6 +6,13 @@ import { TimelineViewer } from './EvidenceWindow';
 import CollabNotificationTray from './CollabNotificationTray';
 import { useCollaboration } from './useCollaboration';
 
+// FORM_FACTOR is never read by /threat-profile's technique filtering (only
+// a.os is -- see mitre_routes.py) so it isn't filtered by ASSET_TYPE or
+// OPERATING_SYSTEM at all: a cascade here wouldn't change which MITRE
+// techniques get applied, so per the standing rule it's not worth having.
+// One flat list, always available.
+const ALL_FORM_FACTORS = ['Laptop', 'Desktop', 'Server Rack', 'Virtual Machine', 'Container', 'Embedded', 'Switch', 'Router', 'Firewall', 'Load Balancer', 'Access Point', 'IDS/IPS', 'Proxy', 'Other'];
+
 export default function CaseDetail({
   caseData, onBack, onRefresh,
   memSummaries = {}, setMemSummaries,
@@ -49,6 +56,7 @@ export default function CaseDetail({
   const [isMaximized, setIsMaximized]     = useState(false);
   const [saveStatus, setSaveStatus]       = useState('READY');
   const [linkForm, setLinkForm]           = useState(null);
+  const [editDetailsForm, setEditDetailsForm] = useState(null);
   const [assetModes, setAssetModes]       = useState({});
   const [mountSessions, setMountSessions] = useState({});
   const [mountExpanded, setMountExpanded] = useState({});
@@ -92,6 +100,76 @@ export default function CaseDetail({
   const collab       = useCollaboration();
   const currentAsset = caseData.assets?.find(a => String(a.id) === String(investigatingAssetId));
   const caseName     = caseData.name || caseData.case_name;
+
+  // ── Map background image ─────────────────────────────────────────────────
+  // Bumped after every upload/clear so the <image> tag's URL changes and the
+  // browser can't serve a stale cached copy of the old background under the
+  // same path -- auth is cookie-based (see getAuthHeaders' lack of an
+  // Authorization header), so a plain image URL works without a manual
+  // fetch+blob dance; same-origin <img>/<image> requests send cookies
+  // automatically.
+  const [mapBackgroundVersion, setMapBackgroundVersion] = useState(0);
+  const mapBackgroundUrl = `${API_BASE}/cases/${encodeURIComponent(caseName)}/map-background?v=${mapBackgroundVersion}`;
+
+  const handleUploadMapBackground = async (file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/map-background`, {
+        method: 'PUT', credentials: 'include', body: fd,
+      });
+      if (res.ok) setMapBackgroundVersion(v => v + 1);
+      else alert('Could not upload map background.');
+    } catch { alert('Could not upload map background.'); }
+  };
+
+  const handleClearMapBackground = async () => {
+    if (!window.confirm('Remove the map background image?')) return;
+    try {
+      await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/map-background`, {
+        method: 'DELETE', credentials: 'include',
+      });
+      setMapBackgroundVersion(v => v + 1);
+    } catch { alert('Could not remove map background.'); }
+  };
+
+  // ── Edit investigation details (lead/team/unit/ops/country) ────────────────
+  const openEditDetails = () => setEditDetailsForm({
+    missionLead: caseData.missionLead || '',
+    teamName:    caseData.teamName || '',
+    support:     caseData.support || '',
+    personnel:   caseData.personnel || '',
+    country:     caseData.country || '',
+  });
+
+  const handleSaveDetails = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/cases`, {
+        method: 'POST', credentials: 'include', headers: getAuthHeaders(),
+        body: JSON.stringify({
+          name: caseName,
+          missionLead: editDetailsForm.missionLead,
+          teamName: editDetailsForm.teamName,
+          support: editDetailsForm.support,
+          personnel: editDetailsForm.personnel,
+          country: editDetailsForm.country,
+          // POST /cases is an upsert keyed on name and overwrites every one
+          // of these columns unconditionally -- groups/case_type must be
+          // carried through unchanged here or this save would silently wipe
+          // the case's MITRE actor-group selection / revert an
+          // INCIDENT_RESPONSE case back to a plain INVESTIGATION.
+          groups: caseData.groups || [],
+          case_type: caseData.case_type || 'INVESTIGATION',
+        }),
+      });
+      if (res.ok) {
+        setEditDetailsForm(null);
+        if (onRefresh) onRefresh();
+      } else {
+        alert('Could not save investigation details.');
+      }
+    } catch { alert('Could not save investigation details.'); }
+  };
 
   useEffect(() => {
     if (caseData.assets) {
@@ -513,7 +591,14 @@ export default function CaseDetail({
 
   const deployToMap = (asset) => {
     if (!activeNodes.find(n => n.hostname === asset.hostname)) {
-      setActiveNodes([...activeNodes, { hostname: asset.hostname, ip: asset.ip, mac: asset.mac_address, os: asset.os, version: asset.os_version, type: asset.form_factor, config: '', nodeNote: '', x: 400, y: 250 }]);
+      // No x/y here on purpose -- NetworkMap.jsx pins fx/fy to whatever x/y
+      // a node has (that's what makes a dragged node stay put), so a
+      // hardcoded x/y meant every newly deployed asset landed pinned on the
+      // exact same spot, on top of each other, immune to the collision
+      // force that would otherwise spread them out. Leaving position unset
+      // lets the force simulation place and separate it like any other
+      // fresh node.
+      setActiveNodes([...activeNodes, { hostname: asset.hostname, ip: asset.ip, mac: asset.mac_address, os: asset.os, version: asset.os_version, type: asset.form_factor, config: '', nodeNote: '' }]);
     }
   };
 
@@ -532,11 +617,25 @@ export default function CaseDetail({
 
   const addInfrastructure = (type) => {
     const id = Math.floor(Math.random() * 999);
-    setActiveNodes([...activeNodes, { hostname: `${type}_${id}`, ip: '0.0.0.0', mac: 'AUTO_GEN', type, os: 'Firmware_v1.0', config: '', nodeNote: '', x: 450, y: 250 }]);
+    // See deployToMap's comment -- same reason x/y is omitted here.
+    setActiveNodes([...activeNodes, { hostname: `${type}_${id}`, ip: '0.0.0.0', mac: 'AUTO_GEN', type, os: 'Firmware_v1.0', config: '', nodeNote: '' }]);
   };
 
   const handleUpdateNode = (node, action, data) => {
     if (action === 'COORD_UPDATE') { setActiveNodes(prev => prev.map(n => n.hostname === node.hostname ? { ...n, x: data.x, y: data.y } : n)); return; }
+    if (action === 'RENAME') {
+      // A cosmetic label override, not a hostname change -- hostname is the
+      // D3 link id and the join key against caseAssets (real asset records,
+      // artifact_results, etc.), so renaming it in place would silently
+      // break both. displayName is map-only, flows through the same
+      // map-sync auto-save as everything else here, no backend change needed.
+      const v = prompt(`ENTER DISPLAY NAME FOR ${node.hostname} (blank clears it, falls back to hostname):`, node.displayName || '');
+      if (v !== null) {
+        const trimmed = v.trim();
+        setActiveNodes(prev => prev.map(n => n.hostname === node.hostname ? { ...n, displayName: trimmed || undefined } : n));
+      }
+      return;
+    }
     if (action === 'CONFIG') {
       if (['SWITCH', 'ROUTER', 'FIREWALL'].includes(node.type?.toUpperCase())) { setEditingConfig(node); setConfigBuffer(node.config || ''); }
       else { const v = prompt(`ENTER SYSTEM NOTES FOR ${node.hostname}:`, node.nodeNote || ''); if (v !== null) setActiveNodes(prev => prev.map(n => n.hostname === node.hostname ? { ...n, nodeNote: v } : n)); }
@@ -558,7 +657,12 @@ export default function CaseDetail({
       </button>
 
       <div style={{ marginBottom: '20px' }}>
-        <h1 style={{ fontSize: '42px', fontWeight: 900, margin: '0' }}>{caseName}</h1>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 16 }}>
+          <h1 style={{ fontSize: '42px', fontWeight: 900, margin: '0' }}>{caseName}</h1>
+          <button onClick={openEditDetails} style={{ background: 'none', border: '1px solid #333', color: '#999', cursor: 'pointer', fontSize: '10px', fontFamily: 'monospace', padding: '4px 10px', letterSpacing: 1 }}>
+            [ EDIT_DETAILS ]
+          </button>
+        </div>
         <div style={{ color: '#888', fontSize: '10px', marginTop: '5px' }}>CASE_REF: {caseData.country?.toUpperCase()}_INTEL_PRIORITY_1</div>
         {completion && (
           <div style={{ marginTop: 12, maxWidth: 480 }}>
@@ -700,7 +804,7 @@ export default function CaseDetail({
                     <React.Fragment key={i}>
                       <tr style={{ borderBottom: isExpanded ? 'none' : '1px solid #111' }}>
                         <td style={{ padding: '15px 10px', color: '#00ff41', fontWeight: 'bold' }}>{a.hostname}</td>
-                        <td style={{ color: '#aaa' }}>IP: {a.ip}<br /><span style={{ fontSize: '9px', color: '#555' }}>MAC: {a.mac_address}</span></td>
+                        <td style={{ color: '#aaa' }}>IP: {a.ip}<br /><span style={{ fontSize: '9px', color: '#bbb' }}>MAC: {a.mac_address}</span></td>
                         <td style={{ color: '#ddd' }}>{a.os} {a.os_version}</td>
                         <td style={{ color: '#ddd' }}>{a.form_factor}</td>
                         <td>
@@ -772,7 +876,7 @@ export default function CaseDetail({
                                 <div style={{ display: 'flex', gap: 16 }}>
                                   {[['DEVICE', activeMount.device_number], ['DRIVE', activeMount.drive_letter ? `${activeMount.drive_letter}:` : '—'], ['PHYSICAL', activeMount.physical_drive], ['PROVIDER', activeMount.provider]].map(([l, v]) => v && (
                                     <div key={l} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                                      <span style={{ color: '#555', fontSize: 8 }}>{l}</span>
+                                      <span style={{ color: '#bbb', fontSize: 8 }}>{l}</span>
                                       <span style={{ color: '#9b59ff', fontSize: 10 }}>{v}</span>
                                     </div>
                                   ))}
@@ -785,12 +889,12 @@ export default function CaseDetail({
                             )}
                             {sessions.filter(s => s.status === 'DISMOUNTED').length > 0 && (
                               <div style={{ marginTop: 6 }}>
-                                <div style={{ color: '#333', fontSize: 8, letterSpacing: 1, marginBottom: 4 }}>MOUNT_HISTORY</div>
+                                <div style={{ color: '#999', fontSize: 8, letterSpacing: 1, marginBottom: 4 }}>MOUNT_HISTORY</div>
                                 {sessions.filter(s => s.status === 'DISMOUNTED').map((s, idx) => (
-                                  <div key={idx} style={{ display: 'flex', gap: 12, fontSize: 9, color: '#555', borderTop: '1px solid #111', padding: '4px 0' }}>
+                                  <div key={idx} style={{ display: 'flex', gap: 12, fontSize: 9, color: '#bbb', borderTop: '1px solid #111', padding: '4px 0' }}>
                                     <span>{s.image_path}</span>
-                                    <span style={{ color: '#444' }}>{s.drive_letter ? `${s.drive_letter}:` : '—'}</span>
-                                    <span style={{ color: '#333', marginLeft: 'auto' }}>{new Date(s.mounted_at).toLocaleString()}</span>
+                                    <span style={{ color: '#aaa' }}>{s.drive_letter ? `${s.drive_letter}:` : '—'}</span>
+                                    <span style={{ color: '#999', marginLeft: 'auto' }}>{new Date(s.mounted_at).toLocaleString()}</span>
                                   </div>
                                 ))}
                               </div>
@@ -879,7 +983,7 @@ export default function CaseDetail({
                                   </div>
                                   <div style={{ display: 'flex', gap: 12, fontSize: 8, color: '#777' }}>
                                     <span style={{ color: '#00ff41' }}>■ EVIDENCE {withEvidence}</span>
-                                    <span style={{ color: '#555' }}>■ NO_ARTIFACTS {noArt}</span>
+                                    <span style={{ color: '#bbb' }}>■ NO_ARTIFACTS {noArt}</span>
                                     <span>■ PENDING {pending}</span>
                                   </div>
                                   {prog?.package_info?.completed_at && (
@@ -985,7 +1089,7 @@ export default function CaseDetail({
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
           <span style={{ color: '#ff4141', fontSize: 9, letterSpacing: 2 }}>TRIAGE_CATEGORIES</span>
           <button onClick={() => setTriageSelected(triageSelected.size === triageCategories.length ? new Set() : new Set(triageCategories))}
-            style={{ background: 'transparent', border: '1px solid #2a2a2a', color: '#555', fontSize: 9, padding: '2px 8px', cursor: 'pointer', fontFamily: 'monospace', letterSpacing: 1 }}>
+            style={{ background: 'transparent', border: '1px solid #2a2a2a', color: '#bbb', fontSize: 9, padding: '2px 8px', cursor: 'pointer', fontFamily: 'monospace', letterSpacing: 1 }}>
             {triageSelected.size === triageCategories.length ? 'DESELECT ALL' : 'SELECT ALL'}
           </button>
         </div>
@@ -1004,7 +1108,7 @@ export default function CaseDetail({
     )}
 
                   <div style={{ border: '1px solid #111' }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 140px 160px 1fr', padding: '6px 10px', borderBottom: '1px solid #111', color: '#555', fontSize: 9, letterSpacing: 1 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 140px 160px 1fr', padding: '6px 10px', borderBottom: '1px solid #111', color: '#bbb', fontSize: 9, letterSpacing: 1 }}>
                       <div onClick={toggleSelectAll} style={{ cursor: 'pointer', color: deploySelected.size === (caseData.assets?.length || 0) ? '#00ff41' : '#555', fontSize: 11, lineHeight: 1 }} title="Select all">
                         {deploySelected.size === (caseData.assets?.length || 0) ? '☑' : '☐'}
                       </div>
@@ -1022,14 +1126,14 @@ export default function CaseDetail({
                           <div style={{ color: '#888' }}>{a.ip || '—'}</div>
                           <div>{phase
                             ? <span style={{ color: phaseColor(phase), fontSize: 9, letterSpacing: 1, fontWeight: 'bold' }}>{phase === 'ERROR' ? '✗' : phase === 'COLLECTING' ? '●' : '◎'} {phase}</span>
-                            : <span style={{ color: '#333', fontSize: 9 }}>IDLE</span>}
+                            : <span style={{ color: '#999', fontSize: 9 }}>IDLE</span>}
                           </div>
                           <div style={{ color: '#777', fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{status?.message || ''}</div>
                         </div>
                       );
                     })}
                   </div>
-                  <div style={{ marginTop: 8, color: '#555', fontSize: 9, lineHeight: 1.8 }}>
+                  <div style={{ marginTop: 8, color: '#bbb', fontSize: 9, lineHeight: 1.8 }}>
                     Requires SMB (port 445) reachable · Local admin credentials · Runs via impacket SCM (no psexec required)
                   </div>
                 </div>
@@ -1057,7 +1161,7 @@ export default function CaseDetail({
                   <span style={{ color: triageSelected.has(cat) ? '#ccc' : '#666', fontSize: 10, letterSpacing: 1 }}>{cat}</span>
                 </div>
               ))}
-              <div style={{ marginTop: 12, color: '#555', fontSize: 9, lineHeight: 1.7 }}>
+              <div style={{ marginTop: 12, color: '#bbb', fontSize: 9, lineHeight: 1.7 }}>
                 Powered by Windows.KapeFiles.Targets.<br />
                 Results stored in evidence table under t_code=TRIAGE.
               </div>
@@ -1103,7 +1207,7 @@ export default function CaseDetail({
               </div>
               <div style={{ color: '#888', fontSize: '9px', letterSpacing: 2, marginBottom: '8px' }}>TARGET_ASSETS</div>
               <div style={{ border: '1px solid #111' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 140px 160px 1fr 120px', padding: '6px 10px', borderBottom: '1px solid #111', color: '#555', fontSize: 9, letterSpacing: 1 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 140px 160px 1fr 120px', padding: '6px 10px', borderBottom: '1px solid #111', color: '#bbb', fontSize: 9, letterSpacing: 1 }}>
                   <div onClick={toggleAllTriageAssets} style={{ cursor: 'pointer', color: triageAssets.size === (caseData.assets?.length || 0) ? '#ff4141' : '#555', fontSize: 11, lineHeight: 1 }} title="Select all">
                     {triageAssets.size === (caseData.assets?.length || 0) ? '☑' : '☐'}
                   </div>
@@ -1122,11 +1226,11 @@ export default function CaseDetail({
                         <div style={{ color: checked ? '#ff4141' : '#333', fontSize: 13, lineHeight: 1, paddingTop: 1 }}>{checked ? '☑' : '☐'}</div>
                         <div style={{ color: checked ? '#ff4141' : '#aaa', fontWeight: checked ? 'bold' : 'normal' }}>{a.hostname}</div>
                         <div style={{ color: '#888' }}>{a.ip || '—'}</div>
-                        <div>{phase ? <span style={{ color: triagePhaseColor(phase), fontSize: 9, letterSpacing: 1, fontWeight: 'bold' }}>{phase === 'ERROR' ? '✗' : phase === 'COLLECTING' ? '●' : '◎'} {phase}</span> : <span style={{ color: '#333', fontSize: 9 }}>IDLE</span>}</div>
+                        <div>{phase ? <span style={{ color: triagePhaseColor(phase), fontSize: 9, letterSpacing: 1, fontWeight: 'bold' }}>{phase === 'ERROR' ? '✗' : phase === 'COLLECTING' ? '●' : '◎'} {phase}</span> : <span style={{ color: '#999', fontSize: 9 }}>IDLE</span>}</div>
                         <div style={{ color: '#777', fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{status?.message || ''}</div>
                         <div onClick={e => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                           {phase && <span onClick={() => setTriageExpanded(prev => ({ ...prev, [aId]: !prev[aId] }))}
-                            style={{ color: '#555', fontSize: 9, cursor: 'pointer', padding: '2px 6px', border: '1px solid #222' }}>
+                            style={{ color: '#bbb', fontSize: 9, cursor: 'pointer', padding: '2px 6px', border: '1px solid #222' }}>
                             {triageExpanded[aId] ? '▲' : '▼'}
                           </span>}
                           {hasResults && (
@@ -1142,7 +1246,7 @@ export default function CaseDetail({
                       </div>
                       {triageExpanded[aId] && (
                         <div style={{ background: '#060606', border: '1px solid #1a1a1a', margin: '0 10px 4px', padding: '10px 14px', fontFamily: 'monospace', fontSize: 9 }}>
-                          <div style={{ color: '#555', fontSize: 8, letterSpacing: 1, marginBottom: 6 }}>COLLECTION_PROGRESS — {a.hostname.toUpperCase()}</div>
+                          <div style={{ color: '#bbb', fontSize: 8, letterSpacing: 1, marginBottom: 6 }}>COLLECTION_PROGRESS — {a.hostname.toUpperCase()}</div>
                           {Object.entries(triageTechStatus[aId] || {}).map(([tcode, ts]) => {
                             const col = ts.status === 'COMPLETE' ? '#00ff41' : ts.status === 'ZERO' ? '#444' : ts.status === 'RUNNING' ? '#ffaa00' : ts.status === 'ERROR' ? '#ff4444' : '#555';
                             return (
@@ -1153,7 +1257,7 @@ export default function CaseDetail({
                             );
                           })}
                           {Object.keys(triageTechStatus[aId] || {}).length === 0 && (
-                            <div style={{ color: '#333', fontSize: 9 }}>Waiting for collection data...</div>
+                            <div style={{ color: '#999', fontSize: 9 }}>Waiting for collection data...</div>
                           )}
                         </div>
                       )}
@@ -1169,7 +1273,7 @@ export default function CaseDetail({
         {activeTab === 'NETWORK_MAP' && (
           <div style={{ position: isMaximized ? 'fixed' : 'relative', top: isMaximized ? 0 : 'auto', left: isMaximized ? 0 : 'auto', width: isMaximized ? '100vw' : '100%', height: isMaximized ? '100vh' : '650px', zIndex: isMaximized ? 2000 : 1, display: 'grid', gridTemplateColumns: isMaximized ? '1fr 350px' : '1fr 300px', background: '#111', border: '1px solid #1a1a1a' }}>
             <div style={{ background: '#000', overflow: 'hidden', position: 'relative' }}>
-              <NetworkMap activeNodes={activeNodes} activeLinks={activeLinks} updateNodeData={handleUpdateNode} onInitiateLink={handleInitiateLink} onDeleteNode={handleDeleteNode} onInvestigateAsset={handleInvestigateAsset} investigatingAssetId={investigatingAssetId} isFetchingTactics={isFetchingTactics} techniqueStatuses={collab.techniqueStatuses} caseAssets={caseData.assets || []} onToggleMaximize={() => setIsMaximized(p => !p)} isMaximized={isMaximized} />
+              <NetworkMap activeNodes={activeNodes} activeLinks={activeLinks} updateNodeData={handleUpdateNode} onInitiateLink={handleInitiateLink} onDeleteNode={handleDeleteNode} onInvestigateAsset={handleInvestigateAsset} investigatingAssetId={investigatingAssetId} isFetchingTactics={isFetchingTactics} techniqueStatuses={collab.techniqueStatuses} caseAssets={caseData.assets || []} onToggleMaximize={() => setIsMaximized(p => !p)} isMaximized={isMaximized} mapBackgroundUrl={mapBackgroundUrl} onUploadMapBackground={handleUploadMapBackground} onClearMapBackground={handleClearMapBackground} />
             </div>
             <div style={{ background: '#080808', padding: '20px', borderLeft: '1px solid #1a1a1a', overflowY: 'auto' }}>
               <button onClick={saveMapLayout} style={{ ...BtnStyle, width: '100%', marginBottom: '20px' }}>{saveStatus === 'READY' ? '[ COMMIT_MAP_TO_DATABASE ]' : `[ ${saveStatus} ]`}</button>
@@ -1310,6 +1414,34 @@ export default function CaseDetail({
         </div>
       )}
 
+      {editDetailsForm && (
+        <div style={ModalOverlay}><div style={ModalContent}>
+          <h2 style={{ color: '#00ff41', fontSize: '14px', marginBottom: '20px' }}>[ EDIT_INVESTIGATION_DETAILS ]</h2>
+          <div style={{ display: 'grid', gap: '12px' }}>
+            {[
+              ['missionLead', 'LEAD'],
+              ['teamName',    'TEAM'],
+              ['support',     'UNIT'],
+              ['personnel',   'OPS'],
+              ['country',     'FOCUS_COUNTRY'],
+            ].map(([field, label]) => (
+              <div key={field}>
+                <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>{label}</div>
+                <input
+                  style={InputStyle}
+                  value={editDetailsForm[field]}
+                  onChange={e => setEditDetailsForm({ ...editDetailsForm, [field]: e.target.value })}
+                />
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+              <button onClick={handleSaveDetails} style={BtnStyle}>COMMIT_CHANGES</button>
+              <button onClick={() => setEditDetailsForm(null)} style={{ ...BtnStyle, background: 'transparent', color: '#777', border: '1px solid #333' }}>ABORT</button>
+            </div>
+          </div>
+        </div></div>
+      )}
+
       {linkForm && (
         <div style={ModalOverlay}><div style={ModalContent}>
           <h2 style={{ color: '#00ff41', fontSize: '12px', marginBottom: '20px' }}>[ ESTABLISH_LINK ]: {linkForm.source} ↔ {linkForm.target}</h2>
@@ -1348,31 +1480,49 @@ export default function CaseDetail({
             <input style={InputStyle} placeholder="IP_ADDRESS" value={assetForm.ip} onChange={e => setAssetForm({ ...assetForm, ip: e.target.value })} />
             <input style={InputStyle} placeholder="MAC_ADDRESS" value={assetForm.mac} onChange={e => setAssetForm({ ...assetForm, mac: e.target.value })} />
             <div>
-              <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>OPERATING_SYSTEM</div>
-              <select style={InputStyle} value={assetForm.os} onChange={e => setAssetForm({ ...assetForm, os: e.target.value })}>
-                {['Windows', 'Linux', 'macOS', 'Network', 'Other'].map(o => <option key={o} value={o}>{o}</option>)}
-              </select>
-            </div>
-            <div>
+              {/* ASSET_TYPE drives which techniques this asset gets, via
+                  OPERATING_SYSTEM below it -- it comes first so that's the
+                  order the user actually reasons in, not category-then-OS
+                  as two independent, easily-desynced choices. */}
               <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>ASSET_TYPE</div>
               <select style={InputStyle} value={assetForm.type} onChange={e => {
                 const type = e.target.value;
-                setAssetForm({ ...assetForm, type, formFactor: type === 'Network Device' ? 'Switch' : 'Laptop' });
+                // Technique association (see /threat-profile on the backend)
+                // filters purely on OPERATING_SYSTEM, not ASSET_TYPE -- a
+                // Network Device left with a stale 'Windows'/'Linux' OS
+                // silently pulled in that platform's entire technique set
+                // instead of the actual Network Devices one. Keeping OS in
+                // lockstep with ASSET_TYPE here (both directions) makes
+                // that mismatch impossible instead of relying on the user
+                // to separately remember to also change OS.
+                const os = type === 'Network Device' ? 'Network' : (assetForm.os === 'Network' ? 'Windows' : assetForm.os);
+                setAssetForm({ ...assetForm, type, os });
               }}>
                 {['Workstation', 'Server', 'Domain Controller', 'Network Device', 'Unknown'].map(t => <option key={t} value={t}>{t}</option>)}
               </select>
             </div>
             <div>
-              <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>FORM_FACTOR</div>
+              <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>OPERATING_SYSTEM</div>
               {assetForm.type === 'Network Device' ? (
-                <select style={InputStyle} value={assetForm.formFactor} onChange={e => setAssetForm({ ...assetForm, formFactor: e.target.value })}>
-                  {['Switch', 'Router', 'Firewall', 'Load Balancer', 'Access Point', 'IDS/IPS', 'Proxy', 'Other'].map(f => <option key={f} value={f}>{f}</option>)}
-                </select>
+                // Locked, not just defaulted -- 'Network' is the only value
+                // that makes sense once ASSET_TYPE says Network Device, so
+                // this removes the redundant/inconsistent choice entirely
+                // rather than leaving a dropdown the user could still
+                // mismatch by hand.
+                <div style={{ ...InputStyle, display: 'flex', alignItems: 'center', color: '#666', cursor: 'not-allowed' }}>
+                  Network (locked — set by ASSET_TYPE)
+                </div>
               ) : (
-                <select style={InputStyle} value={assetForm.formFactor} onChange={e => setAssetForm({ ...assetForm, formFactor: e.target.value })}>
-                  {['Laptop', 'Desktop', 'Server Rack', 'Virtual Machine', 'Container', 'Embedded', 'Other'].map(f => <option key={f} value={f}>{f}</option>)}
+                <select style={InputStyle} value={assetForm.os} onChange={e => setAssetForm({ ...assetForm, os: e.target.value })}>
+                  {['Windows', 'Linux', 'macOS', 'Other'].map(o => <option key={o} value={o}>{o}</option>)}
                 </select>
               )}
+            </div>
+            <div>
+              <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>FORM_FACTOR</div>
+              <select style={InputStyle} value={assetForm.formFactor} onChange={e => setAssetForm({ ...assetForm, formFactor: e.target.value })}>
+                {ALL_FORM_FACTORS.map(f => <option key={f} value={f}>{f}</option>)}
+              </select>
             </div>
             <div>
               <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>ANALYSIS_MODE</div>
@@ -1398,7 +1548,7 @@ export default function CaseDetail({
 
 const StatTile = ({ label, val }) => (
   <div style={{ border: '1px solid #1a1a1a', padding: '12px' }}>
-    <div style={{ fontSize: '8px', color: '#555', marginBottom: '5px' }}>{label}</div>
+    <div style={{ fontSize: '8px', color: '#bbb', marginBottom: '5px' }}>{label}</div>
     <div style={{ fontSize: '12px', color: '#eee' }}>{val || '---'}</div>
   </div>
 );

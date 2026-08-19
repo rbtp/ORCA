@@ -138,10 +138,10 @@ export default function RemotePackagePanel({ assetId, hostname, caseName }) {
           <div style={{ width: `${noArtPct}%`,   background: "#333",    transition: "width 0.4s" }} />
           <div style={{ width: `${pendingPct}%`, background: "#1a1a1a", transition: "width 0.4s" }} />
         </div>
-        <div style={{ display: "flex", gap: 12, fontSize: 9, color: "#555", marginTop: 3 }}>
+        <div style={{ display: "flex", gap: 12, fontSize: 9, color: "#bbb", marginTop: 3 }}>
           <span style={{ color: "#00ff41" }}>■ EVIDENCE {with_evidence}</span>
-          <span style={{ color: "#444" }}>■ NO_ARTIFACTS {no_artifacts}</span>
-          <span style={{ color: "#333" }}>■ PENDING {pending}</span>
+          <span style={{ color: "#aaa" }}>■ NO_ARTIFACTS {no_artifacts}</span>
+          <span style={{ color: "#999" }}>■ PENDING {pending}</span>
         </div>
       </div>
     );
@@ -158,7 +158,7 @@ export default function RemotePackagePanel({ assetId, hostname, caseName }) {
     }}>
       {/* Header row */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-        <span style={{ color: "#555", letterSpacing: 1, fontSize: 10 }}>REMOTE PACKAGE</span>
+        <span style={{ color: "#bbb", letterSpacing: 1, fontSize: 10 }}>REMOTE PACKAGE</span>
         {!pkg && (
           <button
             onClick={handleGenerate}
@@ -205,7 +205,7 @@ export default function RemotePackagePanel({ assetId, hostname, caseName }) {
             <span style={{ color: "#00ff41", fontSize: 10 }}>
               ✓ {pkg.technique_count} TECHNIQUES PACKAGED
             </span>
-            <span style={{ color: "#444", fontSize: 10 }}>
+            <span style={{ color: "#aaa", fontSize: 10 }}>
               EXPIRES {expiresIn(pkg.expires_at)}
             </span>
           </div>
@@ -247,7 +247,7 @@ export default function RemotePackagePanel({ assetId, hostname, caseName }) {
           </div>
 
           {/* Usage hint */}
-          <div style={{ color: "#333", fontSize: 9, marginTop: 4 }}>
+          <div style={{ color: "#999", fontSize: 9, marginTop: 4 }}>
             On target: powershell -ExecutionPolicy Bypass -File run_orca_collection.ps1
           </div>
         </div>

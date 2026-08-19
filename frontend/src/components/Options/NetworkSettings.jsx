@@ -88,7 +88,7 @@ export default function NetworkSettings() {
         <h2 style={{ color: '#ffaa00', letterSpacing: '8px', fontSize: '22px', margin: 0, fontWeight: 900 }}>
           NETWORK_SETTINGS
         </h2>
-        <div style={{ color: '#222', fontSize: '10px', letterSpacing: '2px', marginTop: '8px' }}>
+        <div style={{ color: '#888', fontSize: '10px', letterSpacing: '2px', marginTop: '8px' }}>
           TLS CERTIFICATE MANAGEMENT // ORCA INTERNAL CA
         </div>
       </div>
@@ -110,12 +110,12 @@ export default function NetworkSettings() {
 
       {/* TLS Certificate section */}
       <section style={{ border: '1px solid #111', padding: '28px', marginBottom: '24px', background: '#030303' }}>
-        <div style={{ color: '#333', fontSize: '9px', letterSpacing: '3px', marginBottom: '20px' }}>
+        <div style={{ color: '#999', fontSize: '9px', letterSpacing: '3px', marginBottom: '20px' }}>
           TLS_CERTIFICATE
         </div>
 
         {certLoading ? (
-          <div style={{ color: '#333', fontSize: '11px' }}>READING_CERT...</div>
+          <div style={{ color: '#999', fontSize: '11px' }}>READING_CERT...</div>
         ) : !certInfo || !certInfo.cert_exists ? (
           <div style={{ color: '#ff4444', fontSize: '11px', letterSpacing: '1px' }}>NO_CERTIFICATE_FOUND</div>
         ) : (
@@ -132,7 +132,7 @@ export default function NetworkSettings() {
               }
             />
             <div>
-              <div style={{ color: '#333', fontSize: '9px', letterSpacing: '2px', marginBottom: '8px' }}>SUBJECT_ALT_NAMES</div>
+              <div style={{ color: '#999', fontSize: '9px', letterSpacing: '2px', marginBottom: '8px' }}>SUBJECT_ALT_NAMES</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                 {certInfo.sans.length > 0
                   ? certInfo.sans.map((s, i) => (
@@ -141,7 +141,7 @@ export default function NetworkSettings() {
                         color: s.startsWith('IP:') ? '#00b8ff' : '#ffaa00', fontSize: '10px',
                       }}>{s}</span>
                     ))
-                  : <span style={{ color: '#333', fontSize: '10px' }}>NO_SANS_DETECTED</span>
+                  : <span style={{ color: '#999', fontSize: '10px' }}>NO_SANS_DETECTED</span>
                 }
               </div>
             </div>
@@ -151,16 +151,16 @@ export default function NetworkSettings() {
 
       {/* Server Identity section */}
       <section style={{ border: '1px solid #111', padding: '28px', marginBottom: '24px', background: '#030303' }}>
-        <div style={{ color: '#333', fontSize: '9px', letterSpacing: '3px', marginBottom: '20px' }}>
+        <div style={{ color: '#999', fontSize: '9px', letterSpacing: '3px', marginBottom: '20px' }}>
           DETECTED_SERVER_IDENTITY
         </div>
         {identityLoading ? (
-          <div style={{ color: '#333', fontSize: '11px' }}>PROBING...</div>
+          <div style={{ color: '#999', fontSize: '11px' }}>PROBING...</div>
         ) : identity ? (
           <div style={{ display: 'grid', gap: '14px' }}>
             <Row label="OUTBOUND_IP" value={identity.ip} valueColor="#00b8ff" />
             <Row label="HOSTNAME"    value={identity.hostname} valueColor="#ffaa00" />
-            <div style={{ color: '#1a1a1a', fontSize: '9px', marginTop: '4px' }}>
+            <div style={{ color: '#777', fontSize: '9px', marginTop: '4px' }}>
               New cert SAN will cover: IP:{identity.ip}, DNS:{identity.hostname}, DNS:localhost
             </div>
           </div>
@@ -172,7 +172,7 @@ export default function NetworkSettings() {
       {/* Regenerate section */}
       {isAdmin ? (
         <section style={{ border: '1px solid #1a1200', padding: '28px', background: '#030303' }}>
-          <div style={{ color: '#333', fontSize: '9px', letterSpacing: '3px', marginBottom: '20px' }}>
+          <div style={{ color: '#999', fontSize: '9px', letterSpacing: '3px', marginBottom: '20px' }}>
             CERTIFICATE_OPERATIONS
           </div>
 
@@ -204,7 +204,7 @@ export default function NetworkSettings() {
         </section>
       ) : (
         <section style={{ border: '1px solid #111', padding: '20px', background: '#030303' }}>
-          <div style={{ color: '#333', fontSize: '10px', letterSpacing: '2px' }}>
+          <div style={{ color: '#999', fontSize: '10px', letterSpacing: '2px' }}>
             CERTIFICATE_OPERATIONS — ADMIN_ACCESS_REQUIRED
           </div>
         </section>
@@ -224,19 +224,19 @@ export default function NetworkSettings() {
               CONFIRM_CERT_REGEN
             </div>
             {identity && (
-              <div style={{ color: '#444', fontSize: '11px', marginBottom: '20px', lineHeight: '1.8' }}>
+              <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '20px', lineHeight: '1.8' }}>
                 New certificate will cover:<br />
                 <span style={{ color: '#00b8ff' }}>IP: {identity.ip}</span><br />
                 <span style={{ color: '#ffaa00' }}>DNS: {identity.hostname}, localhost</span>
               </div>
             )}
-            <div style={{ color: '#333', fontSize: '10px', marginBottom: '28px' }}>
+            <div style={{ color: '#999', fontSize: '10px', marginBottom: '28px' }}>
               Backend restart required (~2s downtime).
             </div>
             <div style={{ display: 'flex', gap: '12px' }}>
               <button
                 onClick={() => setConfirmOpen(false)}
-                style={{ flex: 1, padding: '12px', background: 'none', border: '1px solid #222', color: '#555', cursor: 'pointer', fontFamily: 'monospace' }}
+                style={{ flex: 1, padding: '12px', background: 'none', border: '1px solid #222', color: '#bbb', cursor: 'pointer', fontFamily: 'monospace' }}
               >
                 ABORT
               </button>
@@ -257,7 +257,7 @@ export default function NetworkSettings() {
 function Row({ label, value, valueColor = '#eee', extra }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr', gap: '16px', alignItems: 'center' }}>
-      <div style={{ color: '#333', fontSize: '9px', letterSpacing: '2px' }}>{label}</div>
+      <div style={{ color: '#999', fontSize: '9px', letterSpacing: '2px' }}>{label}</div>
       <div style={{ color: valueColor, fontSize: '12px' }}>
         {value}{extra}
       </div>

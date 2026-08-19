@@ -31,6 +31,7 @@ GET /api/...?token=<jwt>
 - [Reports](#reports)
 - [Network / TLS](#network--tls)
 - [Admin — Users](#admin--users)
+- [Admin — Audit Trail](#admin--audit-trail)
 - [Velociraptor](#velociraptor)
 
 ---
@@ -579,7 +580,7 @@ List all cases.
 
 ### POST /api/mitre/cases
 
-Create a new case.
+Create a new case, or edit an existing one — this is an upsert (`INSERT ... ON CONFLICT (name) DO UPDATE`) keyed on `name`. The "Edit Investigation Details" UI (mission lead, team, support unit, personnel, country) reuses this same endpoint; always pass through `groups`/`case_type` on an edit so they aren't silently cleared.
 
 **Request body**
 ```json
@@ -591,7 +592,7 @@ Create a new case.
 }
 ```
 
-**Response 200**: created case object
+**Response 200**: created/updated case object
 
 ---
 
@@ -600,6 +601,24 @@ Create a new case.
 Delete a case and all associated assets, evidence, and notes.
 
 **Response 200**: `{ "status": "deleted" }`
+
+---
+
+### GET /api/mitre/cases/{case_name}/map-background
+
+Get the network map background image for a case (binary image response, or 404 if none set).
+
+---
+
+### PUT /api/mitre/cases/{case_name}/map-background
+
+Upload/replace the network map background image. Multipart file upload, 8MB limit, must be `image/*`.
+
+---
+
+### DELETE /api/mitre/cases/{case_name}/map-background
+
+Clear the network map background image.
 
 ---
 
@@ -703,6 +722,27 @@ Verdict values: `MALICIOUS`, `NON-MALICIOUS`, `Evidence Found`, `NO_ARTIFACTS`, 
 Get collected evidence records for an asset/technique combination.
 
 **Response 200** — array of evidence rows (raw JSON from Velociraptor output)
+
+---
+
+### POST /api/mitre/evidence/{asset_id}/{t_code}/upload
+
+Manually attach evidence to a technique — available for any technique that doesn't already have evidence, not only ones where automatic collection explicitly returned zero artifacts. Rows are parsed client-side from a JSON/JSONL/CSV/TXT file before this call. Sets `verdict = 'MANUAL_UPLOAD'` and `evidence_imported = TRUE` on the technique.
+
+**Request body**
+```json
+{ "rows": [{ "...": "..." }], "filename": "manual_upload.json" }
+```
+
+**Response 200**: `{ "status": "ok", "rows_ingested": 12 }`
+
+---
+
+### DELETE /api/mitre/evidence/{asset_id}/{t_code}
+
+Flush all evidence collected for one technique on one asset — **admin only** (`403` otherwise). Deletes the `evidence` rows and resets `evidence_imported`/`evidence_summary` on that technique; the verdict itself is left untouched. Every call writes a row to `audit_log` (operator, case, asset, technique, rows removed) in the same transaction, so a deletion can never happen without being logged. The frontend gates this behind a 3-step confirmation (confirm → math check → "this is logged" warning) before issuing the request.
+
+**Response 200**: `{ "status": "SUCCESS", "rows_removed": 12 }`
 
 ---
 
@@ -1191,6 +1231,32 @@ Delete a user. Cannot delete yourself.
 
 **Response 200**: `{ "status": "OPERATOR_PURGED", "target": "alice" }`  
 **Errors**: `400 CANNOT_DELETE_SELF`, `404 USER_NOT_FOUND`
+
+---
+
+## Admin — Audit Trail
+
+### GET /api/admin/audit-log
+
+List logged admin activity (currently: evidence deletions — see `DELETE /api/mitre/evidence/{asset_id}/{t_code}`). **Admin only.** Backs the Options → Audit Trail view.
+
+**Query params**: `case_name` (optional), `asset_id` (optional) — both filter server-side; omit either to get all rows. Capped at the 1000 most recent, newest first.
+
+**Response 200** — array of:
+```json
+{
+  "id": 14,
+  "ts": "2026-08-19T10:22:31.000Z",
+  "username": "alice",
+  "user_initials": "ALC",
+  "action": "DELETE_EVIDENCE",
+  "case_name": "Op Phantom",
+  "asset_id": 12,
+  "asset_hostname": "DESKTOP-01",
+  "t_code": "T1055",
+  "details": "Deleted 8 evidence row(s)"
+}
+```
 
 ---
 

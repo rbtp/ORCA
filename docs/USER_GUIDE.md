@@ -50,17 +50,18 @@ The **Dashboard** is the landing page after login. It shows:
    - **Case Name** — unique identifier
    - **Focus Country** — binds the case to a geopolitical threat profile (all threat groups attributed to that country, and their ATT&CK techniques, are automatically in scope)
    - Or select **Custom Profile / Threat Groups** to scope by specific threat actors instead
-4. After creating the case, click it to open **Case Detail**.
+4. After creating the case, click it to open **Case Detail**. Click **[ EDIT_DETAILS ]** next to the case name at any time to update mission lead, team, support unit, personnel, or country — this doesn't create a new case, it updates the existing one.
 5. In the **ASSETS** section, click **+ ADD ASSET** and enter:
    - **Hostname**
    - **IP Address** (required for remote collection)
-   - **OS** (`Windows`, `Linux`, `macOS`)
-   - **Asset Type**
+   - **Asset Type** — set this first. It drives which MITRE techniques get associated with the asset, so the fields below it cascade from this choice: choosing `Network Device` locks **Operating System** to `Network` (the only ATT&CK platform that applies to routers/switches/firewalls) and narrows **Form Factor** to network-hardware options; any other type unlocks the normal OS list and host form factors. This prevents ending up with an asset whose type says "Network Device" but whose OS still says "Windows" — which used to silently pull in the wrong technique set.
+   - **Operating System** (`Windows`, `Linux`, `macOS`, `Other`, or the locked `Network` value)
+   - **Form Factor**
    - **Analysis Mode** (`LIVE_REMOTE`, `DEAD_DISK_LOCAL`, `DEAD_DISK_MOUNTED`)
 
 ### Network Map
 
-The **OVERVIEW** tab contains an interactive D3.js network map. Drag nodes to arrange your asset topology; positions are auto-saved to the case. Use the link tool to draw connections between nodes. The map is rendered as an image in report exports.
+The **OVERVIEW** tab contains an interactive D3.js network map. Drag nodes to arrange your asset topology; positions are auto-saved to the case. Use the link tool to draw connections between nodes. New nodes spawn near the center of the map instead of stacking on top of each other. Right-click a device (router, switch, firewall, etc.) for **RENAME_DEVICE** to give it a display name independent of its hostname. Use the upload button next to the maximize-map control to set an optional background image behind the map (e.g. a floor plan or topology diagram); it can be replaced or cleared the same way. The map is rendered as an image in report exports.
 
 ### Case Notes
 
@@ -153,6 +154,8 @@ The **PKG** panel on each asset shows live collection progress:
    - **Verdict selector** — set the verdict for this technique on this asset
    - **Notes** — add analyst annotations at the technique level
    - **Status** — change the lifecycle status (UNCLAIMED → IN_PROGRESS → PENDING_REVIEW → CLOSED)
+5. Any technique with no evidence yet shows a **manual upload** option (JSON/JSONL/CSV/TXT) — use it to attach evidence that wasn't collected automatically, regardless of whether a collection was ever attempted for that technique.
+6. **Admins only**: a technique that already has evidence shows a red **⚠ FLUSH_EVIDENCE** button next to the verdict selector. This permanently deletes the evidence collected for that technique and is logged — see [Audit Trail (Admin Only)](#audit-trail-admin-only) below.
 
 ### Timeline View
 
@@ -366,6 +369,10 @@ Profiles appear in the **GEOPOLITICAL_FOCUS** dropdown when creating a case (und
 - **View all users** — username, initials, role
 - **Create user** — username, password, initials, role (`admin` or `analyst`)
 - **Delete user** — cannot delete your own account
+
+### Audit Trail (Admin Only)
+
+A log of logged admin activity — currently, every evidence deletion (see [Reviewing Evidence in the Evidence Window](#reviewing-evidence-in-the-evidence-window)) — showing timestamp, operator, action, investigation, asset, technique, and details. Use the **INVESTIGATION** and **ASSET** dropdowns to narrow the list; the asset dropdown only offers assets from the currently selected investigation.
 
 ### Velociraptor GUI
 

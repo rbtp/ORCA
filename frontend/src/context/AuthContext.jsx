@@ -58,22 +58,45 @@ export const AuthProvider = ({ children }) => {
 
   const login = async (username, password) => {
     setSessionExpired(false);
-    const response = await fetch('/api/auth/login', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    });
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
 
-    if (response.ok) {
-      const data = await response.json();
-      localStorage.setItem('orca_user', JSON.stringify(data.user));
-      setUser(data.user);
-      scheduleExpiryLogout(data.expires_at);
-      return { success: true };
-    } else {
-      const error = await response.json();
-      return { success: false, message: error.detail };
+      if (response.ok) {
+        const data = await response.json();
+        localStorage.setItem('orca_user', JSON.stringify(data.user));
+        setUser(data.user);
+        scheduleExpiryLogout(data.expires_at);
+        return { success: true };
+      }
+
+      // Non-2xx: try to read the backend's JSON error detail, but don't
+      // assume the response body IS JSON -- a proxy-level failure (e.g.
+      // nginx returning its own HTML 502 page) fails .json() too, and
+      // that was previously unhandled right alongside the fetch() case
+      // below.
+      let message = `Login failed (${response.status})`;
+      try {
+        const error = await response.json();
+        if (error.detail) message = error.detail;
+      } catch {
+        /* body wasn't JSON -- keep the generic status-code message */
+      }
+      return { success: false, message };
+    } catch (err) {
+      // A network-level failure (unreachable backend, DNS, TLS/cert
+      // error) throws out of fetch() itself. Confirmed live 2026-08-18:
+      // this was previously unhandled, so INITIALIZE_SESSION on the
+      // login screen silently did nothing with zero feedback when the
+      // backend was briefly unreachable (nginx caching a stale upstream
+      // IP after a container restart). Always return a result object so
+      // the caller's alert(result.message) has something to show instead
+      // of an unhandled rejection.
+      return { success: false, message: `Could not reach the server: ${err.message}` };
     }
   };
 

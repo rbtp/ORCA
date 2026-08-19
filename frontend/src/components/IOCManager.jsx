@@ -217,7 +217,7 @@ export default function IOCManager() {
               )}
 
               {lastScanTime && !isScanning && (
-                <span style={{ color: '#333', fontSize: 9 }}>
+                <span style={{ color: '#999', fontSize: 9 }}>
                   last scan {new Date(lastScanTime).toLocaleString()}
                 </span>
               )}
@@ -267,7 +267,7 @@ export default function IOCManager() {
                       <td style={{ padding: '12px 14px' }}>
                         {hasMatch
                           ? <span style={{ color: C.red, fontSize: 11 }}>▲ {matches.length} hit{matches.length !== 1 ? 's' : ''}</span>
-                          : <span style={{ color: '#222', fontSize: 11 }}>—</span>}
+                          : <span style={{ color: '#888', fontSize: 11 }}>—</span>}
                       </td>
                     </tr>
                   );
@@ -311,7 +311,7 @@ export default function IOCManager() {
             <div style={{ color: C.greyDim, fontSize: 10, marginBottom: 14 }}>No evidence hits in last scan.</div>
           )}
           {!lastScanTime && !isScanning && (
-            <div style={{ color: '#333', fontSize: 10, marginBottom: 14 }}>Run correlation scan to check evidence.</div>
+            <div style={{ color: '#999', fontSize: 10, marginBottom: 14 }}>Run correlation scan to check evidence.</div>
           )}
           {isScanning && !correlations[selectedIoc.value] && (
             <div style={{ color: C.amber, fontSize: 10, marginBottom: 14 }}>Scan in progress…</div>
@@ -369,11 +369,11 @@ export default function IOCManager() {
 function Field({ label, value, color }) {
   return (
     <div style={{ marginBottom: 12 }}>
-      <div style={{ fontSize: 9, color: '#333', marginBottom: 3, letterSpacing: 1 }}>{label}</div>
+      <div style={{ fontSize: 9, color: '#999', marginBottom: 3, letterSpacing: 1 }}>{label}</div>
       <div style={{ fontSize: 11, color: color || '#aaa', fontFamily: 'monospace' }}>{value}</div>
     </div>
   );
 }
 
 const Is = { width: '100%', background: '#000', color: '#eee', border: '1px solid #222', padding: 10, marginBottom: 12, fontFamily: 'monospace', fontSize: 11, boxSizing: 'border-box', outline: 'none' };
-const Ls = { display: 'block', fontSize: 9, color: '#444', letterSpacing: 1, marginBottom: 4 };
+const Ls = { display: 'block', fontSize: 9, color: '#aaa', letterSpacing: 1, marginBottom: 4 };

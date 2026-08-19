@@ -52,4 +52,4 @@ const LabelStyle = { color: '#666', fontSize: '9px', marginBottom: '5px' };
 const DataBox = { background: '#080808', border: '1px solid #111', padding: '10px', minHeight: '60px' };
 const ItemStyle = { color: '#ccc', fontSize: '11px', marginBottom: '4px', fontFamily: 'monospace' };
 const Bullet = { color: '#00ff41', marginRight: '8px' };
-const DimText = { color: '#333', fontSize: '10px' };
+const DimText = { color: '#999', fontSize: '10px' };

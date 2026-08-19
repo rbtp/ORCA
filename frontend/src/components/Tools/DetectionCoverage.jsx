@@ -86,7 +86,7 @@ export default function DetectionCoverage() {
         <h2 style={{ color: '#ffaa00', letterSpacing: '8px', fontSize: '24px', margin: 0, fontWeight: 900 }}>
           DETECTION_COVERAGE
         </h2>
-        <div style={{ color: '#222', fontSize: '10px', letterSpacing: '2px', marginTop: '8px' }}>
+        <div style={{ color: '#888', fontSize: '10px', letterSpacing: '2px', marginTop: '8px' }}>
           VQL/YAML COVERAGE vs COUNTRY T-CODE ATTRIBUTION // SOURCE: ref_artifact_library
         </div>
 
@@ -100,7 +100,7 @@ export default function DetectionCoverage() {
             ['CUSTOM_PROFILES', profiles.length, '#00b8ff'],
           ].map(([lbl, val, col]) => (
             <div key={lbl} style={{ background: '#050505', border: '1px solid #111', padding: '20px 28px', minWidth: '120px' }}>
-              <div style={{ color: '#333', fontSize: '9px', letterSpacing: '2px', marginBottom: '8px' }}>{lbl}</div>
+              <div style={{ color: '#999', fontSize: '9px', letterSpacing: '2px', marginBottom: '8px' }}>{lbl}</div>
               <div style={{ color: col, fontSize: '22px', fontWeight: 900 }}>{val}</div>
             </div>
           ))}
@@ -121,7 +121,7 @@ export default function DetectionCoverage() {
         >
           SORT_PCT {sortDir === 'desc' ? '▼' : '▲'}
         </button>
-        <div style={{ color: '#222', fontSize: '10px', whiteSpace: 'nowrap' }}>
+        <div style={{ color: '#888', fontSize: '10px', whiteSpace: 'nowrap' }}>
           {sortedCountries.length + sortedProfiles.length} ENTRIES
         </div>
       </div>
@@ -141,7 +141,7 @@ export default function DetectionCoverage() {
       {/* Legend */}
       <div style={{ display: 'flex', gap: '20px', marginBottom: '24px' }}>
         {[['VQL + YAML', '#00ff41'], ['YAML_ONLY', '#ffaa00'], ['UNCOVERED', '#ff4444']].map(([lbl, col]) => (
-          <div key={lbl} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', color: '#444' }}>
+          <div key={lbl} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', color: '#aaa' }}>
             <div style={{ width: '10px', height: '10px', background: col }} />
             {lbl}
           </div>
@@ -151,7 +151,7 @@ export default function DetectionCoverage() {
       {/* Countries section */}
       {sortedCountries.length > 0 && (
         <div style={{ marginBottom: '48px' }}>
-          <div style={{ color: '#333', fontSize: '10px', letterSpacing: '3px', marginBottom: '16px', borderBottom: '1px solid #0a0a0a', paddingBottom: '8px' }}>
+          <div style={{ color: '#999', fontSize: '10px', letterSpacing: '3px', marginBottom: '16px', borderBottom: '1px solid #0a0a0a', paddingBottom: '8px' }}>
             COUNTRIES ({sortedCountries.length})
           </div>
           {sortedCountries.map(entry => (
@@ -186,7 +186,7 @@ export default function DetectionCoverage() {
       )}
 
       {sortedCountries.length === 0 && sortedProfiles.length === 0 && (
-        <div style={{ color: '#111', textAlign: 'center', marginTop: '80px', fontSize: '18px', letterSpacing: '8px' }}>
+        <div style={{ color: '#777', textAlign: 'center', marginTop: '80px', fontSize: '18px', letterSpacing: '8px' }}>
           NO_COVERAGE_DATA
         </div>
       )}
@@ -251,12 +251,12 @@ function CoverageRow({ entry, isExpanded, onToggle, tcSearch, isProfile = false 
           <div style={{ width: `${nonePct}%`, background: '#1a0000', transition: 'width 0.4s' }} />
         </div>
 
-        <div style={{ color: '#333', fontSize: '9px', textAlign: 'right', letterSpacing: '1px' }}>
+        <div style={{ color: '#999', fontSize: '9px', textAlign: 'right', letterSpacing: '1px' }}>
           {entry.covered}/{entry.total} VQL &nbsp;
           <span style={{ color: '#1a1200' }}>{entry.partial} YAML</span>
         </div>
 
-        <div style={{ color: '#333', fontSize: '11px', textAlign: 'center' }}>
+        <div style={{ color: '#999', fontSize: '11px', textAlign: 'center' }}>
           {isExpanded ? '▲' : '▼'}
         </div>
       </div>
@@ -266,7 +266,7 @@ function CoverageRow({ entry, isExpanded, onToggle, tcSearch, isProfile = false 
         <div style={{ border: `1px solid ${borderAccent}`, borderTop: 'none', background: '#020202', padding: '0' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '10px' }}>
             <thead>
-              <tr style={{ color: '#333', borderBottom: '1px solid #0a0a0a' }}>
+              <tr style={{ color: '#999', borderBottom: '1px solid #0a0a0a' }}>
                 <th style={thStyle}>T-CODE</th>
                 <th style={thStyle}>TECHNIQUE_NAME</th>
                 <th style={{ ...thStyle, textAlign: 'center' }}>VQL</th>
@@ -277,7 +277,7 @@ function CoverageRow({ entry, isExpanded, onToggle, tcSearch, isProfile = false 
             <tbody>
               {filteredTcodes.length === 0 && (
                 <tr>
-                  <td colSpan={5} style={{ padding: '20px', color: '#222', textAlign: 'center', fontSize: '10px' }}>
+                  <td colSpan={5} style={{ padding: '20px', color: '#888', textAlign: 'center', fontSize: '10px' }}>
                     NO_MATCHING_TCODES
                   </td>
                 </tr>
@@ -285,23 +285,23 @@ function CoverageRow({ entry, isExpanded, onToggle, tcSearch, isProfile = false 
               {filteredTcodes.map(t => (
                 <tr key={t.t_code} style={{ borderBottom: '1px solid #080808' }}>
                   <td style={{ ...tdStyle, color: tcodeColor(t), fontWeight: 'bold' }}>{t.t_code}</td>
-                  <td style={{ ...tdStyle, color: '#444' }}>{t.name || '—'}</td>
+                  <td style={{ ...tdStyle, color: '#aaa' }}>{t.name || '—'}</td>
                   <td style={{ ...tdStyle, textAlign: 'center' }}>
                     {t.has_vql
                       ? <span style={{ color: '#00ff41', fontSize: '12px' }}>✓</span>
-                      : <span style={{ color: '#222', fontSize: '11px' }}>✗</span>}
+                      : <span style={{ color: '#888', fontSize: '11px' }}>✗</span>}
                   </td>
                   <td style={{ ...tdStyle, textAlign: 'center' }}>
                     {t.has_yaml
                       ? <span style={{ color: '#ffaa00', fontSize: '12px' }}>✓</span>
-                      : <span style={{ color: '#222', fontSize: '11px' }}>✗</span>}
+                      : <span style={{ color: '#888', fontSize: '11px' }}>✗</span>}
                   </td>
-                  <td style={{ ...tdStyle, textAlign: 'right', color: '#1a1a1a' }}>{fmtDate(t.updated_at)}</td>
+                  <td style={{ ...tdStyle, textAlign: 'right', color: '#777' }}>{fmtDate(t.updated_at)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <div style={{ padding: '8px 16px', color: '#111', fontSize: '9px', borderTop: '1px solid #0a0a0a' }}>
+          <div style={{ padding: '8px 16px', color: '#777', fontSize: '9px', borderTop: '1px solid #0a0a0a' }}>
             SHOWING {filteredTcodes.length} OF {entry.tcodes.length} TECHNIQUES
           </div>
         </div>
@@ -312,8 +312,8 @@ function CoverageRow({ entry, isExpanded, onToggle, tcSearch, isProfile = false 
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const inputStyle  = { flex: 1, background: '#050505', border: '1px solid #1a1a1a', color: '#eee', padding: '12px 16px', fontSize: '11px', outline: 'none', fontFamily: 'monospace', boxSizing: 'border-box' };
-const sortBtnStyle = { background: 'none', border: '1px solid #1a1a1a', color: '#444', padding: '12px 20px', cursor: 'pointer', fontFamily: 'monospace', fontSize: '10px', whiteSpace: 'nowrap' };
+const sortBtnStyle = { background: 'none', border: '1px solid #1a1a1a', color: '#aaa', padding: '12px 20px', cursor: 'pointer', fontFamily: 'monospace', fontSize: '10px', whiteSpace: 'nowrap' };
 const thStyle     = { padding: '10px 16px', fontWeight: 'normal', textAlign: 'left', letterSpacing: '1px' };
-const tdStyle     = { padding: '8px 16px', color: '#555' };
+const tdStyle     = { padding: '8px 16px', color: '#bbb' };
 const loadStyle   = { color: '#ffaa00', fontFamily: 'monospace', padding: '60px', fontSize: '13px' };
 const errStyle    = { color: '#ff4444', fontFamily: 'monospace', padding: '60px', fontSize: '13px' };

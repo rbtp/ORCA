@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, Body, BackgroundTasks, Request, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from core.database_manager import db, get_db
 from services.mitre_service import MitreIntelService
 from sqlalchemy import text, inspect
@@ -942,6 +942,49 @@ async def upload_evidence_manual(asset_id: int, t_code: str, payload: dict, curr
         conn.commit()
     return {"status": "ok", "rows_ingested": len(rows)}
 
+@router.delete("/evidence/{asset_id}/{t_code}")
+async def delete_evidence(asset_id: int, t_code: str, db: Session = Depends(get_db), current_user: dict = Depends(require_admin)):
+    """Flush all evidence collected for one technique on one asset. Admin-only — every call is written to audit_log."""
+    try:
+        asset_row = db.execute(
+            text("SELECT hostname, case_name FROM assets WHERE id = :aid"), {"aid": asset_id}
+        ).mappings().first()
+        if not asset_row:
+            raise HTTPException(status_code=404, detail="ASSET_NOT_FOUND")
+
+        deleted = db.execute(
+            text("DELETE FROM evidence WHERE asset_id = :aid AND t_code = :t"),
+            {"aid": asset_id, "t": t_code}
+        )
+        rows_removed = deleted.rowcount or 0
+
+        db.execute(text("""
+            UPDATE artifact_results
+            SET evidence_imported = FALSE, evidence_summary = NULL
+            WHERE asset_id = :aid AND t_code = :t
+        """), {"aid": asset_id, "t": t_code})
+
+        db.execute(text("""
+            INSERT INTO audit_log (username, user_initials, action, case_name, asset_id, asset_hostname, t_code, details)
+            VALUES (:username, :initials, 'DELETE_EVIDENCE', :case_name, :aid, :hostname, :t, :details)
+        """), {
+            "username": current_user.get("sub"),
+            "initials": current_user.get("initials"),
+            "case_name": asset_row["case_name"],
+            "aid": asset_id,
+            "hostname": asset_row["hostname"],
+            "t": t_code,
+            "details": f"Deleted {rows_removed} evidence row(s)",
+        })
+
+        db.commit()
+        return {"status": "SUCCESS", "rows_removed": rows_removed}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ── Cases ──────────────────────────────────────────────────────────────────────
 @router.get("/cases")
 def get_all_cases(current_user: dict = Depends(get_current_user)):
@@ -1394,6 +1437,57 @@ async def sync_map_layout(case_name: str, payload: MapUpdatePayload, db_session:
     except Exception as e:
         db_session.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+_MAX_MAP_BACKGROUND_BYTES = 8 * 1024 * 1024  # generous for a floor plan / rack diagram image
+
+
+@router.get("/cases/{case_name}/map-background")
+async def get_map_background(case_name: str, current_user: dict = Depends(get_current_user)):
+    with db.engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT map_background, map_background_content_type FROM public.cases WHERE name = :name"
+        ), {"name": case_name}).fetchone()
+    if not row or row.map_background is None:
+        raise HTTPException(status_code=404, detail="No map background set for this case")
+    return Response(
+        content=bytes(row.map_background),
+        media_type=row.map_background_content_type or "application/octet-stream",
+    )
+
+
+@router.put("/cases/{case_name}/map-background", status_code=204)
+async def put_map_background(
+    case_name: str, file: UploadFile = File(...),
+    db_session: Session = Depends(get_db), current_user: dict = Depends(get_current_user),
+):
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    data = await file.read()
+    if len(data) > _MAX_MAP_BACKGROUND_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large (max 8MB)")
+    try:
+        db_session.execute(text(
+            "UPDATE public.cases SET map_background = :data, map_background_content_type = :ct WHERE name = :name"
+        ), {"data": data, "ct": file.content_type, "name": case_name})
+        db_session.commit()
+    except Exception as e:
+        db_session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/cases/{case_name}/map-background", status_code=204)
+async def delete_map_background(
+    case_name: str, db_session: Session = Depends(get_db), current_user: dict = Depends(get_current_user),
+):
+    try:
+        db_session.execute(text(
+            "UPDATE public.cases SET map_background = NULL, map_background_content_type = NULL WHERE name = :name"
+        ), {"name": case_name})
+        db_session.commit()
+    except Exception as e:
+        db_session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.delete("/cases/{case_name}")
 async def delete_case(case_name: str, db: Session = Depends(get_db), current_user: dict = Depends(require_admin)):

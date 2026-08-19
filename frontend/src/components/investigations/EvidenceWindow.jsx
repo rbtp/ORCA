@@ -438,6 +438,85 @@ const OverviewTab = ({ tacticList, memSummary, avSummary, vulnSummary, behaviora
 };
 
 
+// ── Delete-evidence confirmation — three sequential gates before the DELETE
+// fires: (1) plain confirm, (2) a math check to filter out reflexive clicking,
+// (3) an explicit "this is logged" warning. The backend writes an audit_log
+// row itself once the DELETE actually lands, so gate 3 is just making sure
+// the analyst has read that before committing.
+const DeleteEvidenceModal = ({ tCode, deleting, onCancel, onConfirm }) => {
+  const [gate, setGate] = useState(1);
+  const makeProblem = () => {
+    const a = Math.floor(Math.random() * 40) + 5;
+    const b = Math.floor(Math.random() * 40) + 5;
+    const op = Math.random() < 0.5 ? '+' : '-';
+    return { a, b, op, result: op === '+' ? a + b : a - b };
+  };
+  const [problem, setProblem] = useState(makeProblem);
+  const [answer, setAnswer]   = useState('');
+  const [mathError, setMathError] = useState(false);
+
+  const submitMath = () => {
+    if (parseInt(answer, 10) === problem.result) {
+      setGate(3);
+    } else {
+      setMathError(true);
+      setProblem(makeProblem());
+      setAnswer('');
+    }
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}>
+      <div style={{ width: 420, background: '#0a0a0a', border: `1px solid ${C.red}`, padding: 22, fontFamily: 'monospace' }}>
+        {gate === 1 && (
+          <>
+            <div style={{ color: C.red, fontSize: 13, fontWeight: 'bold', marginBottom: 12, letterSpacing: 1 }}>DELETE_EVIDENCE — {tCode}</div>
+            <div style={{ color: C.grey, fontSize: 12, marginBottom: 20, lineHeight: 1.5 }}>
+              Are you sure you want to delete all evidence collected for this technique? This cannot be undone.
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => setGate(2)} style={{ ...Btn, background: C.red, color: '#fff' }}>YES, CONTINUE</button>
+              <button onClick={onCancel} style={{ ...Btn, background: 'transparent', border: `1px solid ${C.border}`, color: C.greyDim }}>CANCEL</button>
+            </div>
+          </>
+        )}
+        {gate === 2 && (
+          <>
+            <div style={{ color: C.red, fontSize: 13, fontWeight: 'bold', marginBottom: 12, letterSpacing: 1 }}>VERIFY — SOLVE TO CONTINUE</div>
+            <div style={{ color: C.white, fontSize: 18, marginBottom: 12 }}>{problem.a} {problem.op} {problem.b} = ?</div>
+            {mathError && <div style={{ color: C.amber, fontSize: 11, marginBottom: 8 }}>INCORRECT — new problem generated, try again</div>}
+            <input autoFocus type="number" value={answer} onChange={e => setAnswer(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && submitMath()}
+              style={{ ...Inp, width: 100, marginBottom: 18, fontSize: 14 }} />
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={submitMath} style={{ ...Btn, background: C.red, color: '#fff' }}>SUBMIT</button>
+              <button onClick={onCancel} style={{ ...Btn, background: 'transparent', border: `1px solid ${C.border}`, color: C.greyDim }}>CANCEL</button>
+            </div>
+          </>
+        )}
+        {gate === 3 && (
+          <>
+            <div style={{ background: 'rgba(255,68,68,0.1)', border: `1px solid ${C.red}`, padding: 14, marginBottom: 18 }}>
+              <div style={{ color: C.red, fontSize: 12, fontWeight: 'bold' }}>⚠ You are deleting evidence from an investigation.</div>
+              <div style={{ color: C.red, fontSize: 11, marginTop: 8, lineHeight: 1.5 }}>
+                This activity is logged and attributed to your account in the audit trail.
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={onConfirm} disabled={deleting}
+                style={{ ...Btn, background: C.red, color: '#fff', opacity: deleting ? 0.5 : 1 }}>
+                {deleting ? 'DELETING...' : 'CONFIRM_DELETE'}
+              </button>
+              <button onClick={onCancel} disabled={deleting}
+                style={{ ...Btn, background: 'transparent', border: `1px solid ${C.border}`, color: C.greyDim }}>ABORT</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ARTIFACT ANALYSIS TAB
 // ══════════════════════════════════════════════════════════════════════════════
@@ -599,8 +678,35 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
   const myInitials = (() => {
     try { return JSON.parse(localStorage.getItem('orca_user')).initials; } catch { return null; }
   })();
+  const isAdmin = (() => {
+    try { return JSON.parse(localStorage.getItem('orca_user')).role === 'admin'; } catch { return false; }
+  })();
   const iAmLockHolder = lockInfo && lockInfo.locked_by_initials === myInitials;
   const isLockedByOther = lockInfo && !iAmLockHolder;
+  const [showDeleteEvidence, setShowDeleteEvidence] = useState(false);
+  const [deletingEvidence, setDeletingEvidence] = useState(false);
+
+  const handleDeleteEvidence = async () => {
+    if (!sel || !assetId) return;
+    setDeletingEvidence(true);
+    try {
+      const resp = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/evidence/${assetId}/${sel}`, {
+        method: 'DELETE', headers: getAuth(),
+      });
+      if (resp.ok) {
+        setShowDeleteEvidence(false);
+        loadEvidence(sel);
+        refreshTactics();
+      } else {
+        const e = await resp.json().catch(() => ({}));
+        alert('DELETE_ERROR: ' + (e.detail || resp.statusText));
+      }
+    } catch {
+      alert('CRITICAL: Cannot reach backend.');
+    } finally {
+      setDeletingEvidence(false);
+    }
+  };
 
   const runCollection = async () => {
     setIsCollecting(true);
@@ -833,6 +939,14 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
               <button onClick={handleRelease}
                 style={{ ...Btn, background: 'transparent', border: `1px solid ${C.border}`, color: C.greyDim, fontSize: 9, padding: '4px 10px' }}>
                 RELEASE_LOCK
+              </button>
+            )}
+
+            {/* Flush evidence — admin only, only when this technique has evidence to remove */}
+            {sel && isAdmin && curTactic?.evidence_imported && (
+              <button onClick={() => setShowDeleteEvidence(true)}
+                style={{ ...Btn, background: 'transparent', border: `1px solid ${C.red}`, color: C.red, fontSize: 9, padding: '4px 10px' }}>
+                ⚠ FLUSH_EVIDENCE
               </button>
             )}
 
@@ -1095,12 +1209,11 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
                             : 'NO_EVIDENCE_COLLECTED_FOR_THIS_TECHNIQUE'}
                         </div>
                         )}
-                        {(curTactic?.verdict || '').toUpperCase() === 'NO_ARTIFACTS' && (
-                          <div style={{ background: '#0a0a0a', border: `1px solid #333`, padding: 12 }}>
-                            <div style={{ color: '#ffaa00', fontSize: 10, marginBottom: 8 }}>
-                              ⚠ No artifacts found through automatic collection — manually upload evidence?
-                            </div>
-                            <input
+                        <div style={{ background: '#0a0a0a', border: `1px solid #333`, padding: 12 }}>
+                          <div style={{ color: '#ffaa00', fontSize: 10, marginBottom: 8 }}>
+                            ⚠ No evidence associated with this technique — manually upload evidence?
+                          </div>
+                          <input
                               type="file"
                               accept=".json,.jsonl,.csv,.txt"
                               id={`upload-ev-${sel}`}
@@ -1148,8 +1261,7 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
                             }}>
                               SELECT_FILE (JSON / JSONL / CSV / TXT)
                             </label>
-                          </div>
-                        )}
+                        </div>
                       </>
                     )}
                   </div>
@@ -1203,6 +1315,15 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
           )}
         </div>
       </main>
+
+      {showDeleteEvidence && (
+        <DeleteEvidenceModal
+          tCode={sel}
+          deleting={deletingEvidence}
+          onCancel={() => setShowDeleteEvidence(false)}
+          onConfirm={handleDeleteEvidence}
+        />
+      )}
     </div>
   );
 };
@@ -3530,7 +3651,7 @@ const NetConfigTab = ({ netConfigText, netConfigFile, netConfigSaving, onConfigL
       ) : (
         <div style={{ color: C.greyDim, fontSize: 11, fontFamily: 'monospace', padding: '40px 0', textAlign: 'center' }}>
           No configuration loaded — upload a device config file above.<br />
-          <span style={{ fontSize: 10, color: '#333' }}>Supported: .cfg .conf .ios .txt .xml .json .yaml</span>
+          <span style={{ fontSize: 10, color: '#999' }}>Supported: .cfg .conf .ios .txt .xml .json .yaml</span>
         </div>
       )}
     </div>
