@@ -282,7 +282,9 @@ export default function ReportsView() {
   const [selectedCase, setSelectedCase] = useState(null);
   const [reportData, setReportData]     = useState(null);
   const [loading, setLoading]           = useState(false);
+  const [loadError, setLoadError]       = useState(null);
   const [exporting, setExporting]       = useState(null);
+  const [exportError, setExportError]   = useState(null);
   const [sections, setSections]         = useState(DEFAULT_SECTIONS);
   const [dragIdx, setDragIdx]           = useState(null);
 
@@ -299,15 +301,18 @@ export default function ReportsView() {
       .catch(() => {});
   }, []);
 
-  useEffect(() => {
+  const loadReport = useCallback(() => {
     if (!selectedCase) return;
     setLoading(true);
     setReportData(null);
+    setLoadError(null);
     fetch(`${import.meta.env.VITE_API_URL}/api/reports/${encodeURIComponent(selectedCase)}`, { credentials: 'include', headers: authHdr() })
-      .then(r => r.json())
+      .then(r => { if (!r.ok) throw new Error(`SERVER_${r.status}`); return r.json(); })
       .then(d => { setReportData(d); setLoading(false); })
-      .catch(() => setLoading(false));
+      .catch(e => { setLoadError(e.message || 'FETCH_FAILED'); setLoading(false); });
   }, [selectedCase]);
+
+  useEffect(() => { loadReport(); }, [loadReport]);
 
   // ── drag reorder ────────────────────────────────────────────
   const handleDragStart = (i) => setDragIdx(i);
@@ -329,6 +334,7 @@ export default function ReportsView() {
   const handleExport = async (format) => {
     if (!selectedCase || !reportData) return;
     setExporting(format);
+    setExportError(null);
     try {
       const body = {
         sections: sections.filter(s => s.enabled).map(s => ({ id: s.id, detail: s.detail })),
@@ -339,7 +345,10 @@ export default function ReportsView() {
         `${import.meta.env.VITE_API_URL}/api/reports/${encodeURIComponent(selectedCase)}/export?format=${format}`,
         { method: "POST", credentials: 'include', headers: { ...authHdr(), "Content-Type": "application/json" }, body: JSON.stringify(body) }
       );
-      if (!res.ok) throw new Error("Export failed");
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.detail || `Export failed (${res.status})`);
+      }
       const blob = await res.blob();
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement("a");
@@ -349,6 +358,10 @@ export default function ReportsView() {
       URL.revokeObjectURL(url);
     } catch (e) {
       console.error(e);
+      // Previously silent -- the button just reverted to its normal label
+      // with zero indication the download never happened, indistinguishable
+      // from nothing having gone wrong.
+      setExportError(`${format.toUpperCase()}_EXPORT_FAILED: ${e.message}`);
     } finally {
       setExporting(null);
     }
@@ -748,6 +761,11 @@ export default function ReportsView() {
               {exporting === fmt ? "GENERATING..." : label}
             </button>
           ))}
+          {exportError && (
+            <div style={{ fontFamily: "monospace", fontSize: 10, color: RED, padding: "6px 2px", lineHeight: 1.4 }}>
+              ✗ {exportError}
+            </div>
+          )}
         </div>
       </div>
 
@@ -763,6 +781,17 @@ export default function ReportsView() {
         {selectedCase && loading && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: DIM2, fontFamily: "monospace", fontSize: 11 }}>
             LOADING...
+          </div>
+        )}
+
+        {selectedCase && !loading && loadError && (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 12, fontFamily: "monospace" }}>
+            <div style={{ color: RED, fontSize: 13, fontWeight: "bold" }}>REPORT_LOAD_FAILED</div>
+            <div style={{ color: DIM2, fontSize: 11 }}>{loadError}</div>
+            <button onClick={loadReport} style={{
+              fontFamily: "monospace", fontSize: 10, padding: "6px 16px",
+              background: "transparent", border: `1px solid ${GREEN}`, color: GREEN, cursor: "pointer", letterSpacing: 1,
+            }}>RETRY</button>
           </div>
         )}
 

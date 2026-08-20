@@ -23,6 +23,7 @@ export default function InvestigationProfileManager() {
 
   // Delete confirm state
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteError, setDeleteError] = useState('');
 
   useEffect(() => {
     Promise.all([
@@ -115,16 +116,23 @@ export default function InvestigationProfileManager() {
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
+    setDeleteError('');
     try {
       const res = await fetch(`${API_BASE}/${deleteTarget.id}`, {
         method: 'DELETE',
         credentials: 'include',
         headers: getAuthHeaders(),
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setDeleteError(err.detail || `Delete failed (${res.status})`);
+        return;
+      }
       setProfiles(prev => prev.filter(p => p.id !== deleteTarget.id));
-    } catch {}
-    setDeleteTarget(null);
+      setDeleteTarget(null);
+    } catch (e) {
+      setDeleteError(e.message);
+    }
   };
 
   if (loading) return <div style={loadingStyle}>LOADING_PROFILES...</div>;
@@ -288,8 +296,11 @@ export default function InvestigationProfileManager() {
             <p style={{ color: '#bbb', fontSize: '10px', marginBottom: '24px' }}>
               This only removes the profile definition. No investigation data is affected.
             </p>
+            {deleteError && (
+              <p style={{ color: '#ff4141', fontSize: '10px', marginBottom: '16px' }}>{deleteError}</p>
+            )}
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-              <button onClick={() => setDeleteTarget(null)} style={btnAbort}>CANCEL</button>
+              <button onClick={() => { setDeleteTarget(null); setDeleteError(''); }} style={btnAbort}>CANCEL</button>
               <button onClick={handleDelete} style={{ ...btnDeploy, background: '#ff4141', color: '#000' }}>
                 DELETE
               </button>

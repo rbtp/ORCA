@@ -4,22 +4,16 @@ const AssetActionTab = ({ assetId, assetName, setInvestigatingAsset, setTimeline
   const [selectedAction, setSelectedAction] = useState("Investigate");
   const [isExecuting, setIsExecuting] = useState(false);
 
-  const handleExecute = async () => {
+  const handleExecute = () => {
     setIsExecuting(true);
-    try {
-      if (selectedAction === "Investigate") {
-        if (setInvestigatingAsset) setInvestigatingAsset(assetId);
-      } else if (selectedAction === "Timeline") {
-        if (setTimelineAsset) setTimelineAsset(assetId);
-      } else if (selectedAction === "Reports") {
-        alert("REPORTS: Module not yet implemented.");
-      }
-    } catch (err) {
-      console.error("EXECUTION_UPLINK_FAILURE:", err);
-      alert("CRITICAL: Failed to connect to backend service.");
-    } finally {
-      setIsExecuting(false);
+    if (selectedAction === "Investigate") {
+      if (setInvestigatingAsset) setInvestigatingAsset(assetId);
+    } else if (selectedAction === "Timeline") {
+      if (setTimelineAsset) setTimelineAsset(assetId);
+    } else if (selectedAction === "Reports") {
+      alert("Per-asset reports aren't available yet — use the REPORTS tab for the full case report.");
     }
+    setIsExecuting(false);
   };
 
   return (

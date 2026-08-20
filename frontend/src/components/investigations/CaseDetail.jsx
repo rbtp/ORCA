@@ -57,6 +57,8 @@ export default function CaseDetail({
   const [saveStatus, setSaveStatus]       = useState('READY');
   const [linkForm, setLinkForm]           = useState(null);
   const [editDetailsForm, setEditDetailsForm] = useState(null);
+  const [assignableUsers, setAssignableUsers] = useState([]);
+  const [assignedUsers, setAssignedUsers]     = useState([]);
   const [assetModes, setAssetModes]       = useState({});
   const [mountSessions, setMountSessions] = useState({});
   const [mountExpanded, setMountExpanded] = useState({});
@@ -68,21 +70,16 @@ export default function CaseDetail({
   const [deploySelected, setDeploySelected]   = useState(new Set());
   const [deployCreds, setDeployCreds]         = useState({ username: '', password: '' });
   const [deployShowPass, setDeployShowPass]   = useState(false);
-  const [psexecAvailable, setPsexecAvailable] = useState(null);
   const deployAbortRef                        = useRef(false);
   const autoSaveTimerRef                      = useRef(null);
 
   // Triage state
   const [triageCategories, setTriageCategories] = useState([]);
   const [triageSelected, setTriageSelected]     = useState(new Set());
-  const [triageAssets, setTriageAssets]         = useState(new Set());
-  const [triageCreds, setTriageCreds]           = useState({ username: '', password: '', transport: 'SMB_PSEXEC', domain: '' });
-  const [triageShowPass, setTriageShowPass]     = useState(false);
+  const [triageCreds, setTriageCreds]           = useState({ username: '', password: '', transport: 'SMB_TASK', domain: '' });
   const [triageRunning, setTriageRunning]       = useState(false);
   const [triageStatus, setTriageStatus]         = useState({});
   const triageAbortRef                          = useRef(false);
-  const [triageExpanded, setTriageExpanded]     = useState({});
-  const [triageTechStatus, setTriageTechStatus] = useState({});
 
   const API_BASE = `${import.meta.env.VITE_API_URL}/api/mitre`;
 
@@ -134,13 +131,43 @@ export default function CaseDetail({
   };
 
   // ── Edit investigation details (lead/team/unit/ops/country) ────────────────
+  // Assignment picker options + this case's current assignments load
+  // whenever the case changes, not just when the modal opens, so the
+  // ASSIGNED_TO badge on the case header (visible without opening anything)
+  // stays current -- that's the actual "know what you're assigned to"
+  // ask, the modal is just where it gets edited.
+  useEffect(() => {
+    fetch(`${API_BASE}/users/assignable`, { credentials: 'include', headers: getAuthHeaders() })
+      .then(r => r.ok ? r.json() : [])
+      .then(setAssignableUsers)
+      .catch(() => setAssignableUsers([]));
+  }, []);
+
+  useEffect(() => {
+    if (!caseName) return;
+    fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assignments`, { credentials: 'include', headers: getAuthHeaders() })
+      .then(r => r.ok ? r.json() : [])
+      .then(setAssignedUsers)
+      .catch(() => setAssignedUsers([]));
+  }, [caseName]);
+
   const openEditDetails = () => setEditDetailsForm({
     missionLead: caseData.missionLead || '',
     teamName:    caseData.teamName || '',
     support:     caseData.support || '',
     personnel:   caseData.personnel || '',
     country:     caseData.country || '',
+    assignedIds: assignedUsers.map(u => u.id),
   });
+
+  const toggleAssignedUser = (userId) => {
+    setEditDetailsForm(prev => ({
+      ...prev,
+      assignedIds: prev.assignedIds.includes(userId)
+        ? prev.assignedIds.filter(id => id !== userId)
+        : [...prev.assignedIds, userId],
+    }));
+  };
 
   const handleSaveDetails = async () => {
     try {
@@ -162,6 +189,11 @@ export default function CaseDetail({
           case_type: caseData.case_type || 'INVESTIGATION',
         }),
       });
+      await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/assignments`, {
+        method: 'PUT', credentials: 'include', headers: getAuthHeaders(),
+        body: JSON.stringify({ user_ids: editDetailsForm.assignedIds }),
+      });
+      setAssignedUsers(assignableUsers.filter(u => editDetailsForm.assignedIds.includes(u.id)));
       if (res.ok) {
         setEditDetailsForm(null);
         if (onRefresh) onRefresh();
@@ -183,6 +215,13 @@ export default function CaseDetail({
     }
   }, [caseData.assets]);
 
+  // collab.techniqueStatuses otherwise only gets populated for an asset once
+  // its Evidence Window has been opened this session -- the network map's
+  // status coloring needs it for every asset up front, so load it here too.
+  useEffect(() => {
+    (caseData.assets || []).forEach(a => collab.loadTechniqueStatuses(a.id));
+  }, [caseData.assets]);
+
   const loadCompletion = async () => {
     try {
       const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/completion`, { credentials: 'include', headers: getAuthHeaders() });
@@ -191,15 +230,6 @@ export default function CaseDetail({
   };
 
   useEffect(() => { loadCompletion(); }, [caseName]);
-
-  useEffect(() => {
-    if (deployOpen && psexecAvailable === null) {
-      fetch(`${import.meta.env.VITE_API_URL}/api/deploy/psexec-status`, { credentials: 'include', headers: getAuthHeaders() })
-        .then(r => r.json())
-        .then(d => setPsexecAvailable(d.available))
-        .catch(() => setPsexecAvailable(false));
-    }
-  }, [deployOpen]);
 
   const handleInvestigateAsset = (id) => {
     setIsEvidenceOpen(false);
@@ -524,13 +554,6 @@ export default function CaseDetail({
   const toggleTriageCategory = (cat) => {
     setTriageSelected(prev => { const n = new Set(prev); n.has(cat) ? n.delete(cat) : n.add(cat); return n; });
   };
-  const toggleTriageAsset = (id) => {
-    setTriageAssets(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  };
-  const toggleAllTriageAssets = () => {
-    const all = caseData.assets?.map(a => a.id) || [];
-    setTriageAssets(triageAssets.size === all.length ? new Set() : new Set(all));
-  };
 
   const handleTriage = async () => {
     if (!deployCreds.username || !deployCreds.password) { alert('CREDENTIALS_REQUIRED'); return; }
@@ -544,7 +567,7 @@ export default function CaseDetail({
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/deploy/triage`, {
         method: 'POST', credentials: 'include', headers: getAuthHeaders(),
-        body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password, categories: Array.from(triageSelected), transport: triageCreds.transport, domain: triageCreds.domain || null }),
+        body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password, categories: Array.from(triageSelected), trigger_transport: triageCreds.transport, domain: triageCreds.domain || null }),
       });
       if (!r.ok) { const e = await r.json(); alert(`TRIAGE_ERROR: ${e.detail || r.statusText}`); setTriageRunning(false); return; }
       const reader = r.body.getReader();
@@ -560,23 +583,8 @@ export default function CaseDetail({
           if (!line.trim()) continue;
           try {
             const u = JSON.parse(line);
-            console.log('TRIAGE_STREAM:', u);
             if (u.asset_id) {
               setTriageStatus(prev => ({ ...prev, [String(u.asset_id)]: { phase: u.phase, message: u.message, error: u.error || null } }));
-              // capture per-technique status from message if it contains t_code info
-              try {
-                const inner = JSON.parse(u.message || '{}');
-                if (inner.t_code) {
-                  setTriageTechStatus(prev => ({
-                    ...prev,
-                    [String(u.asset_id)]: {
-                      ...((prev[String(u.asset_id)]) || {}),
-                      [inner.t_code]: { status: inner.status, rows: inner.rows ?? null },
-                    }
-                  }));
-                  setTriageExpanded(prev => ({ ...prev, [String(u.asset_id)]: true }));
-                }
-              } catch {}
             }
           } catch {}
         }
@@ -584,8 +592,6 @@ export default function CaseDetail({
     } catch (e) { console.error('TRIAGE_STREAM_ERROR:', e); }
     setTriageRunning(false);
   };
-
-  const triagePhaseColor = (phase) => ({ STAGING: '#00bfff', CONNECTING: '#ffaa00', COLLECTING: '#00ff41', COMPLETE: '#00ff41', ERROR: '#ff4444' }[phase] || '#777');
 
   // ── Map helpers ────────────────────────────────────────────────────────────
 
@@ -619,6 +625,30 @@ export default function CaseDetail({
     const id = Math.floor(Math.random() * 999);
     // See deployToMap's comment -- same reason x/y is omitted here.
     setActiveNodes([...activeNodes, { hostname: `${type}_${id}`, ip: '0.0.0.0', mac: 'AUTO_GEN', type, os: 'Firmware_v1.0', config: '', nodeNote: '' }]);
+  };
+
+  // A map device dropped from INFRASTRUCTURE_TEMPLATES (addInfrastructure) is
+  // purely visual until it's backed by a real row in `assets` -- NetworkMap
+  // detects that by hostname match against caseAssets and, if there's no
+  // match, offers this instead of "INVESTIGATE_ASSET". Reuses the normal
+  // NEW_ASSET_SPECIFICATION modal/pipeline so the user still walks through
+  // (and can adjust) every field -- just pre-filled from the device on the
+  // map instead of starting blank. Creating with the same hostname is what
+  // makes the existing map node pick up the new asset automatically (the
+  // merge in NetworkMap.jsx is by hostname), no extra linking step needed.
+  const handleCreateAssetFromNode = (node) => {
+    if (!window.confirm(`"${node.displayName || node.hostname}" is not in the asset list yet. Create it as an asset now?`)) return;
+    const FORM_FACTOR_BY_DEVICE_TYPE = { SWITCH: 'Switch', ROUTER: 'Router', FIREWALL: 'Firewall' };
+    setAssetForm({
+      ...assetForm,
+      hostname: node.hostname,
+      ip: node.ip && node.ip !== '0.0.0.0' ? node.ip : '',
+      mac: node.mac && node.mac !== 'AUTO_GEN' ? node.mac : '',
+      type: 'Network Device',
+      os: 'Network',
+      formFactor: FORM_FACTOR_BY_DEVICE_TYPE[node.type?.toUpperCase()] || 'Other',
+    });
+    setShowAssetModal(true);
   };
 
   const handleUpdateNode = (node, action, data) => {
@@ -664,6 +694,11 @@ export default function CaseDetail({
           </button>
         </div>
         <div style={{ color: '#888', fontSize: '10px', marginTop: '5px' }}>CASE_REF: {caseData.country?.toUpperCase()}_INTEL_PRIORITY_1</div>
+        <div style={{ color: '#888', fontSize: '10px', marginTop: '5px' }}>
+          ASSIGNED_TO: {assignedUsers.length === 0
+            ? <span style={{ color: '#555' }}>OPEN — no assignments set, any analyst can act on this case</span>
+            : assignedUsers.map(u => `${u.username} [${u.initials}]`).join(', ')}
+        </div>
         {completion && (
           <div style={{ marginTop: 12, maxWidth: 480 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
@@ -692,7 +727,7 @@ export default function CaseDetail({
 
       <div style={{ display: 'flex', gap: '30px', marginBottom: '30px', borderBottom: '1px solid #222' }}>
         {['OVERVIEW', 'ASSETS', 'NETWORK_MAP'].map(tab => (
-          <div key={tab} onClick={() => setActiveTab(tab)} style={{ fontSize: '11px', letterSpacing: '2px', cursor: 'pointer', color: activeTab === tab ? (tab === 'TRIAGE' ? '#ff4141' : '#00ff41') : '#666', borderBottom: activeTab === tab ? `2px solid ${tab === 'TRIAGE' ? '#ff4141' : '#00ff41'}` : '2px solid transparent', paddingBottom: '10px' }}>{tab}</div>
+          <div key={tab} onClick={() => setActiveTab(tab)} style={{ fontSize: '11px', letterSpacing: '2px', cursor: 'pointer', color: activeTab === tab ? '#00ff41' : '#666', borderBottom: activeTab === tab ? '2px solid #00ff41' : '2px solid transparent', paddingBottom: '10px' }}>{tab}</div>
         ))}
         {(caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE' && (
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', paddingBottom: 10 }}>
@@ -937,8 +972,8 @@ export default function CaseDetail({
                                   })}
                                 </div>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                  <span style={{ color: phaseColor(status?.phase), fontSize: 9, letterSpacing: 1, fontWeight: 'bold' }}>{deployStatus[aId]?.phase}</span>
-                                  <span style={{ color: '#888', fontSize: 9 }}>{status?.phase}</span>
+                                  <span style={{ color: phaseColor(deployStatus[aId]?.phase), fontSize: 9, letterSpacing: 1, fontWeight: 'bold' }}>{deployStatus[aId]?.phase}</span>
+                                  <span style={{ color: '#888', fontSize: 9 }}>{deployStatus[aId]?.message}</span>
                                 </div>
                                 {deployStatus[aId]?.error && <div style={{ color: '#ff4444', fontSize: 9, marginTop: 3 }}>{deployStatus[aId].error}</div>}
                               </div>
@@ -1017,7 +1052,6 @@ export default function CaseDetail({
                   <span style={{ color: '#aaa', fontSize: 9, letterSpacing: 2 }}>⚡ BULK_REMOTE_DEPLOYMENT</span>
                   {deployRunning && <span style={{ color: '#ffaa00', fontSize: 9, letterSpacing: 1 }}>● DEPLOYING {deploySelected.size} HOST{deploySelected.size !== 1 ? 'S' : ''}...</span>}
                   {!deployRunning && deployComplete && deploySelected.size > 0 && <span style={{ color: '#00ff41', fontSize: 9 }}>✓ DISPATCH COMPLETE</span>}
-                  {psexecAvailable === false && deployOpen && <span style={{ color: '#ff4444', fontSize: 9 }}>⚠ psexec.exe NOT FOUND in backend/bin/</span>}
                 </div>
                 <span style={{ color: '#666', fontSize: 11 }}>{deployOpen ? '▲' : '▼'}</span>
               </div>
@@ -1044,10 +1078,8 @@ export default function CaseDetail({
           <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>TRANSPORT</span>
           <select value={triageCreds.transport} onChange={e => setTriageCreds(p => ({ ...p, transport: e.target.value }))}
             disabled={triageRunning} style={{ ...InputStyle, fontSize: 10, padding: '6px 8px' }}>
-            <option value="WINRM">WINRM</option>
-            <option value="SMB_PSEXEC">SMB / PSEXEC</option>
             <option value="SMB_TASK">SMB / SCHTASK</option>
-            <option value="SSH">SSH</option>
+            <option value="WINRM">WINRM</option>
           </select>
         </div>
       )}
@@ -1069,7 +1101,7 @@ export default function CaseDetail({
         ) : (
           <>
             <button onClick={handleDeploy}
-              disabled={deployRunning || deploySelected.size === 0 || !deployCreds.username || !deployCreds.password || psexecAvailable === false}
+              disabled={deployRunning || deploySelected.size === 0 || !deployCreds.username || !deployCreds.password}
               style={{ background: deployRunning ? 'transparent' : '#00ff41', border: deployRunning ? '1px solid #333' : 'none', color: deployRunning ? '#555' : '#000', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', padding: '7px 18px', cursor: (deployRunning || deploySelected.size === 0) ? 'not-allowed' : 'pointer', letterSpacing: 1, opacity: (deploySelected.size === 0 || !deployCreds.username || !deployCreds.password) ? 0.4 : 1, transition: 'all 0.2s' }}>
               {deployRunning ? `DEPLOYING (${deploySelected.size})...` : `[ DEPLOY TO ${deploySelected.size} HOST${deploySelected.size !== 1 ? 'S' : ''} ]`}
             </button>
@@ -1142,138 +1174,11 @@ export default function CaseDetail({
           </div>
         )}
 
-        {/* ── TRIAGE TAB ── */}
-        {activeTab === 'TRIAGE' && (
-          <div style={{ animation: 'fadeIn 0.4s ease', display: 'grid', gridTemplateColumns: '280px 1fr', gap: '24px', minHeight: 500 }}>
-            {/* LEFT — category selector */}
-            <div style={{ borderRight: '1px solid #1a1a1a', paddingRight: '24px' }}>
-              <div style={{ color: '#ff4141', fontSize: '9px', letterSpacing: 2, marginBottom: '12px' }}>TRIAGE_CATEGORIES</div>
-              <div style={{ marginBottom: 8 }}>
-                <button onClick={() => setTriageSelected(triageSelected.size === triageCategories.length ? new Set() : new Set(triageCategories))}
-                  style={{ background: 'transparent', border: '1px solid #2a2a2a', color: '#777', fontFamily: 'monospace', fontSize: 9, padding: '4px 10px', cursor: 'pointer', letterSpacing: 1, width: '100%', textAlign: 'left' }}>
-                  {triageSelected.size === triageCategories.length ? '☑ DESELECT ALL' : '☐ SELECT ALL'}
-                </button>
-              </div>
-              {triageCategories.map(cat => (
-                <div key={cat} onClick={() => toggleTriageCategory(cat)}
-                  style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px', cursor: 'pointer', borderBottom: '1px solid #0d0d0d', background: triageSelected.has(cat) ? 'rgba(255,65,65,0.04)' : 'transparent' }}>
-                  <span style={{ color: triageSelected.has(cat) ? '#ff4141' : '#333', fontSize: 13, lineHeight: 1 }}>{triageSelected.has(cat) ? '☑' : '☐'}</span>
-                  <span style={{ color: triageSelected.has(cat) ? '#ccc' : '#666', fontSize: 10, letterSpacing: 1 }}>{cat}</span>
-                </div>
-              ))}
-              <div style={{ marginTop: 12, color: '#bbb', fontSize: 9, lineHeight: 1.7 }}>
-                Powered by Windows.KapeFiles.Targets.<br />
-                Results stored in evidence table under t_code=TRIAGE.
-              </div>
-            </div>
-            {/* RIGHT — asset selector + controls */}
-            <div>
-              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 16, flexWrap: 'wrap' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>TRANSPORT</span>
-                  <select value={triageCreds.transport} onChange={e => setTriageCreds(p => ({ ...p, transport: e.target.value }))} disabled={triageRunning}
-                    style={{ background: '#000', border: '1px solid #2a2a2a', color: '#ff4141', fontFamily: 'monospace', fontSize: 10, padding: '6px 8px', outline: 'none', cursor: 'pointer' }}>
-                    {['SMB_PSEXEC', 'SMB_TASK', 'WINRM', 'SSH'].map(t => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 120 }}>
-                  <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>DOMAIN</span>
-                  <input value={triageCreds.domain} onChange={e => setTriageCreds(p => ({ ...p, domain: e.target.value }))} placeholder="CORP" disabled={triageRunning}
-                    style={{ ...InputStyle, fontSize: 10, padding: '6px 8px', opacity: triageRunning ? 0.5 : 1 }} />
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 140 }}>
-                  <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>USERNAME</span>
-                  <input value={triageCreds.username} onChange={e => setTriageCreds(p => ({ ...p, username: e.target.value }))} placeholder="svcaccount" disabled={triageRunning}
-                    style={{ ...InputStyle, fontSize: 10, padding: '6px 8px', opacity: triageRunning ? 0.5 : 1 }} />
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 140 }}>
-                  <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>PASSWORD</span>
-                  <div style={{ display: 'flex' }}>
-                    <input type={triageShowPass ? 'text' : 'password'} value={triageCreds.password} onChange={e => setTriageCreds(p => ({ ...p, password: e.target.value }))} placeholder="••••••••" disabled={triageRunning}
-                      style={{ ...InputStyle, fontSize: 10, padding: '6px 8px', flex: 1, opacity: triageRunning ? 0.5 : 1 }} />
-                    <button onClick={() => setTriageShowPass(p => !p)} style={{ background: '#0a0a0a', border: '1px solid #2a2a2a', borderLeft: 'none', color: '#777', fontSize: 9, padding: '0 8px', cursor: 'pointer', fontFamily: 'monospace' }}>{triageShowPass ? 'HIDE' : 'SHOW'}</button>
-                  </div>
-                </div>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 1 }}>
-                  <button onClick={handleTriage} disabled={triageRunning || triageAssets.size === 0 || !triageCreds.username || !triageCreds.password || triageSelected.size === 0}
-                    style={{ background: triageRunning ? 'transparent' : '#ff4141', border: triageRunning ? '1px solid #333' : 'none', color: triageRunning ? '#555' : '#000', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', padding: '7px 18px', cursor: (triageRunning || triageAssets.size === 0) ? 'not-allowed' : 'pointer', letterSpacing: 1, opacity: (triageAssets.size === 0 || !triageCreds.username || !triageCreds.password || triageSelected.size === 0) ? 0.4 : 1 }}>
-                    {triageRunning ? `TRIAGING (${triageAssets.size})...` : `[ TRIAGE ${triageAssets.size} HOST${triageAssets.size !== 1 ? 'S' : ''} ]`}
-                  </button>
-                  {triageRunning && (
-                    <button onClick={() => { triageAbortRef.current = true; setTriageRunning(false); }}
-                      style={{ background: 'transparent', border: '1px solid #ff4141', color: '#ff4141', fontFamily: 'monospace', fontSize: 9, padding: '6px 12px', cursor: 'pointer', letterSpacing: 1 }}>ABORT</button>
-                  )}
-                </div>
-              </div>
-              <div style={{ color: '#888', fontSize: '9px', letterSpacing: 2, marginBottom: '8px' }}>TARGET_ASSETS</div>
-              <div style={{ border: '1px solid #111' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 140px 160px 1fr 120px', padding: '6px 10px', borderBottom: '1px solid #111', color: '#bbb', fontSize: 9, letterSpacing: 1 }}>
-                  <div onClick={toggleAllTriageAssets} style={{ cursor: 'pointer', color: triageAssets.size === (caseData.assets?.length || 0) ? '#ff4141' : '#555', fontSize: 11, lineHeight: 1 }} title="Select all">
-                    {triageAssets.size === (caseData.assets?.length || 0) ? '☑' : '☐'}
-                  </div>
-                  <div>HOSTNAME</div><div>IP_ADDRESS</div><div>STATUS</div><div>MESSAGE</div><div></div>
-                </div>
-                {(caseData.assets || []).map(a => {
-                  const aId = String(a.id);
-                  const checked = triageAssets.has(a.id);
-                  const status = triageStatus[aId];
-                  const phase = status?.phase;
-                  const hasResults = phase === 'COLLECTING' || phase === 'COMPLETE' || phase === 'LOG';
-                  return (
-                    <React.Fragment key={a.id}>
-                      <div onClick={() => !triageRunning && toggleTriageAsset(a.id)}
-                        style={{ display: 'grid', gridTemplateColumns: '32px 1fr 140px 160px 1fr 120px', padding: '8px 10px', borderBottom: '1px solid #080808', cursor: triageRunning ? 'default' : 'pointer', background: checked ? 'rgba(255,65,65,0.03)' : 'transparent' }}>
-                        <div style={{ color: checked ? '#ff4141' : '#333', fontSize: 13, lineHeight: 1, paddingTop: 1 }}>{checked ? '☑' : '☐'}</div>
-                        <div style={{ color: checked ? '#ff4141' : '#aaa', fontWeight: checked ? 'bold' : 'normal' }}>{a.hostname}</div>
-                        <div style={{ color: '#888' }}>{a.ip || '—'}</div>
-                        <div>{phase ? <span style={{ color: triagePhaseColor(phase), fontSize: 9, letterSpacing: 1, fontWeight: 'bold' }}>{phase === 'ERROR' ? '✗' : phase === 'COLLECTING' ? '●' : '◎'} {phase}</span> : <span style={{ color: '#999', fontSize: 9 }}>IDLE</span>}</div>
-                        <div style={{ color: '#777', fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{status?.message || ''}</div>
-                        <div onClick={e => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                          {phase && <span onClick={() => setTriageExpanded(prev => ({ ...prev, [aId]: !prev[aId] }))}
-                            style={{ color: '#bbb', fontSize: 9, cursor: 'pointer', padding: '2px 6px', border: '1px solid #222' }}>
-                            {triageExpanded[aId] ? '▲' : '▼'}
-                          </span>}
-                          {hasResults && (
-                            <button onClick={() => {
-                              setInvestigatingAssetId(a.id);
-                              setEvidenceTacticList([{ t_code: 'TRIAGE', tactic: 'TRIAGE', techniques: [{ t_code: 'TRIAGE', name: 'Triage Collection' }] }]);
-                              setIsEvidenceOpen(true);
-                            }} style={{ background: 'transparent', border: '1px solid #ff4141', color: '#ff4141', fontFamily: 'monospace', fontSize: 9, padding: '3px 8px', cursor: 'pointer', letterSpacing: 1 }}>
-                              VIEW
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      {triageExpanded[aId] && (
-                        <div style={{ background: '#060606', border: '1px solid #1a1a1a', margin: '0 10px 4px', padding: '10px 14px', fontFamily: 'monospace', fontSize: 9 }}>
-                          <div style={{ color: '#bbb', fontSize: 8, letterSpacing: 1, marginBottom: 6 }}>COLLECTION_PROGRESS — {a.hostname.toUpperCase()}</div>
-                          {Object.entries(triageTechStatus[aId] || {}).map(([tcode, ts]) => {
-                            const col = ts.status === 'COMPLETE' ? '#00ff41' : ts.status === 'ZERO' ? '#444' : ts.status === 'RUNNING' ? '#ffaa00' : ts.status === 'ERROR' ? '#ff4444' : '#555';
-                            return (
-                              <div key={tcode} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', borderBottom: '1px solid #0a0a0a' }}>
-                                <span style={{ color: col, letterSpacing: 1 }}>{tcode}</span>
-                                <span style={{ color: col }}>{ts.status}{ts.rows != null ? ` — ${ts.rows} rows` : ''}</span>
-                              </div>
-                            );
-                          })}
-                          {Object.keys(triageTechStatus[aId] || {}).length === 0 && (
-                            <div style={{ color: '#999', fontSize: 9 }}>Waiting for collection data...</div>
-                          )}
-                        </div>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* ── NETWORK MAP TAB ── */}
         {activeTab === 'NETWORK_MAP' && (
           <div style={{ position: isMaximized ? 'fixed' : 'relative', top: isMaximized ? 0 : 'auto', left: isMaximized ? 0 : 'auto', width: isMaximized ? '100vw' : '100%', height: isMaximized ? '100vh' : '650px', zIndex: isMaximized ? 2000 : 1, display: 'grid', gridTemplateColumns: isMaximized ? '1fr 350px' : '1fr 300px', background: '#111', border: '1px solid #1a1a1a' }}>
             <div style={{ background: '#000', overflow: 'hidden', position: 'relative' }}>
-              <NetworkMap activeNodes={activeNodes} activeLinks={activeLinks} updateNodeData={handleUpdateNode} onInitiateLink={handleInitiateLink} onDeleteNode={handleDeleteNode} onInvestigateAsset={handleInvestigateAsset} investigatingAssetId={investigatingAssetId} isFetchingTactics={isFetchingTactics} techniqueStatuses={collab.techniqueStatuses} caseAssets={caseData.assets || []} onToggleMaximize={() => setIsMaximized(p => !p)} isMaximized={isMaximized} mapBackgroundUrl={mapBackgroundUrl} onUploadMapBackground={handleUploadMapBackground} onClearMapBackground={handleClearMapBackground} />
+              <NetworkMap activeNodes={activeNodes} activeLinks={activeLinks} updateNodeData={handleUpdateNode} onInitiateLink={handleInitiateLink} onDeleteNode={handleDeleteNode} onInvestigateAsset={handleInvestigateAsset} onCreateAssetFromNode={handleCreateAssetFromNode} investigatingAssetId={investigatingAssetId} isFetchingTactics={isFetchingTactics} techniqueStatuses={collab.techniqueStatuses} caseAssets={caseData.assets || []} onToggleMaximize={() => setIsMaximized(p => !p)} isMaximized={isMaximized} mapBackgroundUrl={mapBackgroundUrl} onUploadMapBackground={handleUploadMapBackground} onClearMapBackground={handleClearMapBackground} />
             </div>
             <div style={{ background: '#080808', padding: '20px', borderLeft: '1px solid #1a1a1a', overflowY: 'auto' }}>
               <button onClick={saveMapLayout} style={{ ...BtnStyle, width: '100%', marginBottom: '20px' }}>{saveStatus === 'READY' ? '[ COMMIT_MAP_TO_DATABASE ]' : `[ ${saveStatus} ]`}</button>
@@ -1434,6 +1339,24 @@ export default function CaseDetail({
                 />
               </div>
             ))}
+            <div>
+              <div style={{ color: '#888', fontSize: 9, marginBottom: 6, letterSpacing: 1 }}>
+                ASSIGNED_ANALYSTS {editDetailsForm.assignedIds.length === 0 && <span style={{ color: '#555' }}>(none — case stays open to every analyst)</span>}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 140, overflowY: 'auto', border: '1px solid #222', padding: 8 }}>
+                {assignableUsers.length === 0 ? (
+                  <div style={{ color: '#555', fontSize: 11 }}>No users found.</div>
+                ) : assignableUsers.map(u => (
+                  <label key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: '#ccc', cursor: 'pointer' }}>
+                    <input type="checkbox"
+                      checked={editDetailsForm.assignedIds.includes(u.id)}
+                      onChange={() => toggleAssignedUser(u.id)}
+                    />
+                    {u.username} <span style={{ color: '#666' }}>[{u.initials}]</span>
+                  </label>
+                ))}
+              </div>
+            </div>
             <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
               <button onClick={handleSaveDetails} style={BtnStyle}>COMMIT_CHANGES</button>
               <button onClick={() => setEditDetailsForm(null)} style={{ ...BtnStyle, background: 'transparent', color: '#777', border: '1px solid #333' }}>ABORT</button>

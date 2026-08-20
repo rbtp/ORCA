@@ -15,6 +15,7 @@ python-dotenv==1.0.1
 slowapi==0.1.9
 pywinrm==0.4.3
 impacket==0.12.0
+paramiko==3.4.0
 flare-capa==7.4.0
 flare-floss==3.1.1
 speakeasy-emulator==1.5.11

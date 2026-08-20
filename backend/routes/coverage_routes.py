@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy import text
 from core.database_manager import db
@@ -5,6 +6,7 @@ from auth_utils import get_current_user
 from collections import defaultdict
 
 router = APIRouter(prefix="/api/coverage", tags=["coverage"])
+logger = logging.getLogger(__name__)
 
 
 def _covered(vql):
@@ -115,6 +117,5 @@ async def get_coverage(current_user: dict = Depends(get_current_user)):
         return countries + profiles
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("coverage lookup failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load coverage data")

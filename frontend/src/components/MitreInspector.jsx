@@ -80,8 +80,8 @@ export default function MitreInspector() {
     const identifier = data.id || data.stix_id;
     if (!identifier) return;
 
-    window.dispatchEvent(new CustomEvent('orca-intel-select', { 
-      detail: { type, data: { name: data.name, description: "SYNCING...", loading: true } } 
+    window.dispatchEvent(new CustomEvent('orca-intel-select', {
+      detail: { type, data: { name: data.name, id: data.id, stix_id: data.stix_id, loading: true } }
     }));
 
     try {
@@ -89,15 +89,20 @@ export default function MitreInspector() {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
       });
-      
+
+      // A non-2xx response with a JSON error body used to get treated as if
+      // it were a real dossier and rendered as one -- this is the one place
+      // that distinguishes "server sent an error" from "server sent data."
+      if (!response.ok) throw new Error(`SERVER_${response.status}`);
+
       const fullDossier = await response.json();
       const cleanDossier = normalize(fullDossier);
       const formatted = formatMitreData(cleanDossier.description);
 
-      window.dispatchEvent(new CustomEvent('orca-intel-select', { 
-        detail: { 
-          type, 
-          data: { 
+      window.dispatchEvent(new CustomEvent('orca-intel-select', {
+        detail: {
+          type,
+          data: {
             ...cleanDossier,
             loading: false,
             formattedBody: formatted.body,
@@ -105,11 +110,21 @@ export default function MitreInspector() {
             linkedSoftware: (fullDossier.software || []).map(normalize),
             linkedMitigations: (fullDossier.mitigations || []).map(normalize),
             linkedTechniques: (fullDossier.techniques || []).map(normalize)
-          } 
-        } 
+          }
+        }
       }));
     } catch (err) {
       console.error("DIAGNOSTIC_FETCH_ERROR:", err);
+      // Without this, a failed fetch left the panel showing the "SYNCING..."
+      // placeholder text forever -- there was no follow-up event to move it
+      // out of the loading state, so a network error or a 500 looked
+      // identical to "still loading" with no way out short of a page reload.
+      window.dispatchEvent(new CustomEvent('orca-intel-select', {
+        detail: {
+          type,
+          data: { name: data.name, id: data.id, stix_id: data.stix_id, loading: false, error: true, errorMessage: err.message || 'FETCH_FAILED' }
+        }
+      }));
     }
   };
 

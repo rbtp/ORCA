@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from core.database_manager import db
-from auth_utils import get_current_user
+from auth_utils import get_current_user, user_can_access_case
 from config import cfg
 from package_builder import (
     build_package,
@@ -101,6 +101,13 @@ def _upsert_technique_run_log(asset_id: int, t_code: str, status: str, detail: s
 
 @router.post("/api/assets/{asset_id}/package")
 async def generate_package(asset_id: int, request: Request, current_user=Depends(get_current_user)):
+    with db.engine.connect() as conn:
+        case_row = conn.execute(text(
+            "SELECT case_name FROM assets WHERE id = :id"
+        ), {"id": asset_id}).mappings().first()
+    if case_row and not user_can_access_case(current_user, case_row["case_name"]):
+        raise HTTPException(status_code=403, detail="Not assigned to this investigation")
+
     orca_url = _get_orca_base_url(request)
     try:
         result = build_package(
@@ -179,14 +186,30 @@ async def download_package(token: str, filename: str):
     if not row:
         raise HTTPException(status_code=404, detail="Package not found or expired")
 
-    zip_path = Path(cfg.DATA_ROOT) / "packages" / filename
-    if not zip_path.exists():
+    # The file actually served is derived from the token, not the
+    # client-supplied `filename` path segment -- that used to be trusted
+    # outright, so any valid, non-expired token could be paired with a
+    # *different* case's package filename to download it (every package
+    # embeds its own live ingest token in plaintext inside orca_config.json,
+    # so that leak lets an attacker inject fabricated evidence into, or
+    # prematurely close out, a collection that isn't theirs), and a
+    # traversal-shaped filename could escape the packages directory
+    # entirely. Same token->file lookup download_bootstrap above already
+    # uses; every legitimately-generated URL already has filename ==
+    # this anyway (see package_builder.py's zip_name), so this changes
+    # nothing for real callers.
+    packages_root = Path(cfg.DATA_ROOT) / "packages"
+    matching = list(packages_root.glob(f"orca_pkg_{token[:8]}_*.zip")) or \
+               list(packages_root.glob(f"orca_triage_{token[:8]}_*.zip"))
+    if not matching:
         raise HTTPException(status_code=404, detail="Package file not found — may have been cleaned up")
+
+    zip_path = matching[0]
 
     return FileResponse(
         path=str(zip_path),
         media_type="application/zip",
-        filename=filename,
+        filename=zip_path.name,
     )
 
 

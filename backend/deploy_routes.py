@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-from auth_utils import get_current_user
+from auth_utils import get_current_user, user_can_access_case
 from config import cfg
 from core.database_manager import db
 from package_builder import build_package, build_triage_package
@@ -55,13 +55,6 @@ def _get_orca_base_url() -> str:
     port = 8000
     protocol = "https" if (cfg.SSL_CERTFILE and os.path.exists(cfg.SSL_CERTFILE)) else "http"
     return f"{protocol}://{ip}:{port}"
-
-
-def _get_psexec_path() -> Path:
-    configured = getattr(cfg, 'PSEXEC_PATH', None)
-    if configured and Path(configured).exists():
-        return Path(configured)
-    return Path(__file__).parent / 'bin' / 'psexec.exe'
 
 
 def _get_asset(asset_id: int) -> Optional[dict]:
@@ -103,6 +96,7 @@ async def _deploy_single(
     domain: Optional[str],
     queue: asyncio.Queue,
     transport: str = "SMB_TASK",
+    current_user: Optional[dict] = None,
 ):
     async def emit(phase: str, message: str, error: str = None):
         await queue.put({
@@ -116,6 +110,10 @@ async def _deploy_single(
     asset = _get_asset(asset_id)
     if not asset:
         await emit('ERROR', f'Asset {asset_id} not found', 'ASSET_NOT_FOUND')
+        return
+
+    if current_user is not None and not user_can_access_case(current_user, asset.get('case_name')):
+        await emit('ERROR', f'{asset.get("hostname", asset_id)}: not assigned to this investigation', 'ACCESS_DENIED')
         return
 
     hostname = asset.get('hostname', str(asset_id))
@@ -203,11 +201,21 @@ async def deploy_bulk(req: DeployRequest, current_user=Depends(get_current_user)
 
         async def run_all():
             tasks = [
-                _deploy_single(aid, user_id, req.username, req.password, req.domain, queue, req.transport)
+                _deploy_single(aid, user_id, req.username, req.password, req.domain, queue, req.transport, current_user)
                 for aid in req.asset_ids
             ]
-            await asyncio.gather(*tasks)
-            await queue.put(sentinel)
+            try:
+                await asyncio.gather(*tasks)
+            except Exception as e:
+                # _deploy_single already catches its own errors and emits a
+                # per-asset ERROR event, but if something still escapes here
+                # (this task is fired via create_task and never awaited, so
+                # an unhandled exception would otherwise vanish silently),
+                # the sentinel below would never get pushed -- and the SSE
+                # loop consuming this queue would hang waiting for it forever.
+                await queue.put({'phase': 'ERROR', 'message': 'Deploy orchestration failed', 'error': str(e)})
+            finally:
+                await queue.put(sentinel)
 
         asyncio.create_task(run_all())
 
@@ -218,12 +226,6 @@ async def deploy_bulk(req: DeployRequest, current_user=Depends(get_current_user)
             yield json.dumps(item) + '\n'
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
-
-
-@router.get("/psexec-status")
-async def psexec_status(current_user=Depends(get_current_user)):
-    psexec = _get_psexec_path()
-    return {"available": psexec.exists(), "path": str(psexec)}
 
 
 # ── Triage Collection ──────────────────────────────────────────────────────────
@@ -241,7 +243,6 @@ class TriageRequest(BaseModel):
     username: str
     password: str
     categories: List[str]
-    transport: str = "SMB_PSEXEC"  # artifact-collection transport (unused by this route — see /triage-execute)
     trigger_transport: str = "SMB_TASK"  # "SMB_TASK" (default, port 445 only) or "WINRM" (opt-in fallback, needs port 5985)
     domain: Optional[str] = None
     cleanup: bool = True
@@ -302,6 +303,10 @@ async def deploy_triage(req: TriageRequest, current_user=Depends(get_current_use
                 await emit('ERROR', f'Asset {asset_id}: missing or no IP', 'NO_IP')
                 return
 
+            if not user_can_access_case(current_user, asset.get('case_name')):
+                await emit('ERROR', f'{asset.get("hostname", asset_id)}: not assigned to this investigation', 'ACCESS_DENIED')
+                return
+
             hostname = asset.get('hostname', str(asset_id))
             await emit('STAGING', f'{hostname}: Building triage package...')
             try:
@@ -345,8 +350,16 @@ async def deploy_triage(req: TriageRequest, current_user=Depends(get_current_use
 
         async def run_all():
             tasks = [run_one(aid) for aid in req.asset_ids]
-            await asyncio.gather(*tasks)
-            await queue.put(sentinel)
+            try:
+                await asyncio.gather(*tasks)
+            except Exception as e:
+                # Same reasoning as deploy_bulk's run_all -- guarantee the
+                # sentinel is pushed even if something escapes run_one's own
+                # error handling, so the SSE loop below can never hang
+                # waiting for a sentinel that was never sent.
+                await queue.put(json.dumps({'phase': 'ERROR', 'message': 'Triage orchestration failed', 'error': str(e)}) + '\n')
+            finally:
+                await queue.put(sentinel)
 
         asyncio.create_task(run_all())
 

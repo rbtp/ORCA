@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from datetime import timedelta
-from auth_utils import get_current_user, create_access_token
+from auth_utils import get_current_user, create_access_token, user_can_access_case
 from config import cfg
 from core.database_manager import db
 import vr_remote
@@ -96,7 +96,25 @@ async def register_agent(
     if agent_id not in _job_queues:
         _job_queues[agent_id] = asyncio.Queue()
 
-    return {"agent_id": agent_id}
+    # The bootstrap token minted at deploy time (role=agent, no agent_id — it
+    # can't know its own agent_id yet, since that's only computed here from
+    # the hostname it just reported) is only ever meant for this one /register
+    # call. From here on the agent switches to this freshly-scoped token,
+    # which ties role=agent to this specific agent_id — without that binding,
+    # any deployed agent's token could poll/stream/complete jobs for every
+    # OTHER agent too, since role=agent alone used to be enough.
+    scoped_token = create_access_token(
+        data={
+            "sub": current_user.get("sub"),
+            "role": "agent",
+            "id": None,
+            "initials": "AG",
+            "agent_id": agent_id,
+        },
+        expires_delta=timedelta(days=365),
+    )
+
+    return {"agent_id": agent_id, "token": scoped_token}
 
 
 @router.delete("/{agent_id}")
@@ -104,11 +122,20 @@ async def delete_agent(agent_id: str, current_user: dict = Depends(get_current_u
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="ADMIN_PRIVILEGES_REQUIRED")
     with db.engine.connect() as conn:
+        # _job_streams/_job_subscribers are keyed by job_id, not agent_id (see
+        # the type comments at the top of this file) -- need this agent's own
+        # job_ids before deleting the rows to actually clean those up; popping
+        # `agent_id` out of a job_id-keyed dict was always a no-op.
+        job_ids = [r[0] for r in conn.execute(
+            text("SELECT job_id FROM agent_jobs WHERE agent_id = :id"), {"id": agent_id}
+        ).fetchall()]
         conn.execute(text("DELETE FROM agent_jobs WHERE agent_id = :id"), {"id": agent_id})
         conn.execute(text("DELETE FROM agent_registrations WHERE agent_id = :id"), {"id": agent_id})
         conn.commit()
     _job_queues.pop(agent_id, None)
-    _job_streams.pop(agent_id, None)
+    for jid in job_ids:
+        _job_streams.pop(jid, None)
+        _job_subscribers.pop(jid, None)
     return {"ok": True}
 
 
@@ -133,6 +160,21 @@ async def dispatch_job(
     body: DispatchRequest,
     current_user: dict = Depends(get_current_user)
 ):
+    # Any analyst may use any online agent (shared fleet infrastructure --
+    # matches /agent/list being open to all authenticated users), but the
+    # ASSET this job analyzes must belong to a case they're actually
+    # assigned to. All three dispatchers (memory/clamav/grype) send
+    # params.asset_id; a job_type that doesn't include one has nothing to
+    # check against and is left open, same as an unassigned case.
+    asset_id = body.params.get("asset_id")
+    if asset_id is not None:
+        with db.engine.connect() as conn:
+            asset_row = conn.execute(
+                text("SELECT case_name FROM assets WHERE id = :id"), {"id": asset_id}
+            ).fetchone()
+        if asset_row and not user_can_access_case(current_user, asset_row[0]):
+            raise HTTPException(status_code=403, detail="Not assigned to this investigation")
+
     job_id = uuid.uuid4().hex[:24]
 
     with db.engine.connect() as conn:
@@ -164,14 +206,24 @@ async def stream_job_results(
     job_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    # Check if job already finished so we can close immediately after replay
+    # Check if job already finished so we can close immediately after replay,
+    # and -- same reasoning as /dispatch above -- confirm the caller is
+    # actually assigned to whatever case this job's asset belongs to before
+    # handing them its live output.
     already_done = False
     with db.engine.connect() as conn:
         row = conn.execute(text(
-            "SELECT status FROM agent_jobs WHERE job_id = :id"
+            "SELECT status, params->>'asset_id' AS asset_id FROM agent_jobs WHERE job_id = :id"
         ), {"id": job_id}).fetchone()
-        if row and row[0] in ("SUCCESS", "ERROR"):
-            already_done = True
+        if row:
+            if row[0] in ("SUCCESS", "ERROR"):
+                already_done = True
+            if row[1] is not None:
+                asset_row = conn.execute(
+                    text("SELECT case_name FROM assets WHERE id = :id"), {"id": row[1]}
+                ).fetchone()
+                if asset_row and not user_can_access_case(current_user, asset_row[0]):
+                    raise HTTPException(status_code=403, detail="Not assigned to this investigation")
 
     sub_queue: asyncio.Queue = asyncio.Queue()
     if job_id not in _job_subscribers:
@@ -207,20 +259,30 @@ async def stream_job_results(
     )
 
 
-@router.get("/{agent_id}/jobs")
-async def poll_jobs(
-    agent_id: str,
-    current_user: dict = Depends(get_current_user)
-):
-    # Agent tokens are self-authenticating; analyst tokens must own this agent
-    if current_user.get("role") != "agent":
+def _require_agent_ownership(agent_id: str, current_user: dict):
+    """Agent tokens are self-authenticating, but only for the specific
+    agent_id they were scoped to at /register time; analyst tokens must own
+    this agent. Shared by every endpoint an agent calls about its own jobs
+    (poll/stream/complete) so a compromised agent token can't touch another
+    agent's queue or forge its job results."""
+    if current_user.get("role") == "agent":
+        if str(current_user.get("agent_id")) != str(agent_id):
+            raise HTTPException(status_code=403, detail="AGENT_ACCESS_DENIED")
+    else:
         with db.engine.connect() as conn:
             row = conn.execute(text(
                 "SELECT analyst_id FROM agent_registrations WHERE agent_id = :id"
             ), {"id": agent_id}).fetchone()
         if not row or str(row[0]) != str(current_user.get("id")):
-            from fastapi import HTTPException as _HTTPException
-            raise _HTTPException(status_code=403, detail="AGENT_ACCESS_DENIED")
+            raise HTTPException(status_code=403, detail="AGENT_ACCESS_DENIED")
+
+
+@router.get("/{agent_id}/jobs")
+async def poll_jobs(
+    agent_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    _require_agent_ownership(agent_id, current_user)
 
     with db.engine.connect() as conn:
         conn.execute(text(
@@ -247,8 +309,19 @@ async def poll_jobs(
     # Inject folder structure sync on every checkin (idempotent on the agent side)
     sync_paths = _get_folder_sync_paths()
     if sync_paths:
+        sync_job_id = uuid.uuid4().hex[:24]
+        with db.engine.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO agent_jobs (job_id, agent_id, job_type, params, status, started_at)
+                VALUES (:job_id, :agent_id, 'folder_sync', CAST(:params AS jsonb), 'RUNNING', NOW())
+            """), {
+                "job_id": sync_job_id,
+                "agent_id": agent_id,
+                "params": json.dumps({"paths": sync_paths}),
+            })
+            conn.commit()
         return {
-            "job_id": uuid.uuid4().hex[:24],
+            "job_id": sync_job_id,
             "job_type": "folder_sync",
             "params": {"paths": sync_paths},
         }
@@ -274,6 +347,8 @@ async def receive_job_stream(
     request: Request,
     current_user: dict = Depends(get_current_user)
 ):
+    _require_agent_ownership(agent_id, current_user)
+
     body = await request.body()
     raw = body.decode(errors="replace")
 
@@ -299,6 +374,8 @@ async def complete_job(
     body: CompleteRequest,
     current_user: dict = Depends(get_current_user)
 ):
+    _require_agent_ownership(agent_id, current_user)
+
     with db.engine.connect() as conn:
         conn.execute(text("""
             UPDATE agent_jobs
@@ -353,6 +430,16 @@ async def dispatch_and_wait(agent_id: str, job_type: str, params: dict, timeout:
             if item is None:
                 break
     except asyncio.TimeoutError:
+        # Without this, a job that times out here stays PENDING/RUNNING in
+        # agent_jobs forever -- nothing else ever marks it terminal, since
+        # the agent that would normally call /complete may never check in
+        # again (offline, crashed, network partition).
+        with db.engine.connect() as conn:
+            conn.execute(text("""
+                UPDATE agent_jobs SET status = 'TIMEOUT', completed_at = NOW()
+                WHERE job_id = :job_id AND status IN ('PENDING', 'RUNNING')
+            """), {"job_id": job_id})
+            conn.commit()
         raise TimeoutError(f"Agent did not complete job within {int(timeout)}s")
     finally:
         subs = _job_subscribers.get(job_id, [])
@@ -378,13 +465,6 @@ def _get_orca_base_url() -> str:
     ssl_cert = getattr(cfg, "SSL_CERTFILE", None)
     protocol = "https" if ssl_cert and os.path.exists(ssl_cert) else "http"
     return f"{protocol}://{ip}:8000"
-
-
-def _get_psexec_path() -> Path:
-    configured = getattr(cfg, "PSEXEC_PATH", None)
-    if configured and Path(configured).exists():
-        return Path(configured)
-    return Path(__file__).parent / "bin" / "psexec.exe"
 
 
 class DeployAgentRequest(BaseModel):
@@ -427,12 +507,6 @@ async def download_orca_agent():
         media_type="text/plain",
         headers={"Content-Disposition": "attachment; filename=orca_agent.py"},
     )
-
-
-@router.get("/deploy/psexec-status")
-async def deploy_psexec_status(current_user: dict = Depends(get_current_user)):
-    p = _get_psexec_path()
-    return {"available": p.exists(), "path": str(p)}
 
 
 @router.post("/deploy")

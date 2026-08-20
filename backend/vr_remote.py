@@ -9,6 +9,7 @@ import json
 import time
 import uuid
 import asyncio
+import logging
 import tempfile
 import posixpath
 import shutil
@@ -16,6 +17,8 @@ from datetime import datetime
 from typing import AsyncGenerator
 
 import evidence_normalizer
+
+logger = logging.getLogger(__name__)
 
 REMOTE_TEMP       = r"C:\Windows\Temp\orca_vr"
 REMOTE_TEMP_POSIX = "/tmp/orca_vr"  # nosec B108 — path on the REMOTE investigation target, not the local server
@@ -120,6 +123,15 @@ def _count_jsonl_rows(path):
 async def _collect_ssh(ip, username, password, vr_exe, target_files, local_output_dir, asset_id, cleanup, queue):
     import paramiko
     async def q(msg): await queue.put(msg)
+    # ssh/sftp are closed in `finally` below, not just at the end of the
+    # happy path -- an exception anywhere in the per-technique loop that
+    # isn't already caught by that item's own try/except used to skip
+    # straight to `except Exception` and leave the connection open. This
+    # runs against real investigation targets and can fail in a lot of
+    # ordinary ways (auth hiccup, target reboot mid-collection), so that
+    # leak was reachable in normal use, not just a theoretical edge case.
+    ssh = None
+    sftp = None
     try:
         await q(_log(f"SSH: connecting to {ip}..."))
         ssh = paramiko.SSHClient()
@@ -170,9 +182,17 @@ async def _collect_ssh(ip, username, password, vr_exe, target_files, local_outpu
             if os.path.exists(local_out) and os.path.getsize(local_out) > 0:
                 await asyncio.get_event_loop().run_in_executor(None, lambda: evidence_normalizer.normalize_and_ingest(local_out, asset_id, t_code, orca_name))
         if cleanup: ssh.exec_command(f"rm -rf {REMOTE_TEMP_POSIX}")
-        sftp.close(); ssh.close(); await q(_done())
+        await q(_done())
     except Exception as e:
-        await q(_error(f"SSH_ERROR: {e}")); await q(_done("REMOTE_COLLECTION_FAILED"))
+        logger.error("SSH collection failed for %s: %s", ip, e)
+        await q(_error("SSH_ERROR: connection or collection failed — see server logs")); await q(_done("REMOTE_COLLECTION_FAILED"))
+    finally:
+        if sftp is not None:
+            try: sftp.close()
+            except Exception: pass
+        if ssh is not None:
+            try: ssh.close()
+            except Exception: pass
 
 
 async def _collect_winrm(ip, username, password, domain, vr_exe, target_files, local_output_dir, asset_id, cleanup, queue):
@@ -238,122 +258,14 @@ async def _collect_winrm(ip, username, password, domain, vr_exe, target_files, l
             await asyncio.get_event_loop().run_in_executor(None, lambda: session.run_cmd(f'cmd /c rmdir /s /q "{REMOTE_TEMP}"'))
         await q(_done())
     except Exception as e:
-        await q(_error(f"WINRM_ERROR: {e}")); await q(_done("REMOTE_COLLECTION_FAILED"))
+        logger.error("WinRM collection failed for %s: %s", ip, e)
+        await q(_error("WINRM_ERROR: connection or collection failed — see server logs")); await q(_done("REMOTE_COLLECTION_FAILED"))
 
 
-async def _collect_smb_psexec(ip, username, password, domain, vr_exe, target_files, local_output_dir, asset_id, cleanup, queue):
-    from pathlib import Path
-    async def q(msg): await queue.put(msg)
-
-    psexec = Path(__file__).parent / 'bin' / 'psexec.exe'
-    if not psexec.exists():
-        await q(_error(f"psexec.exe not found at {psexec}"))
-        await q(_done("REMOTE_COLLECTION_FAILED"))
-        return
-
-    unc_base = f"\\\\{ip}\\C$\\Windows\\Temp\\orca_vr"
-
-    async def unc_put(local_path, remote_name):
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: shutil.copy2(local_path, f"{unc_base}\\{remote_name}"))
-
-    async def unc_get(remote_name, local_path):
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: shutil.copy2(f"{unc_base}\\{remote_name}", local_path))
-
-    async def run_psexec(command):
-        cmd = [str(psexec), f'\\\\{ip}', '-u', username, '-p', password,
-               '-accepteula', '-s', '-n', '60', 'cmd.exe', '/c', command]
-        if domain:
-            cmd = [str(psexec), f'\\\\{ip}', '-u', f'{domain}\\{username}', '-p', password,
-                   '-accepteula', '-s', '-n', '60', 'cmd.exe', '/c', command]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-            return proc.returncode, stdout.decode(errors='replace'), stderr.decode(errors='replace')
-        except asyncio.TimeoutError:
-            return -1, '', 'PSEXEC_TIMEOUT'
-        except Exception as e:
-            return -1, '', str(e)
-
-    try:
-        await q(_log(f"SMB_PSEXEC: staging on {ip}..."))
-
-        # Create remote dir and copy VR binary via UNC
-        try:
-            os.makedirs(unc_base, exist_ok=True)
-        except Exception as e:
-            await q(_error(f"Cannot create remote dir on {ip} — {e}"))
-            await q(_done("REMOTE_COLLECTION_FAILED"))
-            return
-
-        remote_vr = f"{unc_base}\\velociraptor.exe"
-        exec_vr   = r"C:\Windows\Temp\orca_vr\velociraptor.exe"
-
-        if not os.path.exists(remote_vr):
-            try:
-                await asyncio.get_event_loop().run_in_executor(None, lambda: shutil.copy2(str(vr_exe), remote_vr))
-            except Exception as e:
-                await q(_error(f"Cannot copy Velociraptor to {ip} — {e}"))
-                await q(_done("REMOTE_COLLECTION_FAILED"))
-                return
-
-        for item in target_files:
-            await q(_tech(item["t_code"], "QUEUED"))
-
-        results = []
-        for item in target_files:
-            t_code      = item["t_code"]
-            vql_name    = f"query_{t_code}.vql"
-            out_name    = f"orca_{t_code}.jsonl"
-            exec_vql    = f"C:\\Windows\\Temp\\orca_vr\\{vql_name}"
-            exec_out    = f"C:\\Windows\\Temp\\orca_vr\\{out_name}"
-            local_out   = os.path.join(local_output_dir, out_name)
-
-            try:
-                await unc_put(item["local_vql"], vql_name)
-                await q(_tech(t_code, "RUNNING"))
-                rc, _, err = await run_psexec(f'"{exec_vr}" query -f "{exec_vql}" --format jsonl --output "{exec_out}"')
-                await unc_get(out_name, local_out)
-                row_count = _count_jsonl_rows(local_out)
-                if row_count > 0:
-                    await q(_tech(t_code, "COMPLETE", rows=row_count))
-                    results.append((t_code, item["orca_name"], local_out, False))
-                elif item.get("local_fallback"):
-                    await q(_tech(t_code, "FALLBACK_RUNNING", rows=0))
-                    fb_vql_name = f"fallback_{t_code}.vql"
-                    fb_out_name = f"orca_fallback_{t_code}.jsonl"
-                    exec_fb_vql = f"C:\\Windows\\Temp\\orca_vr\\{fb_vql_name}"
-                    exec_fb_out = f"C:\\Windows\\Temp\\orca_vr\\{fb_out_name}"
-                    local_fb_out = os.path.join(local_output_dir, fb_out_name)
-                    await unc_put(item["local_fallback"], fb_vql_name)
-                    await run_psexec(f'"{exec_vr}" query -f "{exec_fb_vql}" --format jsonl --output "{exec_fb_out}"')
-                    await unc_get(fb_out_name, local_fb_out)
-                    fb_rows = _count_jsonl_rows(local_fb_out)
-                    await q(_tech(t_code, "FALLBACK_COMPLETE", rows=fb_rows, fallback=True))
-                    if fb_rows > 0:
-                        results.append((t_code, item["orca_name"], local_fb_out, True))
-                    else:
-                        await q(_tech(t_code, "ZERO", rows=0))
-                else:
-                    await q(_tech(t_code, "ZERO", rows=0))
-            except Exception as e:
-                await q(_tech(t_code, "ERROR", message=str(e)))
-
-        for t_code, orca_name, local_out, is_fallback in results:
-            if os.path.exists(local_out) and os.path.getsize(local_out) > 0:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: evidence_normalizer.normalize_and_ingest(local_out, asset_id, t_code, orca_name))
-
-        if cleanup:
-            await run_psexec(r'cmd /c rmdir /s /q "C:\Windows\Temp\orca_vr"')
-
-        await q(_done())
-
-    except Exception as e:
-        await q(_error(f"SMB_PSEXEC_ERROR: {e}"))
-        await q(_done("REMOTE_COLLECTION_FAILED"))
+# NOTE: SMB+PsExec collection was removed -- psexec.exe is a Windows PE and
+# cannot execute from this Linux container (see module docstring history /
+# COLLECTION_AUDIT.md). SSH, WinRM, and SMB+Task Scheduler below remain the
+# supported transports.
 
 
 async def _collect_smb_task(ip, username, password, domain, vr_exe, target_files, local_output_dir, asset_id, cleanup, queue):
@@ -361,6 +273,10 @@ async def _collect_smb_task(ip, username, password, domain, vr_exe, target_files
     from impacket.dcerpc.v5 import tsch, transport as dce_transport
     async def q(msg): await queue.put(msg)
     share = "ADMIN$"; remote_dir = "Temp\\orca_vr"
+    # smb/dce are closed in `finally` below -- see the matching comment in
+    # _collect_ssh above; same leak, same fix.
+    smb = None
+    dce = None
     async def smb_put(smb, local_path, remote_name):
         with open(local_path, "rb") as f: data = f.read()
         await asyncio.get_event_loop().run_in_executor(None, lambda: smb.putFile(share, f"{remote_dir}\\{remote_name}", io.BytesIO(data).read))
@@ -438,14 +354,21 @@ async def _collect_smb_task(ip, username, password, domain, vr_exe, target_files
                     except: await q(_tech(t_code, "ZERO", rows=0))
                 else: await q(_tech(t_code, "ZERO", rows=0))
             except: await q(_tech(t_code, "ERROR", message="Failed to pull result file"))
-        dce.disconnect()
         for t_code, orca_name, local_out, is_fallback in results:
             if os.path.exists(local_out) and os.path.getsize(local_out) > 0:
                 await asyncio.get_event_loop().run_in_executor(None, lambda: evidence_normalizer.normalize_and_ingest(local_out, asset_id, t_code, orca_name))
         if cleanup: smb.deleteDirectory(share, remote_dir)
-        smb.logoff(); await q(_done())
+        await q(_done())
     except Exception as e:
-        await q(_error(f"SMB_TASK_ERROR: {e}")); await q(_done("REMOTE_COLLECTION_FAILED"))
+        logger.error("SMB/Task Scheduler collection failed for %s: %s", ip, e)
+        await q(_error("SMB_TASK_ERROR: connection or collection failed — see server logs")); await q(_done("REMOTE_COLLECTION_FAILED"))
+    finally:
+        if dce is not None:
+            try: dce.disconnect()
+            except Exception: pass
+        if smb is not None:
+            try: smb.logoff()
+            except Exception: pass
 
 
 async def _run_remote_command_smb_task(ip, username, password, domain, command, timeout=60):
@@ -612,8 +535,6 @@ async def _dispatch(transport, ip, username, password, domain, vr_exe, target_fi
         await _collect_ssh(ip, username, password, vr_exe, target_files, local_output_dir, asset_id, cleanup, queue)
     elif t == "WINRM":
         await _collect_winrm(ip, username, password, domain, vr_exe, target_files, local_output_dir, asset_id, cleanup, queue)
-    elif t == "SMB_PSEXEC":
-        await _collect_smb_psexec(ip, username, password, domain, vr_exe, target_files, local_output_dir, asset_id, cleanup, queue)
     elif t == "SMB_TASK":
         await _collect_smb_task(ip, username, password, domain, vr_exe, target_files, local_output_dir, asset_id, cleanup, queue)
     else:
@@ -691,8 +612,8 @@ async def run_triage_collection(asset_id, ip, transport, username, password,
                     yield _error("TIMEOUT: triage exceeded 600s"); task.cancel(); break
             await task
         except Exception as e:
-            import traceback; traceback.print_exc()
-            yield _error(f"TRIAGE_ERROR: {e}"); yield _done("TRIAGE_FAILED")
+            logger.error("run_triage_collection failed for asset %s: %s", asset_id, e, exc_info=True)
+            yield _error("TRIAGE_ERROR: collection failed — see server logs"); yield _done("TRIAGE_FAILED")
 
     async for chunk in generate():
         yield chunk

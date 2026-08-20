@@ -33,10 +33,15 @@ export default function AgentDeployModal({ isOpen, onClose }) {
   const [password, setPassword]     = useState('');
   const [logs, setLogs]             = useState([]);
   const [isDeploying, setIsDeploying] = useState(false);
-  const [psexecOk, setPsexecOk]     = useState(null); // null=checking, true/false
   const [deployDone, setDeployDone] = useState(null);  // null/'SUCCESS'/'FAILED'
   const [confirmDelete, setConfirmDelete] = useState(null); // agent_id pending confirm
   const logsEndRef = useRef(null);
+  // This modal is permanently mounted by App.jsx (isOpen just toggles an
+  // early `return null` below, the instance never unmounts) -- so nothing
+  // React's own unmount lifecycle would normally handle for us happens
+  // here automatically. abortRef lets closing mid-deploy actually stop the
+  // in-flight stream instead of leaving it running against a closed modal.
+  const abortRef = useRef(null);
 
   const addLog = (m, type = 'info') =>
     setLogs(p => [...p, { t: ts(), m, type }]);
@@ -49,7 +54,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
     setConfirmDelete(null);
   };
 
-  // Load fleet + psexec status when modal opens
+  // Load fleet when modal opens
   useEffect(() => {
     if (!isOpen) return;
     setLogs([]); setDeployDone(null);
@@ -58,11 +63,6 @@ export default function AgentDeployModal({ isOpen, onClose }) {
       .then(r => r.ok ? r.json() : [])
       .then(setFleet)
       .catch(() => {});
-
-    fetch(`${API}/api/agent/deploy/psexec-status`, { credentials: 'include', headers: getAuth() })
-      .then(r => r.json())
-      .then(d => setPsexecOk(d.available))
-      .catch(() => setPsexecOk(false));
   }, [isOpen]);
 
   // Auto-scroll logs
@@ -85,18 +85,22 @@ export default function AgentDeployModal({ isOpen, onClose }) {
     setIsDeploying(true); setDeployDone(null); setLogs([]);
     addLog(`Starting deployment to ${ip}...`);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const resp = await fetch(`${API}/api/agent/deploy`, {
         method: 'POST',
         credentials: 'include',
         headers: getAuth(),
         body: JSON.stringify({ ip: ip.trim(), username: username.trim(), password }),
+        signal: controller.signal,
       });
 
       if (!resp.ok) {
         const e = await resp.json().catch(() => ({}));
         addLog('BACKEND_ERROR: ' + (e.detail || resp.statusText), 'error');
-        setIsDeploying(false); setDeployDone('FAILED');
+        setIsDeploying(false); setDeployDone('FAILED'); setPassword('');
         return;
       }
 
@@ -118,6 +122,11 @@ export default function AgentDeployModal({ isOpen, onClose }) {
             if (evt.type === 'done') {
               setDeployDone(evt.data);
               setIsDeploying(false);
+              // Credential's only job was authenticating this one deploy
+              // attempt -- nothing past this point needs it, so it doesn't
+              // sit in memory for the rest of the session (this modal never
+              // unmounts) on success OR failure.
+              setPassword('');
               // Refresh fleet after deployment
               fetch(`${API}/api/agent/list`, { credentials: 'include', headers: getAuth() })
                 .then(r => r.json()).then(setFleet).catch(() => {});
@@ -126,9 +135,16 @@ export default function AgentDeployModal({ isOpen, onClose }) {
         });
       }
     } catch (e) {
+      if (e.name === 'AbortError') return; // closed mid-deploy, not a real failure
       addLog('STREAM_ERROR: ' + e.message, 'error');
-      setIsDeploying(false); setDeployDone('FAILED');
+      setIsDeploying(false); setDeployDone('FAILED'); setPassword('');
     }
+  };
+
+  const handleClose = () => {
+    abortRef.current?.abort();
+    setPassword('');
+    onClose();
   };
 
   if (!isOpen) return null;
@@ -159,7 +175,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
           <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
             <span style={{ ...mono, fontSize: 10, color: C.green }}>● ONLINE: {online}</span>
             <span style={{ ...mono, fontSize: 10, color: C.greyDim }}>○ OFFLINE: {offline}</span>
-            <button onClick={onClose} style={{ ...Btn, background: 'none', border: `1px solid #333`, color: '#666', padding: '4px 10px' }}>✕</button>
+            <button onClick={handleClose} style={{ ...Btn, background: 'none', border: `1px solid #333`, color: '#666', padding: '4px 10px' }}>✕</button>
           </div>
         </div>
 
@@ -219,15 +235,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
           {/* Deploy form */}
           <div style={{ padding: '20px', flexShrink: 0 }}>
             <div style={{ ...mono, fontSize: 9, color: C.greyDim, letterSpacing: 1, marginBottom: 16 }}>
-              DEPLOY_NEW_AGENT — Remote installation via PsExec
-              {psexecOk === false && (
-                <span style={{ color: C.amber, marginLeft: 12 }}>
-                  ⚠ psexec.exe not found in backend/bin/ — auto-deploy unavailable
-                </span>
-              )}
-              {psexecOk === true && (
-                <span style={{ color: C.green, marginLeft: 12 }}>✓ PsExec ready</span>
-              )}
+              DEPLOY_NEW_AGENT — Remote installation via SMB / Task Scheduler
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 10, alignItems: 'end', marginBottom: 16 }}>
@@ -235,28 +243,28 @@ export default function AgentDeployModal({ isOpen, onClose }) {
                 <div style={{ ...mono, fontSize: 9, color: C.greyDim, marginBottom: 4 }}>TARGET_IP</div>
                 <input value={ip} onChange={e => setIp(e.target.value)}
                   placeholder="10.11.110.50" style={Inp}
-                  onKeyDown={e => e.key === 'Enter' && !isDeploying && psexecOk && handleDeploy()} />
+                  onKeyDown={e => e.key === 'Enter' && !isDeploying && handleDeploy()} />
               </div>
               <div>
                 <div style={{ ...mono, fontSize: 9, color: C.greyDim, marginBottom: 4 }}>USERNAME</div>
                 <input value={username} onChange={e => setUsername(e.target.value)}
                   placeholder="DOMAIN\admin" style={Inp}
-                  onKeyDown={e => e.key === 'Enter' && !isDeploying && psexecOk && handleDeploy()} />
+                  onKeyDown={e => e.key === 'Enter' && !isDeploying && handleDeploy()} />
               </div>
               <div>
                 <div style={{ ...mono, fontSize: 9, color: C.greyDim, marginBottom: 4 }}>PASSWORD</div>
                 <input type="password" value={password} onChange={e => setPassword(e.target.value)}
                   placeholder="••••••••" style={Inp}
-                  onKeyDown={e => e.key === 'Enter' && !isDeploying && psexecOk && handleDeploy()} />
+                  onKeyDown={e => e.key === 'Enter' && !isDeploying && handleDeploy()} />
               </div>
               <button
                 onClick={handleDeploy}
-                disabled={isDeploying || !psexecOk || !ip.trim() || !username.trim() || !password.trim()}
+                disabled={isDeploying || !ip.trim() || !username.trim() || !password.trim()}
                 style={{
                   ...Btn,
                   background: isDeploying ? C.amber : deployDone === 'SUCCESS' ? C.greenDim : C.green,
                   color: '#000',
-                  opacity: (!psexecOk || !ip.trim() || !username.trim() || !password.trim()) && !isDeploying ? 0.4 : 1,
+                  opacity: (!ip.trim() || !username.trim() || !password.trim()) && !isDeploying ? 0.4 : 1,
                   whiteSpace: 'nowrap',
                 }}
               >
@@ -265,14 +273,12 @@ export default function AgentDeployModal({ isOpen, onClose }) {
             </div>
 
             {/* Manual install note */}
-            {psexecOk === false && (
-              <div style={{ padding: '10px 14px', background: 'rgba(255,170,0,0.05)', border: `1px solid ${C.amber}`, marginBottom: 12 }}>
-                <div style={{ ...mono, fontSize: 10, color: C.amber, marginBottom: 6 }}>MANUAL_INSTALL — Run on target workstation:</div>
-                <div style={{ ...mono, fontSize: 10, color: C.greyDim, userSelect: 'all', lineHeight: 1.6 }}>
-                  {`python -c "import urllib.request; urllib.request.urlretrieve('${window.location.origin}/api/agent/download/orca_agent.py','orca_agent.py')" && pip install requests && python orca_agent.py`}
-                </div>
+            <div style={{ padding: '10px 14px', background: 'rgba(255,170,0,0.05)', border: `1px solid ${C.amber}`, marginBottom: 12 }}>
+              <div style={{ ...mono, fontSize: 10, color: C.amber, marginBottom: 6 }}>MANUAL_INSTALL — Run on target workstation:</div>
+              <div style={{ ...mono, fontSize: 10, color: C.greyDim, userSelect: 'all', lineHeight: 1.6 }}>
+                {`python -c "import urllib.request; urllib.request.urlretrieve('${window.location.origin}/api/agent/download/orca_agent.py','orca_agent.py')" && pip install requests && python orca_agent.py`}
               </div>
-            )}
+            </div>
 
             {/* Deployment log */}
             {logs.length > 0 && (

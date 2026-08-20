@@ -1,5 +1,5 @@
 import os, re, uuid, json, hashlib, asyncio, time, shutil, glob, sys
-from typing import Optional
+from typing import Optional, Tuple
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
@@ -19,14 +19,8 @@ def _find_bin(name: str) -> str:
 
 _CAPA_BIN = _find_bin('capa')
 _FLOSS_BIN = _find_bin('floss')
-
-# Module-level speakeasy import — slow to load so do it once at startup
-try:
-    import speakeasy as _speakeasy_mod
-    SPEAKEASY_AVAILABLE = True
-except ImportError:
-    _speakeasy_mod = None
-    SPEAKEASY_AVAILABLE = False
+_SPEAKEASY_BIN = _find_bin('speakeasy')
+SPEAKEASY_AVAILABLE = os.path.isfile(_SPEAKEASY_BIN)
 
 # --- File type detection via magic bytes ---
 _MAGIC = {b'\x4d\x5a': 'PE', b'\x7fELF': 'ELF'}
@@ -52,19 +46,63 @@ def compute_hashes(filepath: str):
     return md5.hexdigest(), sha256.hexdigest()
 
 # --- IOC regex patterns (ordered: URL before DOMAIN to avoid false-positive DOMAIN matches on URLs) ---
+# DOMAIN uses a repeating (label.)+ group so a multi-label host like
+# "www.evil.com" matches in full, with "com" as the final segment -- the old
+# single-label pattern stopped at the first internal dot and treated "evil"
+# (the second label, not the real TLD) as if it were the TLD.
 _IOC_PATTERNS = [
     ('URL',      re.compile(r'https?://[^\s"\'<>]+')),
     ('IP',       re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')),
     ('REGISTRY', re.compile(r'HKEY_[A-Z_]+\\[^\s"\n]+')),
     ('FILEPATH', re.compile(r'[A-Za-z]:\\[^"\'\n\r]+')),
-    ('EMAIL',    re.compile(r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b')),
-    ('DOMAIN',   re.compile(r'\b[a-zA-Z0-9][a-zA-Z0-9\-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}\b')),
+    ('EMAIL',    re.compile(r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,24}\b')),
+    ('DOMAIN',   re.compile(r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,24}\b')),
 ]
 
-def check_ioc(s: str) -> Optional[str]:
+# Real TLDs only -- static string extraction from a PE/ELF binary otherwise
+# surfaces huge numbers of "word.word" false positives (imported DLL names,
+# .NET namespaces like "System.Threading", embedded filenames, PDB paths)
+# that look exactly like domain.tld to a regex with no TLD constraint. A
+# domain match is only kept if its final label is in this set.
+_KNOWN_TLDS = {
+    # Generic / new gTLDs (incl. ones commonly abused for malware infra)
+    'com','net','org','info','biz','name','pro','mobi','tel','asia','xyz','top',
+    'site','online','club','shop','store','tech','app','dev','icu','click','link',
+    'live','vip','win','buzz','rest','cyou','monster','sbs','fun','space','website',
+    'press','news','world','life','pw','cc','ws','tv','me','io','co','to','gg',
+    'ai','sh','gd','im','la','li','fm','bz','nu','cx','us','edu','gov','mil','int',
+    # Free/abused registrar TLDs common in phishing & malware C2
+    'tk','ml','ga','cf','gq',
+    # ccTLDs — broad geopolitical spread, matches this app's threat-intel scope
+    'ru','su','cn','hk','tw','jp','kr','kp','ir','iq','sy','ye','af','pk',
+    'in','bd','lk','np','mm','th','vn','kh','my','sg','id','ph','bn',
+    'ua','by','md','ge','am','az','kz','uz','tm','kg','tj','mn',
+    'uk','de','fr','it','es','pt','nl','be','lu','ch','at','pl','cz','sk',
+    'hu','ro','bg','rs','hr','si','ba','mk','al','gr','tr','cy','mt',
+    'se','no','dk','fi','is','ie','ee','lv','lt',
+    'br','mx','ar','cl','pe','ve','ec','bo','py','uy','cr','pa','cu',
+    'za','ng','ke','eg','ma','dz','tn','ly','gh','et','ug','tz','zm','zw',
+    'au','nz','fj','il','sa','ae','qa','kw','bh','om','jo','lb','ca',
+}
+
+def check_ioc(s: str) -> Optional[Tuple[str, str]]:
+    """Return (ioc_type, matched_substring) for the first IOC pattern found in s, else None.
+
+    Returns the MATCHED substring, not the raw input -- static string extraction
+    (FLOSS) can glue a stray leading byte onto an otherwise-clean IOC (observed
+    live as e.g. "jhttp://..." / "dhttps://..."). re.search() already ignores
+    that leading junk when it looks for where the pattern actually starts, so
+    using match.group(0) instead of the original raw string is what strips it;
+    storing the raw string (the old behavior) kept the garbage prefix in what
+    got displayed and cross-referenced against the IOC library.
+    """
     for ioc_type, pat in _IOC_PATTERNS:
-        if pat.search(s):
-            return ioc_type
+        m = pat.search(s)
+        if not m:
+            continue
+        if ioc_type == 'DOMAIN' and m.group(0).rsplit('.', 1)[-1].lower() not in _KNOWN_TLDS:
+            continue
+        return ioc_type, m.group(0)
     return None
 
 # --- In-memory queue store for SSE ↔ pipeline coordination ---
@@ -103,12 +141,26 @@ async def submit_behavioral_analysis(
         os.makedirs(tmp_dir, exist_ok=True)
         safe_name = os.path.basename(file.filename or "uploaded_file")
         actual_path = os.path.join(tmp_dir, safe_name)
-        content = await file.read()
-        if len(content) > _MAX_UPLOAD:
+        # Stream to disk in bounded chunks instead of `await file.read()`-ing
+        # the whole upload into memory before checking the size -- this
+        # endpoint exists specifically to accept untrusted files, and reading
+        # the full body first meant the 256MB check couldn't stop an
+        # arbitrarily large body from being fully materialized in RAM first.
+        _CHUNK = 1024 * 1024
+        total = 0
+        try:
+            with open(actual_path, 'wb') as fout:
+                while True:
+                    chunk = await file.read(_CHUNK)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _MAX_UPLOAD:
+                        raise HTTPException(status_code=413, detail="File exceeds 256 MB limit")
+                    fout.write(chunk)
+        except HTTPException:
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            raise HTTPException(status_code=413, detail="File exceeds 256 MB limit")
-        with open(actual_path, 'wb') as fout:
-            fout.write(content)
+            raise
         display_name = safe_name
         is_temp = True
     elif file_path:
@@ -518,6 +570,7 @@ async def _run_capa(job_id: str, asset_id: int, filepath: str, queue: asyncio.Qu
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800.0)
         except asyncio.TimeoutError:
             proc.kill()
+            await proc.wait()
             raise Exception(
                 "CAPA timed out after 1800s. Vivisect disassembly of complex or packed "
                 "binaries is CPU-intensive in a containerised environment. The file may "
@@ -633,6 +686,7 @@ async def _run_floss(job_id: str, asset_id: int, filepath: str, queue: asyncio.Q
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300.0)
         except asyncio.TimeoutError:
             proc.kill()
+            await proc.wait()
             raise Exception("FLOSS timed out after 300s")
 
         if proc.returncode not in (0, 1) and not stdout.strip():
@@ -654,14 +708,21 @@ async def _run_floss(job_id: str, asset_id: int, filepath: str, queue: asyncio.Q
                 s_val = item["string"]
                 if not s_val:
                     continue
-                ioc_type = check_ioc(s_val)
-                is_ioc = ioc_type is not None
+                ioc_match = check_ioc(s_val)
+                is_ioc = ioc_match is not None
+                ioc_type = ioc_match[0] if ioc_match else None
+                # Store the cleaned, matched IOC substring (not the raw string) once
+                # something is flagged as an IOC -- see check_ioc's docstring. Non-IOC
+                # strings are stored as-is; they're just general string content, not
+                # claiming to be a specific indicator.
+                stored_val = ioc_match[1] if ioc_match else s_val
+
                 if is_ioc:
                     total_iocs += 1
 
                 batch.append({
                     "jid": job_id, "aid": asset_id,
-                    "val": s_val[:2000], "stype": item["type"],
+                    "val": stored_val[:2000], "stype": item["type"],
                     "is_ioc": is_ioc, "ioc_type": ioc_type,
                     "offset": item.get("offset"),
                 })
@@ -709,15 +770,6 @@ def _insert_floss_batch(conn, batch: list):
 
 # --- Speakeasy ---
 
-def _run_speakeasy_sync(filepath: str) -> dict:
-    if not SPEAKEASY_AVAILABLE:
-        raise Exception("speakeasy-emulator is not installed")
-    se = _speakeasy_mod.Speakeasy()
-    module = se.load_module(filepath)
-    se.run_module(module)
-    return se.get_report()
-
-
 async def _run_speakeasy(job_id: str, asset_id: int, filepath: str, queue: asyncio.Queue):
     t0 = time.time()
     if not SPEAKEASY_AVAILABLE:
@@ -740,12 +792,39 @@ async def _run_speakeasy(job_id: str, asset_id: int, filepath: str, queue: async
 
     await queue.put({"phase": "SPEAKEASY_START",
                      "message": "Starting Speakeasy emulation (timeout: 120s)..."})
+
+    report_path = f"{filepath}.speakeasy_report.json"
     try:
-        loop = asyncio.get_event_loop()
-        report = await asyncio.wait_for(
-            loop.run_in_executor(None, _run_speakeasy_sync, filepath),
-            timeout=120.0,
+        # Runs as a real subprocess (like CAPA/FLOSS above), not in-process
+        # via run_in_executor on the shared default thread pool.
+        # asyncio.wait_for's timeout only cancels the *await* -- it can't
+        # stop a thread already running synchronous C-extension emulation
+        # code -- so a hung sample used to permanently occupy a slot in the
+        # pool the whole app shares (including unrelated remote-collection/
+        # SMB work elsewhere). A subprocess can actually be killed.
+        speakeasy_cmd = [_SPEAKEASY_BIN, '-t', filepath, '-o', report_path]
+        proc = await asyncio.create_subprocess_exec(
+            *speakeasy_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise Exception("Emulation timeout after 120s")
+
+        # The CLI runs the emulation in its own internal worker process and
+        # swallows errors there (unsupported file type, corrupt PE, etc.) --
+        # confirmed live it exits 0 either way, so the output file's
+        # presence is the real success signal, not the exit code.
+        if not os.path.isfile(report_path):
+            err_lines = stderr.decode(errors='replace').strip().splitlines()
+            raise Exception(err_lines[-1] if err_lines else "Speakeasy produced no report (unsupported or invalid file)")
+
+        with open(report_path) as f:
+            report = json.load(f)
 
         api_count = 0
         net_count = 0
@@ -753,7 +832,10 @@ async def _run_speakeasy(job_id: str, asset_id: int, filepath: str, queue: async
         with db.engine.connect() as conn:
             for ep_idx, ep in enumerate(report.get('entry_points', [])):
                 for api in ep.get('apis', []):
-                    fn = api.get('func_name', '')
+                    # Real field is `api_name`, not `func_name` -- confirmed
+                    # against a live report (speakeasy/profiler.py builds
+                    # each call as {'pc', 'api_name', 'args', 'ret_val'}).
+                    fn = api.get('api_name', '')
                     args = api.get('args', [])
                     conn.execute(text("""
                         INSERT INTO speakeasy_results
@@ -774,9 +856,14 @@ async def _run_speakeasy(job_id: str, asset_id: int, filepath: str, queue: async
 
                 net_events = ep.get('network_events', {})
                 for traffic in net_events.get('traffic', []):
+                    # Real field is `server`, not `host`/`dst` -- there is no
+                    # `url` field at all (confirmed against speakeasy/
+                    # profiler.py's log_http/log_network, which only ever
+                    # emit {'server', 'proto', 'port', ...}). Both were
+                    # silently always-blank before.
                     proto = traffic.get('proto', 'unknown')
-                    host = str(traffic.get('host') or traffic.get('dst', ''))[:500]
-                    port = traffic.get('port') or traffic.get('dst_port')
+                    host = str(traffic.get('server', ''))[:500]
+                    port = traffic.get('port')
                     url = str(traffic.get('url', ''))[:1000]
                     conn.execute(text("""
                         INSERT INTO speakeasy_results
@@ -802,16 +889,6 @@ async def _run_speakeasy(job_id: str, asset_id: int, filepath: str, queue: async
             "elapsed_seconds": round(time.time() - t0, 1),
         })
 
-    except asyncio.TimeoutError:
-        with db.engine.connect() as conn:
-            conn.execute(text("""
-                UPDATE behavioral_jobs SET speakeasy_status='error',
-                speakeasy_error='Emulation timeout after 120s', speakeasy_completed_at=NOW()
-                WHERE job_id=:jid
-            """), {"jid": job_id})
-            conn.commit()
-        await queue.put({"phase": "ERROR", "tool": "speakeasy",
-                         "message": "Emulation timeout after 120s"})
     except Exception as e:
         with db.engine.connect() as conn:
             conn.execute(text("""
@@ -820,3 +897,9 @@ async def _run_speakeasy(job_id: str, asset_id: int, filepath: str, queue: async
             """), {"err": str(e)[:500], "jid": job_id})
             conn.commit()
         await queue.put({"phase": "ERROR", "tool": "speakeasy", "message": str(e)})
+    finally:
+        try:
+            if os.path.isfile(report_path):
+                os.remove(report_path)
+        except Exception:
+            pass

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import threading
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
@@ -11,6 +12,7 @@ from typing import Optional
 from auth_utils import get_current_user
 
 router = APIRouter(prefix="/api/ioc", tags=["ioc"])
+logger = logging.getLogger(__name__)
 
 
 # ── Models ─────────────────────────────────────────────────────────────────────
@@ -43,7 +45,8 @@ def list_library_iocs(current_user: dict = Depends(get_current_user)):
         with db.engine.connect() as conn:
             return [dict(r) for r in conn.execute(sql).mappings()]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("list_library_iocs failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to load IOC library")
 
 @router.post("/library")
 def add_library_ioc(req: LibraryIOCRequest, current_user: dict = Depends(get_current_user)):
@@ -73,9 +76,8 @@ def add_library_ioc(req: LibraryIOCRequest, current_user: dict = Depends(get_cur
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        print(f"[IOC_LIBRARY_ERROR] {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("add_library_ioc failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save IOC")
 
 @router.delete("/library/{ioc_id}")
 def delete_library_ioc(ioc_id: int, current_user: dict = Depends(get_current_user)):
@@ -84,7 +86,8 @@ def delete_library_ioc(ioc_id: int, current_user: dict = Depends(get_current_use
             conn.execute(text("DELETE FROM public.ref_ioc_library WHERE id = :id"), {"id": ioc_id})
         return {"status": "deleted", "id": ioc_id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("delete_library_ioc failed for id=%s: %s", ioc_id, e)
+        raise HTTPException(status_code=500, detail="Failed to delete IOC")
 
 
 # ── Evidence search ────────────────────────────────────────────────────────────
@@ -109,7 +112,8 @@ def search_all_evidence(query: str, current_user: dict = Depends(get_current_use
             findings = [dict(r) for r in conn.execute(sql, {"term": f"%{query}%"}).mappings()]
         return {"search_term": query, "total_hits": len(findings), "data": findings}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("search_all_evidence failed: %s", e)
+        raise HTTPException(status_code=500, detail="Search failed")
 
 
 # ── IOC correlation — streaming SSE ───────────────────────────────────────────
@@ -170,7 +174,8 @@ async def correlate_stream(current_user: dict = Depends(get_current_user)):
 
             _push({"phase": "COMPLETE"})
         except Exception as e:
-            _push({"phase": "ERROR", "message": str(e)})
+            logger.error("correlate_stream scan failed: %s", e)
+            _push({"phase": "ERROR", "message": "Correlation scan failed"})
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
 
@@ -201,7 +206,10 @@ def add_discovered_ioc(req: AddIOCRequest, current_user: dict = Depends(get_curr
     sql = text("""
         INSERT INTO public.discovered_iocs (ioc_value, ioc_type, case_name, t_code, note)
         VALUES (:val, :type, :case, :tcode, :note)
-        ON CONFLICT (ioc_value, case_name) DO UPDATE SET note = excluded.note
+        ON CONFLICT (ioc_value, case_name) DO UPDATE SET
+            ioc_type = excluded.ioc_type,
+            t_code = excluded.t_code,
+            note = excluded.note
     """)
     try:
         with db.engine.connect() as conn:
@@ -212,7 +220,8 @@ def add_discovered_ioc(req: AddIOCRequest, current_user: dict = Depends(get_curr
             conn.commit()
         return {"status": "success", "value": req.value, "note": automated_note}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("add_discovered_ioc failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to promote IOC")
 
 
 # ── Enrichment proxy ───────────────────────────────────────────────────────────
@@ -230,4 +239,5 @@ def enrich_observable(observable: str, type: str, current_user: dict = Depends(g
             ],
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Enrichment failed: {str(e)}")
+        logger.error("enrich_observable failed: %s", e)
+        raise HTTPException(status_code=500, detail="Enrichment failed")

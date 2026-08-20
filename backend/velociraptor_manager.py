@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import Response
 
 from config import cfg
+from auth_utils import get_current_user
 
 # ---------------------------------------------------------------------------
 # Config
@@ -49,6 +50,25 @@ def _log(msg: str):
     _log_lines.append(msg)
     if len(_log_lines) > 200:
         _log_lines.pop(0)
+
+
+def _drain_stdout(proc: subprocess.Popen):
+    """Continuously drain the child's stdout pipe into _log_lines.
+
+    Without this, nothing ever reads the pipe once startup's immediate-exit
+    check passes, so once Velociraptor's own logging fills the OS pipe
+    buffer (~64KB), its next stdout write blocks forever and the process
+    hangs -- same class of bug as main.py's run_vr_orchestrator.
+    """
+    try:
+        if not proc.stdout:
+            return
+        for raw_line in iter(proc.stdout.readline, b""):
+            line = raw_line.decode(errors="replace").rstrip("\n")
+            if line:
+                _log(f"[vr] {line}")
+    except Exception:
+        pass
 
 
 def _is_running() -> bool:
@@ -107,9 +127,10 @@ def start_velociraptor() -> dict:
                 stderr=subprocess.STDOUT,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
+            threading.Thread(target=_drain_stdout, args=(_process,), daemon=True).start()
             time.sleep(1)
             if _process.poll() is not None:
-                out = _process.stdout.read().decode(errors="replace") if _process.stdout else ""
+                out = "\n".join(_log_lines[-20:])
                 _process = None
                 _log(f"Velociraptor exited immediately: {out[:500]}")
                 raise HTTPException(status_code=500, detail=f"Velociraptor exited immediately: {out[:300]}")
@@ -159,17 +180,17 @@ router = APIRouter(prefix="/api/velociraptor", tags=["velociraptor"])
 
 
 @router.post("/start")
-def api_start():
+def api_start(current_user: dict = Depends(get_current_user)):
     return start_velociraptor()
 
 
 @router.post("/stop")
-def api_stop():
+def api_stop(current_user: dict = Depends(get_current_user)):
     return stop_velociraptor()
 
 
 @router.get("/status")
-def api_status():
+def api_status(current_user: dict = Depends(get_current_user)):
     return get_status()
 
 
@@ -178,7 +199,7 @@ def api_status():
 # ---------------------------------------------------------------------------
 
 @router.api_route("/proxy/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
-async def proxy(path: str, request: Request):
+async def proxy(path: str, request: Request, current_user: dict = Depends(get_current_user)):
     if not _is_running():
         raise HTTPException(status_code=503, detail="Velociraptor is not running")
 

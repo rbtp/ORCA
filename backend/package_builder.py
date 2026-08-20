@@ -214,10 +214,14 @@ def build_triage_package(asset_id: int, user_id: int, orca_url: str, categories:
                 (art_dir / f"{tech['t_code']}.vql").write_text(tech["custom_vql"], encoding="utf-8")
 
         vr_src = Path(cfg.VR_EXE_WINDOWS)
-        if vr_src.exists():
-            shutil.copy2(vr_src, pkg_dir / "velociraptor.exe")
-        else:
-            logger.warning("velociraptor.exe not found at %s", cfg.VR_EXE_WINDOWS)
+        if not vr_src.exists():
+            # Used to log a warning and ship the ZIP anyway -- the generated
+            # run_orca_collection.ps1 still expects velociraptor.exe to be
+            # there, so a package missing it fails on the target with a
+            # confusing runtime error instead of here, where it's obvious
+            # and fixable.
+            raise ValueError(f"velociraptor.exe not found at {cfg.VR_EXE_WINDOWS} — cannot build package")
+        shutil.copy2(vr_src, pkg_dir / "velociraptor.exe")
 
         config = {
             "orca_url": orca_url,
@@ -350,12 +354,6 @@ def build_package(asset_id: int, user_id: int, orca_url: str) -> dict:
     if not techniques:
         raise ValueError(f"No techniques found for asset {asset_id} — check OS/case config")
 
-    # Read cert for trust injection if TLS is configured
-    cert_b64 = None
-    if cfg.SSL_CERTFILE and os.path.exists(cfg.SSL_CERTFILE):
-        with open(cfg.SSL_CERTFILE, "rb") as f:
-            cert_b64 = base64.b64encode(f.read()).decode()
-
     token = create_package_token(
         asset_id=asset_id,
         case_name=asset["case_name"],
@@ -388,10 +386,14 @@ def build_package(asset_id: int, user_id: int, orca_url: str) -> dict:
             )
 
         vr_src = Path(cfg.VR_EXE_WINDOWS)
-        if vr_src.exists():
-            shutil.copy2(vr_src, pkg_dir / "velociraptor.exe")
-        else:
-            logger.warning("velociraptor.exe not found at %s", cfg.VR_EXE_WINDOWS)
+        if not vr_src.exists():
+            # Used to log a warning and ship the ZIP anyway -- the generated
+            # run_orca_collection.ps1 still expects velociraptor.exe to be
+            # there, so a package missing it fails on the target with a
+            # confusing runtime error instead of here, where it's obvious
+            # and fixable.
+            raise ValueError(f"velociraptor.exe not found at {cfg.VR_EXE_WINDOWS} — cannot build package")
+        shutil.copy2(vr_src, pkg_dir / "velociraptor.exe")
 
         config = {
             "orca_url": orca_url,

@@ -87,3 +87,28 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ADMIN_ROLE_REQUIRED")
     return current_user
+
+# ── Case-assignment guard ─────────────────────────────────────────────────────
+
+def user_can_access_case(current_user: dict, case_name: str) -> bool:
+    """True if current_user may act on this case's assets (deploy/dispatch/
+    package endpoints). Admins always can. A case with no rows in
+    case_assignments is unrestricted -- open to every analyst, same as before
+    this table existed -- so an existing case nobody has ever assigned stays
+    fully working; a case only becomes access-restricted once someone
+    deliberately assigns specific people to it.
+    """
+    if current_user.get("role") == "admin":
+        return True
+    from core.database_manager import db
+    from sqlalchemy import text
+    with db.engine.connect() as conn:
+        total = conn.execute(text(
+            "SELECT COUNT(*) FROM case_assignments WHERE case_name = :name"
+        ), {"name": case_name}).scalar()
+        if not total:
+            return True
+        row = conn.execute(text(
+            "SELECT 1 FROM case_assignments WHERE case_name = :name AND user_id = :uid"
+        ), {"name": case_name, "uid": current_user.get("id")}).first()
+        return row is not None

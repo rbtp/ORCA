@@ -1,10 +1,13 @@
 import json
 import time
 import os
+import logging
 from sqlalchemy import text
 from core.database_manager import db
 
 import re as _re
+
+logger = logging.getLogger(__name__)
 
 _TRIAGE_PATTERNS = [
     (_re.compile(r'Microsoft-Windows-Sysmon', _re.I),          'EVENT_LOGS_SYSMON'),
@@ -404,7 +407,7 @@ def normalize_and_ingest(file_path, asset_id, t_code, target_name_hint=None, is_
         return _normalize_triage(file_path, asset_id, t_code, is_fallback)
 
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        print(f"[-] SKIPPING: {file_path} is empty or missing.")
+        logger.warning("normalize_and_ingest: skipping %s (empty or missing)", file_path)
         return 0
 
     try:
@@ -412,6 +415,7 @@ def normalize_and_ingest(file_path, asset_id, t_code, target_name_hint=None, is_
         time.sleep(0.5)
 
         raw_rows = []
+        bad_line_count = 0
         with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
             for line in f:
                 line = line.strip()
@@ -423,7 +427,14 @@ def normalize_and_ingest(file_path, asset_id, t_code, target_name_hint=None, is_
                         continue
                     raw_rows.append(raw_item)
                 except Exception as json_err:
-                    print(f"[!] JSON PARSE ERROR in {file_path}: {json_err}")
+                    bad_line_count += 1
+                    logger.warning("normalize_and_ingest: JSON parse error in %s: %s", file_path, json_err)
+
+        if bad_line_count:
+            logger.warning(
+                "normalize_and_ingest: %d/%d line(s) in %s failed to parse and were dropped -- ingest is partial",
+                bad_line_count, bad_line_count + len(raw_rows), file_path,
+            )
 
         if not raw_rows:
             return 0

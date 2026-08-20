@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from typing import Optional, Any, Union
 
 # --- AUTH IMPORTS ---
-from auth_utils import verify_password, create_access_token, get_current_user
+from auth_utils import verify_password, create_access_token, get_current_user, hash_password
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -30,11 +30,34 @@ from report_routes import router as report_router
 
 app = FastAPI(title="ORCAWEB")
 
-limiter = Limiter(key_func=get_remote_address)
+
+def _rate_limit_key(request: Request) -> str:
+    # Every request arrives through nginx (see frontend/nginx.conf), which
+    # sets X-Real-IP to the actual client address. slowapi's default
+    # get_remote_address reads request.client.host directly -- behind the
+    # proxy that's always nginx's own container IP, so every real client
+    # collapsed into one shared rate-limit bucket: one user's failed logins
+    # (or one attacker) could exhaust the "5/minute" limit for everyone at
+    # once. Falls back to get_remote_address for direct/non-proxied requests.
+    return request.headers.get("x-real-ip") or get_remote_address(request)
+
+
+limiter = Limiter(key_func=_rate_limit_key)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "https://localhost").split(",") if o.strip()]
+if "*" in cors_origins:
+    # allow_credentials=True + a literal wildcard origin makes Starlette
+    # reflect any request's Origin header back with credentials allowed --
+    # a full credentialed-CORS bypass letting any site make authenticated
+    # requests as a logged-in user. Not the shipped default, but nothing
+    # else stops an operator from setting this as a quick "just make CORS
+    # work" fix -- fail loudly at startup instead of silently exposing it.
+    raise RuntimeError(
+        "FATAL: CORS_ORIGINS may not contain '*' because allow_credentials=True is set -- "
+        "list the exact origin(s) that should be allowed instead (comma-separated)."
+    )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
@@ -98,6 +121,10 @@ class MountRequest(BaseModel):
     readonly:     Optional[bool] = True
 
 # --- AUTH ENDPOINTS ---
+# Fixed dummy hash for the unknown-username timing-safety check below --
+# computed once (bcrypt hashing is deliberately slow) rather than per request.
+_DUMMY_PASSWORD_HASH = hash_password(os.urandom(16).hex())
+
 @app.post("/api/auth/login")
 @limiter.limit("5/minute")
 async def login(request: Request, response: Response, login_data: LoginRequest):
@@ -108,6 +135,12 @@ async def login(request: Request, response: Response, login_data: LoginRequest):
             user_record = conn.execute(query, {"u": login_data.username}).fetchone()
 
         if not user_record:
+            # Still pay bcrypt's verify cost against a fixed dummy hash so an
+            # unknown username takes the same time to reject as a known
+            # username with a wrong password -- otherwise this early return
+            # is a reliable timing side-channel for enumerating valid
+            # usernames even though the error body itself is identical.
+            verify_password(login_data.password, _DUMMY_PASSWORD_HASH)
             raise HTTPException(status_code=401, detail="INVALID_CREDENTIALS")
 
         db_id, db_username, db_password_hash, db_initials, db_role = user_record
@@ -166,6 +199,7 @@ async def logout(response: Response):
 def run_vr_orchestrator(target_list, tsource, output_root, asset_id):
     import logging
     import json
+    import threading
 
     backend_dir   = os.path.dirname(os.path.abspath(__file__))
     worker_script = os.path.join(backend_dir, 'run_technique.py')
@@ -181,6 +215,20 @@ def run_vr_orchestrator(target_list, tsource, output_root, asset_id):
             "surgical_yaml": item.get('surgical_yaml') or '',
             "db_url":        cfg.DB_URL,
         }
+
+    def drain_stdout(proc, lines):
+        # Continuously read stdout in its own thread instead of only calling
+        # proc.stdout.read() after poll() shows the process exited. Without
+        # this, a worker that writes more than the OS pipe buffer (~64KB)
+        # before exiting blocks on that write since nothing is reading --
+        # the child never exits, poll() never returns, and this job sits
+        # wedged forever with no error and no way out short of an operator
+        # manually killing the process.
+        try:
+            for line in iter(proc.stdout.readline, b''):
+                lines.append(line)
+        except Exception:
+            pass
 
     import time
     max_workers = cfg.VR_MAX_WORKERS
@@ -202,20 +250,24 @@ def run_vr_orchestrator(target_list, tsource, output_root, asset_id):
                 )
                 proc.stdin.write(json.dumps(job).encode('utf-8'))
                 proc.stdin.close()
-                active[proc.pid] = (proc, t_code)
+                out_lines = []
+                drain_thread = threading.Thread(target=drain_stdout, args=(proc, out_lines), daemon=True)
+                drain_thread.start()
+                active[proc.pid] = (proc, t_code, out_lines, drain_thread)
                 logging.info(f"[VR] {t_code}: worker spawned (pid {proc.pid})")
             except Exception as e:
                 logging.error(f"[VR] {t_code}: spawn failed — {e}")
 
         time.sleep(0.5)
         done_pids = []
-        for pid, (proc, t_code) in active.items():
+        for pid, (proc, t_code, out_lines, drain_thread) in active.items():
             ret = proc.poll()
             if ret is not None:
-                output = proc.stdout.read().decode('utf-8', errors='replace')
-                for line in output.splitlines():
-                    if line.strip():
-                        logging.info(line)
+                drain_thread.join(timeout=2)
+                for line in out_lines:
+                    line_str = line.decode('utf-8', errors='replace').rstrip('\n')
+                    if line_str.strip():
+                        logging.info(line_str)
                 done_pids.append(pid)
         for pid in done_pids:
             del active[pid]
@@ -289,13 +341,14 @@ async def execute_asset_action(
 @app.post("/api/assets/vuln-scan")
 @limiter.limit("5/minute")
 async def vuln_scan(
-    request: VulnScanRequest,
+    request: Request,
+    payload: VulnScanRequest,
     current_user: dict = Depends(get_current_user)
 ):
     """SSE stream — runs Syft then Grype, saves SBOM + results, stores in vuln_results."""
-    asset_id  = int(request.asset_id)
-    scan_path = request.scan_path
-    offline   = request.offline
+    asset_id  = int(payload.asset_id)
+    scan_path = payload.scan_path
+    offline   = payload.offline
 
     async def generate():
         import json as _json
@@ -598,11 +651,18 @@ async def dismount_image(
     """Dismount a mounted image by mount session ID."""
     _ensure_mount_table()
 
+    # Atomically claim the mount session by flipping it to a transient
+    # DISMOUNTING status in the same statement as the MOUNTED check --
+    # two concurrent dismount calls for the same mount_id can no longer
+    # both pass a separate read-then-write and both run the AIM CLI /
+    # both mark it DISMOUNTED.
     with db.engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT device_number FROM mount_sessions
+            UPDATE mount_sessions SET status = 'DISMOUNTING'
             WHERE id = :mount_id AND asset_id = :asset_id AND status = 'MOUNTED'
+            RETURNING device_number
         """), {"mount_id": mount_id, "asset_id": asset_id}).fetchone()
+        conn.commit()
 
     if not row:
         raise HTTPException(status_code=404, detail="Mount session not found or already dismounted")
@@ -621,6 +681,11 @@ async def dismount_image(
         output = stdout.decode(errors="replace")
 
         if proc.returncode != 0:
+            with db.engine.connect() as conn:
+                conn.execute(text("""
+                    UPDATE mount_sessions SET status = 'MOUNTED' WHERE id = :mount_id
+                """), {"mount_id": mount_id})
+                conn.commit()
             raise HTTPException(status_code=500, detail=f"AIM_DISMOUNT_FAILED: {output}")
 
         with db.engine.connect() as conn:
@@ -636,6 +701,11 @@ async def dismount_image(
     except HTTPException:
         raise
     except Exception as e:
+        with db.engine.connect() as conn:
+            conn.execute(text("""
+                UPDATE mount_sessions SET status = 'MOUNTED' WHERE id = :mount_id AND status = 'DISMOUNTING'
+            """), {"mount_id": mount_id})
+            conn.commit()
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

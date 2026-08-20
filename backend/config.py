@@ -88,10 +88,13 @@ cfg = _Config()
 
 
 def _validate_required_env():
-    required = ("DATABASE_URL", "TLS_CERT_PATH", "TLS_KEY_PATH")
-    missing = [v for v in required if not os.environ.get(v)]
-    if missing:
-        raise RuntimeError(f"FATAL: Missing required environment variables: {', '.join(missing)}")
+    # SSL_CERTFILE/SSL_KEYFILE always resolve to something (TLS_CERT_PATH ->
+    # ORCA_SSL_CERT -> a bundled default path, auto-generated on first boot)
+    # so they were never actually "required" env vars -- hard-requiring
+    # TLS_CERT_PATH/TLS_KEY_PATH here rejected a fully working, documented
+    # configuration (using ORCA_SSL_CERT/ORCA_SSL_KEY, or the default path)
+    # with a fatal startup error for no real reason. DB_URL is the only
+    # setting with no working default, and it's already checked correctly.
     if not cfg.DB_URL:
         raise RuntimeError("FATAL: DATABASE_URL or ORCA_DB_URL must be set")
 

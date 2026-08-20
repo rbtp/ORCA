@@ -26,6 +26,7 @@ export default function App() {
   const [veloOpen, setVeloOpen] = useState(false);
   const [agentFleetOpen, setAgentFleetOpen] = useState(false);
   const [agentFleet, setAgentFleet] = useState([]);
+  const [agentFleetError, setAgentFleetError] = useState(false);
   const [selectedIntel, setSelectedIntel] = useState(null);
   const [pendingCase, setPendingCase] = useState(null);
 
@@ -33,7 +34,12 @@ export default function App() {
   const [dbStatus, setDbStatus] = useState("INITIALIZING...");
   const videoRef = useRef(null);
 
-  const savedSession = JSON.parse(localStorage.getItem('NEO_WORKSPACE_SESSION'));
+  let savedSession = null;
+  try {
+    savedSession = JSON.parse(localStorage.getItem('NEO_WORKSPACE_SESSION'));
+  } catch {
+    localStorage.removeItem('NEO_WORKSPACE_SESSION');
+  }
   const [activeNodes, setActiveNodes] = useState(savedSession?.nodes || []);
   const [activeLinks, setActiveLinks] = useState(savedSession?.links || []);
 
@@ -55,9 +61,13 @@ export default function App() {
       fetch(`${import.meta.env.VITE_API_URL}/api/agent/list`, {
         credentials: 'include',
       })
-        .then(r => r.ok ? r.json() : [])
+        .then(r => {
+          if (!r.ok) { setAgentFleetError(true); return []; }
+          setAgentFleetError(false);
+          return r.json();
+        })
         .then(setAgentFleet)
-        .catch(() => {});
+        .catch(() => setAgentFleetError(true));
     }
   }, [activeNav, user, logout]);
 
@@ -183,7 +193,9 @@ export default function App() {
                 ▶ MANAGE / DEPLOY
               </button>
             </div>
-            {agentFleet.length === 0 ? (
+            {agentFleetError ? (
+              <div style={{ fontSize: '11px', color: '#ff4444', fontFamily: 'monospace' }}>⚠ AGENT_FLEET_UNAVAILABLE — could not reach backend</div>
+            ) : agentFleet.length === 0 ? (
               <div style={{ fontSize: '11px', color: '#999', fontFamily: 'monospace' }}>NO AGENTS REGISTERED</div>
             ) : (
               <div style={{ display: 'flex', gap: 24 }}>
@@ -224,6 +236,18 @@ export default function App() {
 
   const renderMitreDossier = () => {
     if (!selectedIntel) return <div style={{ color: '#aaa', fontFamily: 'monospace' }}>SELECT_INTEL_OBJECT_TO_DECODE...</div>;
+    if (selectedIntel.loading) {
+      return <div style={{ color: '#00ff41', fontFamily: 'monospace' }}>SYNCING_DOSSIER: {selectedIntel.name}...</div>;
+    }
+    if (selectedIntel.error) {
+      return (
+        <div style={{ fontFamily: 'monospace' }}>
+          <div style={{ color: '#ff4444', fontSize: '16px', fontWeight: 'bold' }}>DOSSIER_SYNC_FAILED</div>
+          <div style={{ color: '#aaa', fontSize: '11px', marginTop: '8px' }}>{selectedIntel.name} — {selectedIntel.errorMessage}</div>
+          <div style={{ color: '#666', fontSize: '10px', marginTop: '12px' }}>Click the item in the sidebar again to retry.</div>
+        </div>
+      );
+    }
     const techs = selectedIntel.linkedTechniques || selectedIntel.techniques || [];
     const hierarchy = getMatrixHierarchy(techs);
 

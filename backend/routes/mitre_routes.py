@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, Body, BackgroundTasks, Re
 from fastapi.responses import StreamingResponse, Response
 from core.database_manager import db, get_db
 from services.mitre_service import MitreIntelService
-from sqlalchemy import text, inspect
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Union, Any, Dict, Optional
@@ -11,6 +11,7 @@ import logging
 
 from auth_utils import get_current_user, require_admin
 from config import cfg
+import vr_remote
 
 router = APIRouter(prefix="/api/mitre")
 
@@ -883,7 +884,9 @@ async def add_tcode_note(asset_id: int, t_code: str, data: TCodeNotePayload, cur
                 t_code VARCHAR(20) NOT NULL,
                 note_text TEXT NOT NULL,
                 note_type VARCHAR(10) DEFAULT 'NOTE',
-                created_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT NOW(),
+                author_id INTEGER,
+                author_initials VARCHAR(10)
             )
         """))
         result = session.execute(text("""
@@ -1008,10 +1011,13 @@ def get_all_cases(current_user: dict = Depends(get_current_user)):
 
 @router.post("/cases")
 def save_case(case_data: dict, current_user: dict = Depends(get_current_user)):
+    case_name = (case_data.get('name') or '').strip()
+    if not case_name:
+        raise HTTPException(status_code=400, detail="Case name is required")
+
     session = db.get_session()
     try:
         groups_csv = ",".join(case_data.get('groups') or []) if isinstance(case_data.get('groups'), list) else ""
-        case_name = case_data.get('name')
         session.execute(text("""
             INSERT INTO public.cases (name, team_name, mission_lead, focus_country, selected_groups, support, personnel, case_type)
             VALUES (:name, :team, :lead, :country, :groups, :support, :personnel, :case_type)
@@ -1047,9 +1053,12 @@ def save_case(case_data: dict, current_user: dict = Depends(get_current_user)):
 
         session.commit()
         return {"status": "SUCCESS", "message": "CASE_UPSERTED", "local_dir": local_dir, "host_path": host_path}
+    except HTTPException:
+        raise
     except Exception as e:
         session.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"[cases] save_case failed for '{case_name}': {e}")
+        raise HTTPException(status_code=500, detail="Failed to save case")
     finally:
         session.close()
 
@@ -1337,12 +1346,19 @@ async def get_technique_analytics(t_code: str, current_user: dict = Depends(get_
 async def update_artifact_library(t_code: str, data: dict = Body(...), current_user: dict = Depends(require_admin)):
     session = db.get_session()
     try:
+        # Real upsert, not a bare UPDATE -- a t_code with no existing row
+        # (a genuinely new mapping) used to match zero rows and still
+        # return {"status": "SUCCESS"}, a phantom save that silently did
+        # nothing. t_code has a UNIQUE constraint (ref_artifact_library_
+        # t_code_key), so ON CONFLICT works directly off it.
         session.execute(text("""
-            UPDATE public.ref_artifact_library SET
+            INSERT INTO public.ref_artifact_library
+                (t_code, live_analysis, dead_disk_analysis, collection_strategy, custom_vql, surgical_yaml, updated_at)
+            VALUES (:t, :live, :dead, :coll, :vql, :yaml, NOW())
+            ON CONFLICT (t_code) DO UPDATE SET
                 live_analysis=:live, dead_disk_analysis=:dead,
                 collection_strategy=:coll, custom_vql=:vql, surgical_yaml=:yaml,
                 updated_at=NOW()
-            WHERE t_code=:t
         """), {"live": data.get("live_analysis"), "dead": data.get("dead_disk_analysis"),
                "coll": data.get("collection_strategy"), "vql": data.get("custom_vql"),
                "yaml": data.get("surgical_yaml"), "t": t_code})
@@ -1489,6 +1505,49 @@ async def delete_map_background(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/users/assignable")
+async def list_assignable_users(current_user: dict = Depends(get_current_user)):
+    """Just enough to populate an assignment picker -- id/username/initials,
+    none of the admin-only user-management data GET /api/admin/users returns.
+    Any authenticated user can see this list (assignment itself is likewise
+    open to any authenticated user, not admin-only -- see set_case_assignments)."""
+    with db.engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, username, initials FROM public.users WHERE role != 'agent' ORDER BY username"
+        )).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@router.get("/cases/{case_name}/assignments")
+async def get_case_assignments(case_name: str, current_user: dict = Depends(get_current_user)):
+    with db.engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT u.id, u.username, u.initials
+            FROM case_assignments ca JOIN public.users u ON u.id = ca.user_id
+            WHERE ca.case_name = :name ORDER BY u.username
+        """), {"name": case_name}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@router.put("/cases/{case_name}/assignments")
+async def set_case_assignments(case_name: str, payload: dict = Body(...), current_user: dict = Depends(get_current_user)):
+    """Replaces the full assignment list for a case. Deliberately not
+    admin-gated -- same low-friction editing model as the rest of the case
+    details (mission lead, team, etc). An empty list is a real, meaningful
+    state (falls back to "open to all analysts" everywhere this is
+    enforced), not an error."""
+    user_ids = payload.get("user_ids", [])
+    with db.engine.connect() as conn:
+        conn.execute(text("DELETE FROM case_assignments WHERE case_name = :name"), {"name": case_name})
+        for uid in user_ids:
+            conn.execute(text("""
+                INSERT INTO case_assignments (case_name, user_id) VALUES (:name, :uid)
+                ON CONFLICT (case_name, user_id) DO NOTHING
+            """), {"name": case_name, "uid": uid})
+        conn.commit()
+    return {"status": "SUCCESS", "assigned_count": len(user_ids)}
+
+
 @router.delete("/cases/{case_name}")
 async def delete_case(case_name: str, db: Session = Depends(get_db), current_user: dict = Depends(require_admin)):
     try:
@@ -1618,26 +1677,6 @@ def get_matrix(current_user: dict = Depends(get_current_user)):
     session = db.get_session()
     try:
         return MitreIntelService.get_matrix_layout(session)
-    finally:
-        session.close()
-
-@router.get("/audit")
-def full_stack_audit(current_user: dict = Depends(get_current_user)):
-    session = db.get_session()
-    try:
-        raw_row = session.execute(text("SELECT * FROM mitre_groups LIMIT 1")).mappings().first()
-        db_fields = list(raw_row.keys()) if raw_row else "TABLE_EMPTY"
-        model_obj = session.query(db.MitreGroup).first()
-        if model_obj:
-            try:
-                model_fields = [c.key for c in inspect(model_obj).mapper.column_attrs]
-            except:
-                model_fields = "UNINSPECTABLE"
-            translated = to_dict(model_obj)
-        else:
-            model_fields = "MODEL_EMPTY"
-            translated = "NONE"
-        return {"database_truth": db_fields, "backend_vision": model_fields, "sample_sent_to_frontend": translated}
     finally:
         session.close()
 
@@ -2279,24 +2318,33 @@ class CaseNotePayload(BaseModel):
     text: str
     note_type: Optional[str] = "NOTE"
 
-_sse_clients: Dict[int, asyncio.Queue] = {}
+# One user_id -> list of queues, not a single queue -- a user with two tabs
+# open used to have the second tab's connection silently overwrite the
+# first's single dict entry, so the first tab stopped receiving broadcasts
+# with no error. Worse: if that orphaned first tab's connection later closed
+# on its own, its cleanup did `_sse_clients.pop(user_id, None)` unconditionally
+# -- deleting the SECOND tab's still-live queue too, killing both.
+_sse_clients: Dict[int, List[asyncio.Queue]] = {}
 
 async def _broadcast(event_type: str, payload: dict):
     msg = json.dumps({"type": event_type, **payload})
-    dead = []
-    for uid, q in _sse_clients.items():
-        try:
-            q.put_nowait(msg)
-        except asyncio.QueueFull:
-            dead.append(uid)
-    for uid in dead:
-        _sse_clients.pop(uid, None)
+    for uid, queues in list(_sse_clients.items()):
+        dead = []
+        for q in queues:
+            try:
+                q.put_nowait(msg)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for q in dead:
+            queues.remove(q)
+        if not queues:
+            _sse_clients.pop(uid, None)
 
 async def _notify_user(user_id: int, event_type: str, payload: dict):
-    q = _sse_clients.get(user_id)
-    if q:
+    msg = json.dumps({"type": event_type, **payload})
+    for q in list(_sse_clients.get(user_id, [])):
         try:
-            q.put_nowait(json.dumps({"type": event_type, **payload}))
+            q.put_nowait(msg)
         except asyncio.QueueFull:
             pass
 
@@ -2304,7 +2352,7 @@ async def _notify_user(user_id: int, event_type: str, payload: dict):
 async def collaboration_stream(current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
     q: asyncio.Queue = asyncio.Queue(maxsize=50)
-    _sse_clients[user_id] = q
+    _sse_clients.setdefault(user_id, []).append(q)
 
     async def event_generator():
         yield f"data: {json.dumps({'type': 'connected', 'user_id': user_id})}\n\n"
@@ -2318,7 +2366,14 @@ async def collaboration_stream(current_user: dict = Depends(get_current_user)):
         except asyncio.CancelledError:
             pass
         finally:
-            _sse_clients.pop(user_id, None)
+            # Remove only this connection's own queue, not the whole
+            # per-user list -- one tab closing must never affect another
+            # still-live tab for the same user.
+            queues = _sse_clients.get(user_id)
+            if queues and q in queues:
+                queues.remove(q)
+                if not queues:
+                    _sse_clients.pop(user_id, None)
 
     return StreamingResponse(
         event_generator(),
@@ -2379,37 +2434,57 @@ async def claim_technique(payload: TechniqueClaimPayload, current_user: dict = D
         username = current_user.get("sub", "UNKNOWN")
         initials = current_user.get("initials", "??")
 
-        existing_lock = session.execute(text("""
-            SELECT tl.locked_by, u.username, u.initials, tl.locked_at, tl.expires_at
-            FROM public.technique_locks tl
-            JOIN public.users u ON tl.locked_by = u.id
-            WHERE tl.asset_id = :aid AND tl.t_code = :t
-        """), {"aid": asset_id, "t": t_code}).mappings().first()
-
-        if existing_lock and existing_lock["locked_by"] != user_id:
-            await _notify_user(existing_lock["locked_by"], "technique_access_attempt", {
-                "asset_id": asset_id, "t_code": t_code,
-                "attempted_by": username, "attempted_by_initials": initials,
-            })
-            return {
-                "status": "LOCKED",
-                "locked_by": existing_lock["username"],
-                "locked_by_initials": existing_lock["initials"],
-                "locked_at": existing_lock["locked_at"].isoformat() if existing_lock["locked_at"] else None,
-                "expires_at": existing_lock["expires_at"].isoformat() if existing_lock["expires_at"] else None,
-            }
-
         platform_check = session.execute(text("""
             SELECT 1 FROM mitre_techniques mt
             JOIN assets a ON a.id = :aid
             WHERE mt.t_code = :t
               AND mt.platforms IS NOT NULL
               AND mt.platforms != '[]'::jsonb
-              AND NOT (mt.platforms @> to_jsonb(ARRAY[a.os]::text[]))
+              AND a.os != 'Unknown'
+              AND NOT (mt.platforms @> to_jsonb(ARRAY[CASE WHEN a.os = 'Network' THEN 'Network Devices' ELSE a.os END]::text[]))
         """), {"aid": asset_id, "t": t_code}).first()
 
         if platform_check:
             return {"status": "PLATFORM_MISMATCH", "detail": f"{t_code} does not apply to this asset's OS"}
+
+        # Acquiring the lock has to be a single atomic statement, not a
+        # check-then-insert -- two concurrent callers both reading "no lock
+        # held" before either commits was exactly how two analysts could
+        # both get back "CLAIMED" for the same technique. Postgres takes a
+        # row lock on the conflicting key during INSERT ... ON CONFLICT, so
+        # the second caller's statement blocks until the first commits, then
+        # re-evaluates against the now-committed row -- only the row's real
+        # owner ever comes back in `locked_by`. Expired locks are already
+        # deleted above by _expire_technique_locks, so a conflict here always
+        # means a currently-valid lock (ours or someone else's).
+        lock_row = session.execute(text("""
+            INSERT INTO public.technique_locks (asset_id, t_code, locked_by, locked_at, expires_at)
+            VALUES (:aid, :t, :uid, NOW(), NOW() + INTERVAL '30 minutes')
+            ON CONFLICT (asset_id, t_code) DO UPDATE
+                SET expires_at = CASE WHEN technique_locks.locked_by = :uid
+                                       THEN NOW() + INTERVAL '30 minutes'
+                                       ELSE technique_locks.expires_at END,
+                    locked_at  = CASE WHEN technique_locks.locked_by = :uid
+                                       THEN NOW() ELSE technique_locks.locked_at END
+            RETURNING locked_by, locked_at, expires_at
+        """), {"aid": asset_id, "t": t_code, "uid": user_id}).mappings().first()
+        session.commit()
+
+        if lock_row["locked_by"] != user_id:
+            owner = session.execute(text(
+                "SELECT username, initials FROM public.users WHERE id = :id"
+            ), {"id": lock_row["locked_by"]}).mappings().first()
+            await _notify_user(lock_row["locked_by"], "technique_access_attempt", {
+                "asset_id": asset_id, "t_code": t_code,
+                "attempted_by": username, "attempted_by_initials": initials,
+            })
+            return {
+                "status": "LOCKED",
+                "locked_by": owner["username"] if owner else None,
+                "locked_by_initials": owner["initials"] if owner else None,
+                "locked_at": lock_row["locked_at"].isoformat() if lock_row["locked_at"] else None,
+                "expires_at": lock_row["expires_at"].isoformat() if lock_row["expires_at"] else None,
+            }
 
         session.execute(text("""
             INSERT INTO public.artifact_results (asset_id, t_code, technique_status, claimed_by, claimed_at, verdict, evidence_imported)
@@ -2422,14 +2497,6 @@ async def claim_technique(payload: TechniqueClaimPayload, current_user: dict = D
                     claimed_by  = COALESCE(artifact_results.claimed_by, :uid),
                     claimed_at  = COALESCE(artifact_results.claimed_at, NOW())
         """), {"aid": asset_id, "t": t_code, "uid": user_id})
-
-        session.execute(text("""
-            INSERT INTO public.technique_locks (asset_id, t_code, locked_by, locked_at, expires_at)
-            VALUES (:aid, :t, :uid, NOW(), NOW() + INTERVAL '30 minutes')
-            ON CONFLICT (asset_id, t_code) DO UPDATE
-                SET expires_at = NOW() + INTERVAL '30 minutes'
-        """), {"aid": asset_id, "t": t_code, "uid": user_id})
-
         session.commit()
 
         await _broadcast("technique_claimed", {
@@ -2737,9 +2804,14 @@ async def get_case_completion(case_name: str, current_user: dict = Depends(get_c
                     COUNT(ar.t_code) FILTER (WHERE ar.technique_status = 'CLOSED')          as closed,
                     COUNT(ar.t_code) FILTER (WHERE ar.technique_status = 'PENDING_REVIEW')  as pending_review,
                     COUNT(ar.t_code) FILTER (WHERE ar.technique_status = 'IN_PROGRESS')     as in_progress,
-                    COUNT(ar.t_code) FILTER (WHERE ar.verdict = 'Malicious')                as malicious,
-                    COUNT(ar.t_code) FILTER (WHERE ar.verdict = 'Clean')                    as clean,
-                    COUNT(ar.t_code) FILTER (WHERE ar.verdict = 'Undetermined')             as undetermined
+                    -- Verdicts are actually written as upper-case 'MALICIOUS'/'NON-MALICIOUS' by the
+                    -- analyst-facing save (see EvidenceWindow.jsx); 'Clean'/title-case 'Malicious' are
+                    -- never written by any code path, and interim automated-pipeline values ('Evidence
+                    -- Found', 'NO_ARTIFACTS', 'MANUAL_UPLOAD') and NULL all count as undetermined --
+                    -- same "not explicitly malicious/non-malicious" convention used in EvidenceWindow.jsx.
+                    COUNT(ar.t_code) FILTER (WHERE UPPER(ar.verdict) = 'MALICIOUS')                                    as malicious,
+                    COUNT(ar.t_code) FILTER (WHERE UPPER(ar.verdict) = 'NON-MALICIOUS')                                as clean,
+                    COUNT(ar.t_code) FILTER (WHERE COALESCE(UPPER(ar.verdict), '') NOT IN ('MALICIOUS', 'NON-MALICIOUS')) as undetermined
                 FROM public.assets a
                 LEFT JOIN public.artifact_results ar ON ar.asset_id = a.id
                 WHERE a.case_name = :name

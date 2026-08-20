@@ -46,7 +46,16 @@ class OrcaAgent:
             timeout=10,
         )
         r.raise_for_status()
-        self.agent_id = r.json()["agent_id"]
+        data = r.json()
+        self.agent_id = data["agent_id"]
+        # /register mints a fresh token scoped to this specific agent_id and
+        # returns it here -- the deploy-time bootstrap token (still in
+        # self.token at this point) only proves "some agent," not "this
+        # agent," so every call after this one switches to the scoped token.
+        scoped_token = data.get("token")
+        if scoped_token:
+            self.token = scoped_token
+            self.headers = {"Authorization": f"Bearer {self.token}"}
         print(f"[ORCA Agent] Registered as {self.agent_id} on {self.hostname}")
         print(f"[ORCA Agent] Capabilities: {self.capabilities}")
 

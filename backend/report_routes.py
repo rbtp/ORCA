@@ -352,7 +352,12 @@ async def export_report(
         "range_to":   range_to,
     }
 
-    safe_name = case_name.replace(" ", "_")
+    # Only stripping spaces left every other character-- including a quote,
+    # which could break out of the Content-Disposition filename value below
+    # -- untouched. Collapse anything that isn't alphanumeric/dash/underscore
+    # instead.
+    import re as _re
+    safe_name = _re.sub(r'[^\w\-]+', '_', case_name).strip('_') or "case"
     tmp_dir   = tempfile.mkdtemp()
     try:
         json_path = os.path.join(tmp_dir, "payload.json")

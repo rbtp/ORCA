@@ -4,6 +4,8 @@ export default function UserManagement() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
   
   // New User State
   const [newUser, setNewUser] = useState({
@@ -50,9 +52,10 @@ export default function UserManagement() {
     }
   };
 
-  const handleDeleteUser = async (username) => {
-    if (!window.confirm(`CONFIRM_PURGE_REQUEST: ${username.toUpperCase()}?`)) return;
-
+  const confirmDeleteUser = async () => {
+    const username = deleteTarget;
+    setDeleteTarget(null);
+    setDeleteConfirmText('');
     try {
       const res = await fetch(`${import.meta.env.VITE_API_URL}/api/admin/users/${username}`, {
         method: 'DELETE',
@@ -150,8 +153,8 @@ export default function UserManagement() {
                 <td>{u.role.toUpperCase()}</td>
                 <td><span style={ActivePulse} /> ACTIVE_LINK</td>
                 <td style={{ textAlign: 'right' }}>
-                  <button 
-                    onClick={() => handleDeleteUser(u.username)}
+                  <button
+                    onClick={() => { setDeleteTarget(u.username); setDeleteConfirmText(''); }}
                     style={DeleteBtnStyle}
                   >
                     [ PURGE ]
@@ -161,6 +164,47 @@ export default function UserManagement() {
             ))}
           </tbody>
         </table>
+      )}
+
+      {deleteTarget && (
+        <div style={ModalOverlay}>
+          <div style={ModalBox}>
+            <div style={{ color: '#ff4141', fontSize: 13, fontWeight: 'bold', marginBottom: 12, letterSpacing: 1 }}>
+              PURGE_OPERATOR — {deleteTarget.toUpperCase()}
+            </div>
+            <div style={{ color: '#aaa', fontSize: 11, marginBottom: 14, lineHeight: 1.5 }}>
+              This permanently revokes access for this operator. Type the username <strong style={{ color: '#fff' }}>{deleteTarget}</strong> to confirm.
+            </div>
+            <input
+              autoFocus
+              style={InputStyle}
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+              placeholder={deleteTarget}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 16 }}>
+              <button
+                onClick={() => { setDeleteTarget(null); setDeleteConfirmText(''); }}
+                style={CancelBtn}
+              >
+                ABORT
+              </button>
+              <button
+                disabled={deleteConfirmText !== deleteTarget}
+                onClick={confirmDeleteUser}
+                style={{
+                  background: deleteConfirmText === deleteTarget ? '#ff4141' : '#1a0000',
+                  border: 'none', color: deleteConfirmText === deleteTarget ? '#000' : '#ff4141',
+                  padding: '10px 20px', fontFamily: 'monospace', fontWeight: 'bold',
+                  cursor: deleteConfirmText === deleteTarget ? 'pointer' : 'not-allowed',
+                  opacity: deleteConfirmText === deleteTarget ? 1 : 0.4,
+                }}
+              >
+                CONFIRM_PURGE
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -182,3 +226,6 @@ const AddBtn = { background: 'none', border: '1px dashed #00ff41', color: '#00ff
 const CancelBtn = { background: 'none', border: '1px solid #ff4141', color: '#ff4141', padding: '10px 20px', cursor: 'pointer', fontFamily: 'monospace' };
 const SubmitBtn = { gridColumn: 'span 2', background: '#00ff41', border: 'none', color: '#000', padding: '12px', fontWeight: 'bold', cursor: 'pointer', fontFamily: 'monospace', marginTop: '10px' };
 const DeleteBtnStyle = { background: 'none', border: 'none', color: '#ff4141', cursor: 'pointer', fontFamily: 'monospace', fontSize: '10px', letterSpacing: '1px' };
+
+const ModalOverlay = { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 };
+const ModalBox = { width: 400, background: '#0a0a0a', border: '1px solid #ff4141', padding: 20, fontFamily: 'monospace' };

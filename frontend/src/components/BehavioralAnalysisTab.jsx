@@ -726,6 +726,11 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
 
               {flossSubTab === 'all' && (
                 <div>
+                  {(results?.floss?.total_strings || 0) > allStrings.length && (
+                    <div style={{ padding: '5px 14px', fontSize: 9, color: C.amber, background: 'rgba(255,170,0,0.06)', borderBottom: `1px solid ${C.border}` }}>
+                      ⚠ Showing first {allStrings.length.toLocaleString()} of {results.floss.total_strings.toLocaleString()} strings — search below only covers these.
+                    </div>
+                  )}
                   <div style={{ padding: '6px 14px', borderBottom: `1px solid ${C.border}`, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                     <input value={stringSearch} onChange={e => setStringSearch(e.target.value)}
                       placeholder="Search strings..."

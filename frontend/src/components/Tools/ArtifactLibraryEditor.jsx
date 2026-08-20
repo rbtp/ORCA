@@ -3,7 +3,6 @@ import axios from 'axios';
 
 const ArtifactLibraryEditor = () => {
   const [step, setStep] = useState(1);
-  const [mode, setMode] = useState('edit');
   const [showWizard, setShowWizard] = useState(false);
   const [wizardTarget, setWizardTarget] = useState('RAW'); 
   const [tCodes, setTCodes] = useState([]);
@@ -14,6 +13,7 @@ const ArtifactLibraryEditor = () => {
   const [testData, setTestData] = useState([]);
   const [activePayloadTab, setActivePayloadTab] = useState('RAW');
   const [statusMsg, setStatusMsg] = useState(null);
+  const [isNewMapping, setIsNewMapping] = useState(false);
   
   const [formData, setFormData] = useState({
     live_analysis: '',
@@ -46,26 +46,34 @@ const ArtifactLibraryEditor = () => {
   }, []);
 
   const handleNextToEdit = async () => {
-    if (mode === 'edit' && selectedTCode) {
-      setLoading(true);
-      try {
-        const res = await axios.get(`${API_BASE}/library/${selectedTCode}`, getAuthHeader());
-        setFormData({
-          live_analysis: res.data.live_analysis || '',
-          dead_disk_analysis: res.data.dead_disk_analysis || '',
-          collection_strategy: res.data.collection_strategy || '',
-          custom_vql: res.data.custom_vql || '',
-          surgical_yaml: res.data.surgical_yaml || ''
-        });
-        if (res.data.surgical_yaml) setActivePayloadTab('YAML');
-        setStep(2);
-      } catch (err) {
-        setStatusMsg({ type: 'error', text: 'TECHNIQUE_DATA_UNREACHABLE' });
-      } finally {
-        setLoading(false);
-      }
-    } else {
+    if (!selectedTCode) return;
+    setLoading(true);
+    try {
+      // Always fetch rather than asking the user to correctly self-report
+      // "does this T-code already have content?" -- GET /library/{t_code}
+      // already returns a blank-defaults shape for a T-code with no row
+      // yet, so this naturally prefills existing content or starts blank
+      // without a separate, error-prone mode choice. That choice used to
+      // be the actual bug: picking "add" for a T-code that already had
+      // real content skipped this fetch, so COMMIT_CHANGES submitted a
+      // blank form and silently wiped the existing shared library entry.
+      const res = await axios.get(`${API_BASE}/library/${selectedTCode}`, getAuthHeader());
+      const hasContent = !!(res.data.live_analysis || res.data.dead_disk_analysis ||
+        res.data.collection_strategy || res.data.custom_vql || res.data.surgical_yaml);
+      setIsNewMapping(!hasContent);
+      setFormData({
+        live_analysis: res.data.live_analysis || '',
+        dead_disk_analysis: res.data.dead_disk_analysis || '',
+        collection_strategy: res.data.collection_strategy || '',
+        custom_vql: res.data.custom_vql || '',
+        surgical_yaml: res.data.surgical_yaml || ''
+      });
+      setActivePayloadTab(res.data.surgical_yaml ? 'YAML' : 'RAW');
       setStep(2);
+    } catch (err) {
+      setStatusMsg({ type: 'error', text: 'TECHNIQUE_DATA_UNREACHABLE' });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -173,17 +181,6 @@ const ArtifactLibraryEditor = () => {
         <h2 style={{ fontSize: '24px', fontWeight: '900', color: '#00ff41', marginBottom: '30px' }}>ARTIFACT_LIBRARY_EDITOR</h2>
         <StatusBanner />
         <div style={{ maxWidth: '600px', border: '1px solid #111', padding: '30px', background: '#080808' }}>
-          <div style={{ marginBottom: '25px' }}>
-            <label style={{ display: 'block', fontSize: '10px', color: '#aaa', marginBottom: '10px' }}>INTENT_MODE</label>
-            <select 
-              style={{ width: '100%', padding: '12px', background: '#000', border: '1px solid #222', color: '#eee', fontFamily: 'monospace' }}
-              value={mode} 
-              onChange={(e) => setMode(e.target.value)}
-            >
-              <option value="edit">UPDATE_EXISTING_MAPPING</option>
-              <option value="add">INITIALIZE_NEW_MAPPING</option>
-            </select>
-          </div>
           <div style={{ marginBottom: '30px' }}>
             <label style={{ display: 'block', fontSize: '10px', color: '#aaa', marginBottom: '10px' }}>TECHNIQUE_SELECTION</label>
             <select 
@@ -215,7 +212,16 @@ const ArtifactLibraryEditor = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '40px', borderBottom: '1px solid #111', paddingBottom: '20px' }}>
         <div>
           <h2 style={{ fontSize: '24px', fontWeight: '900', color: '#00ff41', margin: 0 }}>LOGIC_CONFIG: {selectedTCode}</h2>
-          <div style={{ fontSize: '10px', color: '#aaa', marginTop: '5px' }}>GLOBAL_LIBRARY_UPLINK_ACTIVE</div>
+          <div style={{ fontSize: '10px', color: '#aaa', marginTop: '5px', display: 'flex', alignItems: 'center', gap: 10 }}>
+            GLOBAL_LIBRARY_UPLINK_ACTIVE
+            <span style={{
+              color: isNewMapping ? '#ffaa00' : '#00ff41',
+              border: `1px solid ${isNewMapping ? '#ffaa00' : '#00ff41'}`,
+              padding: '1px 6px', letterSpacing: 1,
+            }}>
+              {isNewMapping ? 'NEW_MAPPING — NOT YET IN LIBRARY' : 'EXISTING_MAPPING'}
+            </span>
+          </div>
         </div>
         <div style={{ display: 'flex', gap: '15px' }}>
           <button onClick={() => setStep(1)} style={{ background: 'none', border: '1px solid #222', color: '#bbb', padding: '8px 20px', cursor: 'pointer', fontFamily: 'monospace' }}>ABORT</button>
@@ -282,20 +288,28 @@ const ArtifactLibraryEditor = () => {
           <div style={{ color: '#bbb', marginBottom: '10px', fontSize: '10px' }}>DEBUG_CONSOLE_FEEDBACK</div>
           <pre style={{ color: '#00ff41', whiteSpace: 'pre-wrap', margin: 0 }}>{consoleOutput || "READY_FOR_VALIDATION..."}</pre>
           
-          {testData.length > 0 && (
+          {testData.length > 0 && (() => {
+            // A VQL `foreach`-style query can return rows with different
+            // column sets -- union every row's keys for the header instead
+            // of trusting testData[0], and look cells up by key (not
+            // Object.values' positional order) so a row missing a column
+            // renders blank there instead of shifting every later column
+            // left under the wrong header.
+            const columns = [...new Set(testData.flatMap(row => Object.keys(row)))];
+            return (
             <div style={{ marginTop: '20px', maxHeight: '400px', overflow: 'auto', borderTop: '1px solid #111', paddingTop: '10px' }}>
               <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse', fontSize: '11px', color: '#888' }}>
                 <thead>
                   <tr style={{ color: '#eee' }}>
-                    {Object.keys(testData[0]).map(key => <th key={key} style={{ padding: '5px', borderBottom: '1px solid #222' }}>{key}</th>)}
+                    {columns.map(key => <th key={key} style={{ padding: '5px', borderBottom: '1px solid #222' }}>{key}</th>)}
                   </tr>
                 </thead>
                 <tbody>
                   {testData.map((row, i) => (
                     <tr key={i}>
-                      {Object.values(row).map((val, j) => (
-                        <td key={j} style={{ padding: '5px', borderBottom: '1px solid #111' }}>
-                          {typeof val === 'object' ? JSON.stringify(val) : String(val)}
+                      {columns.map(key => (
+                        <td key={key} style={{ padding: '5px', borderBottom: '1px solid #111' }}>
+                          {!(key in row) ? '' : typeof row[key] === 'object' ? JSON.stringify(row[key]) : String(row[key])}
                         </td>
                       ))}
                     </tr>
@@ -303,7 +317,8 @@ const ArtifactLibraryEditor = () => {
                 </tbody>
               </table>
             </div>
-          )}
+            );
+          })()}
         </div>
       </div>
     </div>

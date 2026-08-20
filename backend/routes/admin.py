@@ -7,6 +7,10 @@ from typing import Optional
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
 
+# "agent" is minted automatically at /api/agent/register for deployed agent
+# hosts, never created through this operator-facing form.
+_ALLOWED_ROLES = {"admin", "analyst"}
+
 @router.get("/users")
 async def list_users(current_user: dict = Depends(get_current_user)):
     # Verify the requester is an admin
@@ -41,6 +45,9 @@ async def create_user(user_data: dict, current_user: dict = Depends(get_current_
     required = ["username", "password", "initials", "role"]
     if not all(k in user_data for k in required):
         raise HTTPException(status_code=400, detail="MISSING_USER_PARAMETERS")
+
+    if user_data["role"] not in _ALLOWED_ROLES:
+        raise HTTPException(status_code=400, detail=f"INVALID_ROLE — must be one of {sorted(_ALLOWED_ROLES)}")
 
     try:
         hashed_pw = get_password_hash(user_data["password"])

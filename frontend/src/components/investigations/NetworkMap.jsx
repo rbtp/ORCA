@@ -5,14 +5,19 @@ import { ICON_MAP } from '../../assets/iconManifest';
 // ─── Status badge config ─────────────────────────────────────────────────────
 // Derives a simple status from a node's asset data.
 // Extend this as verdict data becomes available on nodes.
-const getNodeStatus = (node, caseAssets, techniqueStatuses = {}) => {
+const getNodeStatus = (node, caseAssets, techniqueStatuses = new Map()) => {
   const asset = caseAssets.find(a => a.hostname === node.hostname);
   if (!asset) return 'UNKNOWN';
 
-  const assetTechniques = techniqueStatuses[asset.id];
-  if (!assetTechniques || Object.keys(assetTechniques).length === 0) return 'UNKNOWN';
+  // techniqueStatuses is a Map keyed "assetId:tCode" (see useCollaboration.js),
+  // not a plain object keyed by asset id -- pull every entry belonging to
+  // this asset out of it.
+  const entries = [];
+  techniqueStatuses.forEach((v, k) => {
+    if (k.startsWith(`${asset.id}:`)) entries.push(v);
+  });
+  if (entries.length === 0) return 'UNKNOWN';
 
-  const entries = Object.values(assetTechniques);
   if (entries.some(e => e.verdict === 'MALICIOUS')) return 'COMPROMISED';
 
   const statuses = entries.map(e => e.technique_status);
@@ -46,6 +51,7 @@ export default function NetworkMap({
   onInitiateLink,
   onDeleteNode,
   onInvestigateAsset,
+  onCreateAssetFromNode,
   investigatingAssetId,
   isFetchingTactics,
   caseAssets = [],
@@ -69,6 +75,14 @@ export default function NetworkMap({
   // this is discovered by trying to load it and watching for onerror/onload
   // (see the <image> element below), same as any optional-image pattern.
   const [hasBackground, setHasBackground] = useState(false);
+  // Mirrors searchQuery into a ref so the main D3 effect (which doesn't
+  // depend on searchQuery, to avoid rebuilding the whole graph on every
+  // keystroke) can still read the *current* search text when it re-creates
+  // node <g> elements for an unrelated reason (e.g. techniqueStatuses
+  // ticking from an SSE event) -- otherwise those fresh elements come back
+  // at opacity 1, silently wiping whatever dimming was active.
+  const searchQueryRef = useRef('');
+  searchQueryRef.current = searchQuery;
 
   // ─── Search highlight: dim non-matching nodes ────────────────────────────
   useEffect(() => {
@@ -244,6 +258,12 @@ export default function NetworkMap({
       .data(nodes)
       .join('g')
       .attr('cursor', 'grab')
+      .attr('opacity', d => {
+        const q = searchQueryRef.current.trim().toLowerCase();
+        if (!q) return 1;
+        const haystack = `${d.displayName || ''} ${d.hostname}`.toLowerCase();
+        return haystack.includes(q) ? 1 : 0.08;
+      })
       .on('click', (event, d) => {
         event.stopPropagation();
         setContextMenu(null);
@@ -387,12 +407,23 @@ export default function NetworkMap({
   }, [activeNodes, activeLinks, updateNodeData, caseAssets, techniqueStatuses, mapBackgroundUrl]);
 
   // ─── Flyout: resolve full asset data from caseAssets ────────────────────
+  // flyoutAsset falls back to the raw D3 node when there's no matching
+  // registered asset -- but that node's own `.id` is d3's internal id
+  // (set to hostname for the force-link accessor, see the main effect
+  // above), NOT a real asset database id. flyoutIsRegistered is the actual
+  // signal for "does this device have a real asset behind it."
   const flyoutAsset = selectedNode
     ? caseAssets.find(a => a.hostname === selectedNode.hostname) || selectedNode
     : null;
+  const flyoutIsRegistered = !!(selectedNode && caseAssets.some(a => a.hostname === selectedNode.hostname));
 
-  const isBeingInvestigated = flyoutAsset &&
+  const isBeingInvestigated = flyoutIsRegistered &&
     String(flyoutAsset.id) === String(investigatingAssetId);
+
+  // ─── Context menu: same registered/unregistered distinction ─────────────
+  const contextMenuAsset = contextMenu
+    ? caseAssets.find(a => a.hostname === contextMenu.node.hostname)
+    : null;
 
   // ─── Zoom controls ───────────────────────────────────────────────────────
   const handleZoom = useCallback((factor) => {
@@ -635,7 +666,7 @@ export default function NetworkMap({
             )}
           </div>
 
-          {/* Investigate button */}
+          {/* Investigate button — offers to create the asset first if this device isn't registered yet */}
           <div style={{ padding: '8px 12px', borderTop: '1px solid #111' }}>
             {isFetchingTactics && isBeingInvestigated ? (
               <div style={{ color: '#aaa', fontSize: '10px', textAlign: 'center', padding: '4px 0' }}>
@@ -644,20 +675,24 @@ export default function NetworkMap({
             ) : (
               <button
                 onClick={() => {
-                  if (onInvestigateAsset && flyoutAsset.id) {
-                    onInvestigateAsset(flyoutAsset.id);
+                  if (flyoutIsRegistered) {
+                    if (onInvestigateAsset) { onInvestigateAsset(flyoutAsset.id); setSelectedNode(null); }
+                  } else if (onCreateAssetFromNode) {
+                    onCreateAssetFromNode(selectedNode);
                     setSelectedNode(null);
                   }
                 }}
-                disabled={!flyoutAsset.id}
                 style={{
-                  width: '100%', padding: '7px', background: flyoutAsset.id ? '#00ff41' : '#111',
-                  color: flyoutAsset.id ? '#000' : '#333', border: 'none',
+                  width: '100%', padding: '7px',
+                  background: flyoutIsRegistered ? '#00ff41' : '#ffaa00',
+                  color: '#000', border: 'none',
                   fontFamily: 'monospace', fontSize: '10px', fontWeight: 'bold',
-                  cursor: flyoutAsset.id ? 'pointer' : 'not-allowed', letterSpacing: 1,
+                  cursor: 'pointer', letterSpacing: 1,
                 }}
               >
-                {isBeingInvestigated ? '[ INVESTIGATION_ACTIVE ]' : '[ OPEN_EVIDENCE_WINDOW ]'}
+                {flyoutIsRegistered
+                  ? (isBeingInvestigated ? '[ INVESTIGATION_ACTIVE ]' : '[ OPEN_EVIDENCE_WINDOW ]')
+                  : '[ NOT IN ASSET LIST — CREATE IT? ]'}
               </button>
             )}
           </div>
@@ -717,17 +752,17 @@ export default function NetworkMap({
             </div>
           </div>
 
-          {/* Investigate from context menu — only for registered assets */}
-          {contextMenu.node.id != null && onInvestigateAsset && (
+          {/* Investigate from context menu — offers to create the asset first if unregistered */}
+          {contextMenuAsset && onInvestigateAsset && (
             <>
               <div style={{ height: '1px', background: '#111', margin: '4px 0' }} />
-              {isFetchingTactics && String(investigatingAssetId) === String(contextMenu.node.id)
+              {isFetchingTactics && String(investigatingAssetId) === String(contextMenuAsset.id)
                 ? <div style={{ padding: '8px 12px', fontSize: '10px', color: '#aaa' }}>LOADING...</div>
                 : (
                   <MenuBtn
                     style={{ color: '#00ff41', fontWeight: 'bold' }}
                     onClick={() => {
-                      onInvestigateAsset(contextMenu.node.id);
+                      onInvestigateAsset(contextMenuAsset.id);
                       setContextMenu(null);
                     }}
                   >
@@ -735,6 +770,21 @@ export default function NetworkMap({
                   </MenuBtn>
                 )
               }
+            </>
+          )}
+
+          {!contextMenuAsset && onCreateAssetFromNode && (
+            <>
+              <div style={{ height: '1px', background: '#111', margin: '4px 0' }} />
+              <MenuBtn
+                style={{ color: '#ffaa00', fontWeight: 'bold' }}
+                onClick={() => {
+                  onCreateAssetFromNode(contextMenu.node);
+                  setContextMenu(null);
+                }}
+              >
+                NOT IN ASSET LIST — CREATE?
+              </MenuBtn>
             </>
           )}
 

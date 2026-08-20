@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import BehavioralAnalysisTab from '../BehavioralAnalysisTab';
+import { useAuth } from '../../context/AuthContext';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
 // ── Palette ────────────────────────────────────────────────────────────────
@@ -593,7 +594,7 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
     if (!caseName || !assetId) return;
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/threat-profile/${encodeURIComponent(caseName)}?asset_id=${assetId}`, { headers: getAuth() });
-      if (r.status === 401) { stopPoll(); return; }
+      if (r.status === 401) { stopPoll(); handle401(); return; }
       const d = await r.json();
       if (Array.isArray(d)) setTactics(d);
     } catch {}
@@ -1161,9 +1162,38 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
                   : <div style={{ color: C.greyDim, fontSize: 12, padding: 14 }}>NO_REGISTRY_DATA_COLLECTED</div>
               ) : (<>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 12px', borderBottom: `1px solid ${C.border}`, flexShrink: 0, gap: 8 }}>
-                <span style={{ color: C.greyDim, fontSize: 10 }}>{dispRows.length}/{filteredRows.length} RECORDS</span>
-                <input placeholder="FILTER..." value={filter} onChange={e => { setFilter(e.target.value); setVisibleCount(50); }}
-                  style={{ ...Inp, width: 180 }} />
+                {PAGINATED_TCODES.has(sel) ? (
+                  // Large categories (event logs, SRUM, etc.) are paginated
+                  // server-side -- evidenceRows here is only the current
+                  // ~100-row page, so the plain client-side FILTER box below
+                  // would silently only ever search whatever page happens to
+                  // be loaded instead of the full evTotal result set. This
+                  // wires the same server-side search already implemented
+                  // in loadEvidence(tCode, page, search) and already used by
+                  // ArtifactTreeTab's identical evidence view below.
+                  <>
+                    <span style={{ color: C.greyDim, fontSize: 10 }}>{evTotal.toLocaleString()} RECORDS</span>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input
+                        placeholder="SEARCH..."
+                        value={evSearchInput}
+                        onChange={e => setEvSearchInput(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') { setEvSearch(evSearchInput); loadEvidence(sel, 0, evSearchInput); } }}
+                        style={{ ...Inp, width: 200 }}
+                      />
+                      <button onClick={() => { setEvSearch(evSearchInput); loadEvidence(sel, 0, evSearchInput); }}
+                        style={{ ...Btn, fontSize: 9, padding: '3px 8px' }}>GO</button>
+                      {evSearch && <button onClick={() => { setEvSearch(''); setEvSearchInput(''); loadEvidence(sel, 0, ''); }}
+                        style={{ ...Btn, fontSize: 9, padding: '3px 8px', color: C.greyDim }}>CLR</button>}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ color: C.greyDim, fontSize: 10 }}>{dispRows.length}/{filteredRows.length} RECORDS</span>
+                    <input placeholder="FILTER..." value={filter} onChange={e => { setFilter(e.target.value); setVisibleCount(50); }}
+                      style={{ ...Inp, width: 180 }} />
+                  </>
+                )}
               </div>
               {isGrouped && (
                 <div style={{ display: 'flex', gap: 4, padding: '6px 12px', borderBottom: `1px solid #0a0a0a`, overflowX: 'auto', flexShrink: 0 }}>
@@ -1188,13 +1218,14 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
               )}
               <div style={{ flex: 1, overflowY: 'auto', padding: 12 }} onContextMenu={handleCtx}
                 onScroll={e => {
+                  if (PAGINATED_TCODES.has(sel)) return; // server-side, no scroll-load
                   const el = e.currentTarget;
                   if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200)
                     setVisibleCount(c => Math.min(c + 50, filteredRows.length));
                 }}>
                 {loadingEv ? (
                   <div style={{ color: C.green, fontSize: 12 }}>DECRYPTING_STORAGE_BLOCKS...</div>
-                ) : dispRows.length === 0 ? (
+                ) : (PAGINATED_TCODES.has(sel) ? evidenceRows : dispRows).length === 0 ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                     {curTactic?.evidence_imported ? (
                       <div style={{ color: C.greyDim, fontSize: 12 }}>NO_ROWS_MATCH_FILTER</div>
@@ -1267,12 +1298,12 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                    {dispRows.map((item, idx) => {
+                    {(PAGINATED_TCODES.has(sel) ? evidenceRows : dispRows).map((item, idx) => {
                       const isFallback = item._orca_fallback === true;
                       return (
                         <div key={idx} style={{ background: C.bgCard, border: `1px solid ${isFallback ? '#ffaa00' : C.border}`, padding: 12, position: 'relative' }}>
                           <div style={{ position: 'absolute', top: -9, right: 8, background: isFallback ? '#ffaa00' : C.green, color: '#000', fontSize: 9, padding: '1px 5px', fontWeight: 'bold' }}>
-                            INDEX_{idx.toString().padStart(3, '0')}
+                            INDEX_{(PAGINATED_TCODES.has(sel) ? evPage * EV_PAGE_SIZE + idx : idx).toString().padStart(3, '0')}
                           </div>
                           {isFallback && (
                             <div style={{ marginBottom: 8, padding: '4px 8px', background: '#1a1200', border: '1px solid #ffaa00', color: '#ffaa00', fontSize: 10 }}>
@@ -2483,6 +2514,7 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
   const [dumpDest, setDumpDest]             = useState('C:\\dumps\\');
   const [isDumping, setIsDumping]           = useState(false);
   const readerRef = useRef(null);
+  const evtSourceRef = useRef(null);
   const [agents, setAgents]               = useState([]);
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [browseOpen, setBrowseOpen]       = useState(false);
@@ -2534,7 +2566,14 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
 
   const VOL3 = 'C:\\Users\\Sentinel\\Desktop\\Tests\\ORCAWEB\\backend\\bin\\remora\\volatility3';
   const addLog = (m, type = 'info') => setLogs(p => [{ t: ts(), m, type }, ...p].slice(0, 400));
-  const stopStream = () => { try { readerRef.current?.cancel(); } catch {} readerRef.current = null; setIsRunning(false); };
+  const stopStream = () => {
+    try { readerRef.current?.cancel(); } catch {} readerRef.current = null;
+    // The dispatch-to-agent path's EventSource was never stored anywhere,
+    // so STOP had no way to actually close it -- results kept streaming in
+    // and mutating state after the UI had already reverted to idle.
+    try { evtSourceRef.current?.close(); } catch {} evtSourceRef.current = null;
+    setIsRunning(false);
+  };
 
   const handleDispatchToAgent = async () => {
     if (!imgPath.trim()) { addLog('MEMORY_IMAGE path required.', 'error'); return; }
@@ -2554,6 +2593,7 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
       const evtSource = new EventSource(
         `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream`
       );
+      evtSourceRef.current = evtSource;
       let pluginsRun = 0, totalRows = 0, curPlugin = null;
       evtSource.onmessage = (e) => {
         try {
@@ -2576,11 +2616,11 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
           else if (evt.type === 'done') {
             addLog('AGENT SCAN COMPLETE', 'success'); setIsRunning(false);
             if (onSummaryUpdate) onSummaryUpdate('memory', { pluginsRun, totalRows, lastPlugin: curPlugin });
-            evtSource.close();
+            evtSource.close(); evtSourceRef.current = null;
           }
         } catch {}
       };
-      evtSource.onerror = () => { addLog('Agent connection lost.', 'error'); setIsRunning(false); evtSource.close(); };
+      evtSource.onerror = () => { addLog('Agent connection lost.', 'error'); setIsRunning(false); evtSource.close(); evtSourceRef.current = null; };
     } catch (e) { addLog('DISPATCH_ERROR: ' + e.message, 'error'); setIsRunning(false); }
   };
 
@@ -3063,6 +3103,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
   const [logs, setLogs]             = useState([]);
   const [filter, setFilter]         = useState('');
   const readerRef = useRef(null);
+  const evtSourceRef = useRef(null);
   const [agents, setAgents]               = useState([]);
   const [selectedAgent, setSelectedAgent] = useState(null);
 
@@ -3082,7 +3123,11 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
   const CLAM = 'C:\\Users\\Sentinel\\Desktop\\Tests\\ORCAWEB\\backend\\bin\\clamav';
 
   const addLog = (m, type = 'info') => setLogs(p => [{ t: ts(), m, type }, ...p].slice(0, 500));
-  const stopScan = () => { try { readerRef.current?.cancel(); } catch {} readerRef.current = null; setIsScanning(false); };
+  const stopScan = () => {
+    try { readerRef.current?.cancel(); } catch {} readerRef.current = null;
+    try { evtSourceRef.current?.close(); } catch {} evtSourceRef.current = null;
+    setIsScanning(false);
+  };
 
   useEffect(() => {
     if (analysisMode !== 'DEAD_DISK_LOCAL') return;
@@ -3109,11 +3154,12 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
       const evtSource = new EventSource(
         `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream`
       );
+      evtSourceRef.current = evtSource;
       evtSource.onmessage = (e) => {
         try {
           const evt = JSON.parse(e.data);
           if (evt.type === 'log') addLog(evt.data.message || String(evt.data));
-          else if (evt.type === 'error') { addLog(evt.data.message || String(evt.data), 'error'); setIsScanning(false); evtSource.close(); }
+          else if (evt.type === 'error') { addLog(evt.data.message || String(evt.data), 'error'); setIsScanning(false); evtSource.close(); evtSourceRef.current = null; }
           else if (evt.type === 'done') {
             setScanned(evt.data.scanned_files); setInfected(evt.data.infected_files);
             setThreats(evt.data.threats || []);
@@ -3121,11 +3167,11 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
               evt.data.infected_files > 0 ? 'error' : 'success');
             setIsScanning(false);
             if (onSummaryUpdate) onSummaryUpdate('av', { scanned: evt.data.scanned_files, infected: evt.data.infected_files });
-            evtSource.close();
+            evtSource.close(); evtSourceRef.current = null;
           }
         } catch {}
       };
-      evtSource.onerror = () => { addLog('Agent connection lost.', 'error'); setIsScanning(false); evtSource.close(); };
+      evtSource.onerror = () => { addLog('Agent connection lost.', 'error'); setIsScanning(false); evtSource.close(); evtSourceRef.current = null; };
     } catch (e) { addLog('DISPATCH_ERROR: ' + e.message, 'error'); setIsScanning(false); }
   };
 
@@ -3158,6 +3204,11 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
     stopScan();
     setIsScanning(true); setThreats([]); setScanned(null); setInfected(null); setLogs([]);
     addLog(`Starting ClamAV scan: ${scanPath}`);
+    // Mirrors the `threats` state locally -- the 'done' handler below runs
+    // inside this same closure, so `threats` there would still be the `[]`
+    // it was reset to above, not what setThreats accumulated via SSE. This
+    // is what actually gets persisted to the DB.
+    let scannedThreats = [];
     try {
       const resp = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/scan/clam`, {
         method: 'POST', headers: getAuth(),
@@ -3176,7 +3227,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
           try {
             const evt = JSON.parse(line.slice(6));
             if (evt.type === 'log') addLog(evt.data);
-            else if (evt.type === 'threat') { setThreats(p => [...p, evt.data]); addLog(evt.data, 'error'); }
+            else if (evt.type === 'threat') { scannedThreats = [...scannedThreats, evt.data]; setThreats(scannedThreats); addLog(evt.data, 'error'); }
             else if (evt.type === 'summary') addLog(evt.data);
             else if (evt.type === 'done') {
               setScanned(evt.data.scanned_files); setInfected(evt.data.infected_files);
@@ -3184,7 +3235,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
                 evt.data.infected_files > 0 ? 'error' : 'success');
               setIsScanning(false);
               if (onSummaryUpdate) onSummaryUpdate('av', { scanned: evt.data.scanned_files, infected: evt.data.infected_files });
-              fetch(`${import.meta.env.VITE_API_URL}/api/mitre/scan/clam/results/save`, { method: 'POST', headers: getAuth(), body: JSON.stringify({ asset_id: Number(assetId), scan_path: scanPath, scanned: evt.data.scanned_files, infected: evt.data.infected_files, threats }) }).catch(() => {});
+              fetch(`${import.meta.env.VITE_API_URL}/api/mitre/scan/clam/results/save`, { method: 'POST', headers: getAuth(), body: JSON.stringify({ asset_id: Number(assetId), scan_path: scanPath, scanned: evt.data.scanned_files, infected: evt.data.infected_files, threats: scannedThreats }) }).catch(() => {});
             }
             else if (evt.type === 'error') { addLog(evt.data, 'error'); setIsScanning(false); }
           } catch {}
@@ -3310,6 +3361,7 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
   const [sortCol, setSortCol]         = useState('severity');
   const [sortDir, setSortDir]         = useState('asc');
   const readerRef                       = useRef(null);
+  const evtSourceRef                    = useRef(null);
   const [agents, setAgents]             = useState([]);
   const [selectedAgent, setSelectedAgent] = useState(null);
 
@@ -3320,7 +3372,11 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
   };
 
   const addLog = (m, type = 'info') => setLogs(p => [{ t: ts(), m, type }, ...p].slice(0, 500));
-  const stopScan = () => { try { readerRef.current?.cancel(); } catch {} readerRef.current = null; setIsScanning(false); };
+  const stopScan = () => {
+    try { readerRef.current?.cancel(); } catch {} readerRef.current = null;
+    try { evtSourceRef.current?.close(); } catch {} evtSourceRef.current = null;
+    setIsScanning(false);
+  };
 
   useEffect(() => {
     if (analysisMode !== 'DEAD_DISK_LOCAL') return;
@@ -3348,11 +3404,12 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
       const evtSource = new EventSource(
         `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream`
       );
+      evtSourceRef.current = evtSource;
       evtSource.onmessage = (e) => {
         try {
           const evt = JSON.parse(e.data);
           if (evt.type === 'log') addLog(evt.data.message || String(evt.data));
-          else if (evt.type === 'error') { addLog(evt.data.message || String(evt.data), 'error'); setIsScanning(false); evtSource.close(); }
+          else if (evt.type === 'error') { addLog(evt.data.message || String(evt.data), 'error'); setIsScanning(false); evtSource.close(); evtSourceRef.current = null; }
           else if (evt.type === 'done') {
             const vulnData = evt.data.vulnerabilities || [];
             const counts = { total: vulnData.length, critical: 0, high: 0, medium: 0, low: 0 };
@@ -3367,11 +3424,11 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
             if (onScanComplete) onScanComplete(counts);
             addLog(`GRYPE COMPLETE — ${vulnData.length} vulnerabilities found`, vulnData.length > 0 ? 'error' : 'success');
             setIsScanning(false);
-            evtSource.close();
+            evtSource.close(); evtSourceRef.current = null;
           }
         } catch {}
       };
-      evtSource.onerror = () => { addLog('Agent connection lost.', 'error'); setIsScanning(false); evtSource.close(); };
+      evtSource.onerror = () => { addLog('Agent connection lost.', 'error'); setIsScanning(false); evtSource.close(); evtSourceRef.current = null; };
     } catch (e) { addLog('DISPATCH_ERROR: ' + e.message, 'error'); setIsScanning(false); }
   };
 
@@ -3895,6 +3952,7 @@ const ReportTab = ({ caseName, assetId }) => {
 // switching tabs — their state, refs, and active SSE streams all survive.
 // ══════════════════════════════════════════════════════════════════════════════
 const EvidenceWindow = ({ assetId, assetName, tCode, isOpen, onClose, tacticList, caseName, collab, analysisMode = 'UNKNOWN', assetIp = '', caseType = 'INVESTIGATION', assetType = '', localDir = null, memSummary: memSummaryProp = null, avSummary: avSummaryProp = null, vulnSummary: vulnSummaryProp = null, behavioralSummary: behavioralSummaryProp = null, onSummaryUpdate }) => {
+  const { handle401 } = useAuth();
   const isIR = caseType === 'INCIDENT_RESPONSE';
   const NETWORK_TYPES = ['FIREWALL', 'ROUTER', 'SWITCH', 'NETWORK', 'AP', 'LOAD_BALANCER', 'PROXY', 'VPN', 'IDS', 'IPS', 'WAF'];
   const isNetworkDevice = NETWORK_TYPES.some(t => (assetType || '').toUpperCase().includes(t));

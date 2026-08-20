@@ -167,10 +167,12 @@ export default function IOCManager() {
 
   const deleteIoc = async (ioc) => {
     try {
-      await fetch(`${API}/api/ioc/library/${ioc.id}`, { method: 'DELETE', credentials: 'include' });
+      const res = await fetch(`${API}/api/ioc/library/${ioc.id}`, { method: 'DELETE', credentials: 'include' });
+      if (!res.ok) { setError('DELETE_FAILED'); return; }
       setIocs(iocs.filter(i => i.id !== ioc.id));
       setSelectedIoc(null);
-    } catch {}
+      setError('');
+    } catch { setError('NETWORK_ERROR'); }
   };
 
   const pct = scanProgress.total > 0 ? Math.floor((scanProgress.index / scanProgress.total) * 100) : 0;
@@ -252,7 +254,7 @@ export default function IOCManager() {
                   return (
                     <tr
                       key={ioc.id}
-                      onClick={() => setSelectedIoc(ioc)}
+                      onClick={() => { setSelectedIoc(ioc); setError(''); }}
                       style={{
                         borderBottom: `1px solid ${C.border}`, cursor: 'pointer',
                         background: selectedIoc?.id === ioc.id ? '#0e0e0e' : 'transparent',
@@ -283,7 +285,7 @@ export default function IOCManager() {
         <aside style={{ background: C.bg, border: `1px solid ${C.border}`, padding: 18, alignSelf: 'start', position: 'sticky', top: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, alignItems: 'center' }}>
             <span style={{ color: C.green, fontSize: 11, fontWeight: 'bold', letterSpacing: 1 }}>[ INDICATOR ]</span>
-            <button onClick={() => setSelectedIoc(null)} style={{ background: 'none', border: 'none', color: C.greyDim, cursor: 'pointer', fontSize: 14 }}>×</button>
+            <button onClick={() => { setSelectedIoc(null); setError(''); }} style={{ background: 'none', border: 'none', color: C.greyDim, cursor: 'pointer', fontSize: 14 }}>×</button>
           </div>
           <Field label="TYPE" value={(selectedIoc.indicator_type || '').replace('HASH_', '')} color={C.green} />
           <Field label="SEVERITY" value={selectedIoc.severity} color={selectedIoc.severity === 'CRITICAL' ? C.red : C.amber} />
@@ -317,6 +319,7 @@ export default function IOCManager() {
             <div style={{ color: C.amber, fontSize: 10, marginBottom: 14 }}>Scan in progress…</div>
           )}
 
+          {error && <div style={{ color: C.red, fontSize: 10, marginBottom: 8 }}>{error}</div>}
           <button
             onClick={() => deleteIoc(selectedIoc)}
             style={{ width: '100%', background: 'transparent', border: `1px solid ${C.red}`, color: C.red, padding: 8, fontSize: 10, cursor: 'pointer', letterSpacing: 1 }}

@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import InvestigationGallery from './InvestigationGallery';
 import CaseDetail from './CaseDetail';
+import { useAuth } from '../../context/AuthContext';
 
 export default function InvestigationWorkspace({ activeNodes, activeLinks, updateNodeData, pendingCase, onPendingCaseHandled }) {
+  const { handle401 } = useAuth();
   const [mitreData, setMitreData] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [cases, setCases] = useState([]);
@@ -25,6 +27,7 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
   const [avSummaries, setAvSummaries]     = useState({});  // { [assetId]: avSummary }
   const [vulnSummaries, setVulnSummaries] = useState({});  // { [assetId]: vulnSummary }
   const [dirToast, setDirToast]           = useState(null); // host path shown after local dir creation
+  const [errorToast, setErrorToast]       = useState(null); // message shown when an optimistic case add/delete fails
 
   const isConnected = status === "CONNECTED_STABLE";
   const API_BASE = `${import.meta.env.VITE_API_URL}/api/mitre`;
@@ -66,7 +69,7 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
         credentials: 'include',
         headers: getAuthHeaders(),
       });
-      if (r.status === 401) return;
+      if (r.status === 401) { stopProgressPolling(assetId); handle401(); return; }
       if (r.ok) {
         const data = await r.json();
         setPkgProgress(prev => ({ ...prev, [String(assetId)]: data }));
@@ -144,30 +147,53 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
     onPendingCaseHandled && onPendingCaseHandled();
   }, [pendingCase]);
 
+  const showErrorToast = (message) => {
+    setErrorToast(message);
+    setTimeout(() => setErrorToast(null), 6000);
+  };
+
   const handleAddCase = async (newCase) => {
     setCases(prev => [...prev, newCase]);
     try {
       const res = await fetch(`${API_BASE}/cases`, {
         method: 'POST', credentials: 'include', headers: getAuthHeaders(), body: JSON.stringify(newCase),
       });
-      if (res.ok && newCase.create_local_dir) {
+      if (!res.ok) {
+        setCases(prev => prev.filter(c => c !== newCase));
+        const err = await res.json().catch(() => ({}));
+        showErrorToast(`Failed to create investigation: ${err.detail || res.status}`);
+        return;
+      }
+      if (newCase.create_local_dir) {
         const data = await res.json().catch(() => ({}));
         if (data.host_path) {
           setDirToast(data.host_path);
           setTimeout(() => setDirToast(null), 6000);
         }
       }
-    } catch (err) { console.error("DB_COMMIT_ERROR:", err); }
+    } catch (err) {
+      setCases(prev => prev.filter(c => c !== newCase));
+      showErrorToast(`Failed to create investigation: ${err.message}`);
+    }
   };
 
   const handleDeleteCase = async (caseName) => {
     // Confirmation is handled by InvestigationGallery's 4-step modal
+    const removed = cases.find(c => (c.case_name || c.name) === caseName);
     setCases(prev => prev.filter(c => (c.case_name || c.name) !== caseName));
     try {
-      await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}`, {
+      const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}`, {
         method: 'DELETE', credentials: 'include', headers: getAuthHeaders()
       });
-    } catch (err) { console.error("DB_DELETE_ERROR:", err); }
+      if (!res.ok) {
+        if (removed) setCases(prev => [...prev, removed]);
+        const err = await res.json().catch(() => ({}));
+        showErrorToast(`Failed to delete investigation: ${err.detail || res.status}`);
+      }
+    } catch (err) {
+      if (removed) setCases(prev => [...prev, removed]);
+      showErrorToast(`Failed to delete investigation: ${err.message}`);
+    }
   };
 
   return (
@@ -180,6 +206,14 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
           <div style={{ fontWeight: 'bold', marginBottom: 4, letterSpacing: 1 }}>✓ WORKING DIRECTORY CREATED</div>
           <div style={{ color: '#aaa', wordBreak: 'break-all' }}>{dirToast}</div>
           <div style={{ color: '#bbb', fontSize: 9, marginTop: 6 }}>Drop evidence files here — asset subfolders created automatically</div>
+        </div>
+      )}
+      {errorToast && (
+        <div style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 9999,
+          background: '#1a0a0a', border: '1px solid #ff4444', padding: '12px 18px',
+          fontFamily: 'monospace', fontSize: 11, color: '#ff4444', maxWidth: 420,
+          boxShadow: '0 0 20px rgba(255,68,68,0.15)' }}>
+          <div style={{ fontWeight: 'bold', letterSpacing: 1 }}>✗ {errorToast}</div>
         </div>
       )}
       <div style={{
