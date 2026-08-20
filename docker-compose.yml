@@ -66,6 +66,15 @@ services:
       - POSTGRES_PASSWORD=${DB_PASSWORD}
     volumes:
       - orca-postgres-data:/var/lib/postgresql/data
+      # Postgres's own official image runs any *.sql it finds here exactly
+      # once -- only during a genuinely fresh volume's first initialization,
+      # never again on a normal restart (confirmed live). Without this,
+      # nothing ever creates the schema on a brand-new volume at all --
+      # confirmed live the hard way: a fresh install got a backend crash
+      # loop (AttributeError: mitre_groups) because reflection found zero
+      # tables. schema.sql is pure DDL (no seed data), so re-running it here
+      # is exactly as safe as running it once.
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     networks:
       - orca-net
     healthcheck:
