@@ -1,0 +1,18 @@
+name: ORCA.Bridge.Collector
+description: Direct mapping of T-Codes to Forensic Artifacts
+parameters:
+  - name: TargetName
+    type: string
+  - name: TCode
+    type: string
+  - name: Device
+    default: "C:"
+sources:
+  - query: |
+      SELECT 
+          FullPath, 
+          Size, 
+          Mtime, 
+          Ctime,
+          dict(MITRE_TCODE=TCode, SourceArtifact=TargetName) AS MappingData
+      FROM glob(globs=Device + '/**/' + TargetName + '*')

@@ -1,0 +1,20 @@
+name: Windows.Custom.KapeFiles
+description: |
+  Surgical KAPE target collector for ORCAWEB.
+parameters:
+  - name: CollectionTargets
+    type: json_array
+    default: "[]"
+  - name: Device
+    default: "C:"
+sources:
+  - query: |
+      SELECT * FROM foreach(
+          row=CollectionTargets,
+          query={
+              SELECT * FROM Artifact.Windows.KapeFiles.Targets(
+                  Names=item,
+                  Device=Device
+              )
+          }
+      )

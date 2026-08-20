@@ -1,0 +1,21 @@
+name: Windows.Custom.KapeFiles
+parameters:
+  - name: CollectionTargets
+    type: LIST
+  - name: Device
+    default: "C:/"
+
+sources:
+  - query: |
+      -- Define the target path
+      LET PS_Path <= Device + "Users/*/AppData/Roaming/Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt"
+
+      -- Only run if the T-Code is in the list
+      SELECT 
+          FullPath, 
+          Size, 
+          Mtime,
+          -- Explicitly tag the output so the normalizer sees 'Trigger'
+          if(condition='Trigger' IN CollectionTargets, then='Trigger', else='Unknown') AS TCode
+      FROM glob(globs=PS_Path)
+      WHERE 'Trigger' IN CollectionTargets OR 'T1059' IN CollectionTargets

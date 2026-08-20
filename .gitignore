@@ -28,8 +28,16 @@ frontend/node_modules/
 # Frontend build output
 frontend/dist/
 
-# Binaries (Velociraptor, ClamAV, Grype, Syft, psexec)
-backend/bin/
+# ClamAV signature definitions -- updated by freshclam at runtime, not
+# vendored (large, frequently stale the moment they're committed). The
+# ClamAV engine itself, Velociraptor, Grype/Syft, Arsenal, Volatility3 (incl.
+# its symbol tables) etc. under backend/bin/ ARE committed -- ORCA is meant
+# to be self-contained on a disconnected network except for these
+# definitions and the MITRE ATT&CK JSON import (see backend/data/).
+backend/bin/clamav/**/*.cvd
+backend/bin/clamav/**/*.cld
+backend/bin/clamav/**/*.sign
+backend/bin/clamav/**/freshclam.dat
 
 # Logs
 *.log
