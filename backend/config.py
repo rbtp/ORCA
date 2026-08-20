@@ -83,6 +83,18 @@ class _Config:
     # ── Parallel collection ───────────────────────────────────────────────────
     VR_MAX_WORKERS: int = int(os.environ.get("ORCA_VR_MAX_WORKERS", "5"))
 
+    # ── Reference data ────────────────────────────────────────────────────────
+    # MITRE ATT&CK STIX 2.1 bundle (e.g. enterprise-attack.json from
+    # https://github.com/mitre-attack/attack-stix-data) -- deliberately NOT
+    # vendored into the repo like everything under bin/ is. The operator drops
+    # it here (or points ORCA_MITRE_ATTACK_JSON elsewhere); mitre_import.py
+    # loads it into mitre_groups/software/techniques/tactics/mitigations/
+    # relationships automatically on first boot if those tables are empty.
+    MITRE_ATTACK_JSON: str = os.environ.get(
+        "ORCA_MITRE_ATTACK_JSON",
+        os.path.join(_BASE, "data", "mitre-attack.json")
+    )
+
 
 cfg = _Config()
 

@@ -78,6 +78,20 @@ app.include_router(deploy_router)
 from velociraptor_manager import router as velo_router
 app.include_router(velo_router)
 
+
+@app.on_event("startup")
+async def _auto_import_mitre_attack_data():
+    # Air-gapped/fresh-install convenience: if an operator has dropped a
+    # MITRE ATT&CK STIX bundle at cfg.MITRE_ATTACK_JSON (or pointed
+    # ORCA_MITRE_ATTACK_JSON elsewhere), load it automatically the first
+    # time the MITRE tables are empty. Never blocks/fails startup -- see
+    # mitre_import.auto_import_if_empty's own error handling.
+    from mitre_import import auto_import_if_empty
+    await asyncio.get_event_loop().run_in_executor(
+        None, auto_import_if_empty, db.engine, cfg.MITRE_ATTACK_JSON
+    )
+
+
 VR_EXE_LOCAL   = cfg.VR_EXE_LOCAL    # executed in-container (run_technique.py against locally mounted evidence)
 VR_EXE_WINDOWS = cfg.VR_EXE_WINDOWS  # pushed to / executed on remote Windows targets
 DATA_ROOT = cfg.DATA_ROOT

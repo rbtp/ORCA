@@ -39,6 +39,11 @@ backend/bin/clamav/**/*.cld
 backend/bin/clamav/**/*.sign
 backend/bin/clamav/**/freshclam.dat
 
+# MITRE ATT&CK STIX bundle -- same reasoning, operator-supplied at deploy
+# time (see backend/data/README.md), not vendored.
+backend/data/mitre-attack.json
+backend/data/*.json
+
 # Logs
 *.log
 claude_logs/
