@@ -35,7 +35,8 @@ services:
     networks:
       - orca-net
     depends_on:
-      - orca-postgres
+      orca-postgres:
+        condition: service_healthy
 
   orca-frontend:
     build:
@@ -67,6 +68,20 @@ services:
       - orca-postgres-data:/var/lib/postgresql/data
     networks:
       - orca-net
+    healthcheck:
+      # A fresh volume's first-ever boot runs initdb + creates the DB, which
+      # can take well past `depends_on`'s plain container-started check --
+      # orca-backend used to race this (its own DB-connect retry logic could
+      # exhaust its budget before Postgres was actually ready, crash, and
+      # get restarted by `restart: unless-stopped` -- a "goes down and back
+      # up once on first boot" symptom that only shows up on a truly fresh
+      # volume, never on one that's already initialized). depends_on above
+      # now waits for this healthcheck instead of racing it.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orca_db"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
 networks:
   orca-net:

@@ -92,6 +92,18 @@ async def _auto_import_mitre_attack_data():
     )
 
 
+@app.on_event("startup")
+async def _auto_bootstrap_first_admin():
+    # A fresh database has zero rows in `users` and no seed data -- and the
+    # only endpoint that creates one (admin.py's create_user) requires an
+    # existing admin to call it, which is impossible on a truly fresh
+    # install. Creates exactly one admin account the first time `users` is
+    # found empty; never touches it again after that. See
+    # bootstrap_admin.auto_bootstrap_if_empty's own error handling.
+    from bootstrap_admin import auto_bootstrap_if_empty
+    await asyncio.get_event_loop().run_in_executor(None, auto_bootstrap_if_empty, db.engine)
+
+
 VR_EXE_LOCAL   = cfg.VR_EXE_LOCAL    # executed in-container (run_technique.py against locally mounted evidence)
 VR_EXE_WINDOWS = cfg.VR_EXE_WINDOWS  # pushed to / executed on remote Windows targets
 DATA_ROOT = cfg.DATA_ROOT
