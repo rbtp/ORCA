@@ -6,6 +6,7 @@ Called by ingest_routes.py when analyst requests a package download.
 """
 
 import os
+import re
 import json
 import uuid
 import base64
@@ -27,18 +28,44 @@ PACKAGE_TOKEN_TTL_HOURS = 24
 PS1_TEMPLATE_PATH        = Path(__file__).parent / "run_orca_collection.ps1"
 PS1_TRIAGE_TEMPLATE_PATH = Path(__file__).parent / "run_orca_triage.ps1"
 
+# An analyst-supplied remote staging directory gets interpolated directly
+# into a generated PowerShell script (see generate_bootstrap_ps1) -- this is
+# NOT about trusting the analyst (they're already authenticated and this
+# isn't materially more dangerous than the VQL/YAML they can already submit
+# into the same script), it's about catching a typo or copy-paste mistake
+# before it becomes a broken or unexpected command on someone's machine.
+# Absolute Windows path, drive letter, no quotes/backticks/$/semicolons/
+# pipes -- deliberately conservative rather than trying to enumerate every
+# unsafe character.
+_SAFE_WINDOWS_PATH = re.compile(r'^[A-Za-z]:\\[A-Za-z0-9 ._\\-]+$')
+
+
+def validate_remote_dir(remote_dir: Optional[str]) -> Optional[str]:
+    """Returns the trimmed path if valid/empty, raises ValueError otherwise."""
+    if not remote_dir or not remote_dir.strip():
+        return None
+    remote_dir = remote_dir.strip().rstrip('\\')
+    if not _SAFE_WINDOWS_PATH.match(remote_dir):
+        raise ValueError(
+            "Remote directory must be an absolute Windows path (e.g. C:\\ORCA_Staging) "
+            "using only letters, numbers, spaces, dots, underscores, and hyphens."
+        )
+    return remote_dir
+
 
 # ── Token management ──────────────────────────────────────────────────────────
 
-def create_package_token(asset_id: int, case_name: str, user_id: int, technique_count: int) -> str:
+def create_package_token(asset_id: int, case_name: str, user_id: int, technique_count: int,
+                          remote_dir: Optional[str] = None) -> str:
     token = str(uuid.uuid4())
     expires_at = datetime.utcnow() + timedelta(hours=PACKAGE_TOKEN_TTL_HOURS)
+    remote_dir = validate_remote_dir(remote_dir)
     with db.engine.begin() as conn:
         conn.execute(text("""
             INSERT INTO package_tokens
-                (token, asset_id, case_name, created_by, expires_at, technique_count)
+                (token, asset_id, case_name, created_by, expires_at, technique_count, remote_dir)
             VALUES
-                (:token, :asset_id, :case_name, :user_id, :expires_at, :technique_count)
+                (:token, :asset_id, :case_name, :user_id, :expires_at, :technique_count, :remote_dir)
         """), {
             "token": token,
             "asset_id": asset_id,
@@ -46,6 +73,7 @@ def create_package_token(asset_id: int, case_name: str, user_id: int, technique_
             "user_id": user_id,
             "expires_at": expires_at,
             "technique_count": technique_count,
+            "remote_dir": remote_dir,
         })
     return token
 
@@ -186,7 +214,8 @@ def get_triage_techniques(categories: list) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def build_triage_package(asset_id: int, user_id: int, orca_url: str, categories: list) -> dict:
+def build_triage_package(asset_id: int, user_id: int, orca_url: str, categories: list,
+                          remote_dir: Optional[str] = None) -> dict:
     asset = get_asset_info(asset_id)
     if not asset:
         raise ValueError(f"Asset {asset_id} not found")
@@ -200,6 +229,7 @@ def build_triage_package(asset_id: int, user_id: int, orca_url: str, categories:
         case_name=asset["case_name"],
         user_id=user_id,
         technique_count=len(techniques),
+        remote_dir=remote_dir,
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -292,13 +322,22 @@ def get_asset_info(asset_id: int) -> Optional[dict]:
 
 # ── Bootstrap generator ───────────────────────────────────────────────────────
 
-def generate_bootstrap_ps1(token: str, asset_id: int, orca_url: str, zip_name: str, cert_b64: Optional[str] = None) -> str:
+def generate_bootstrap_ps1(token: str, asset_id: int, orca_url: str, zip_name: str,
+                            cert_b64: Optional[str] = None, remote_dir: Optional[str] = None) -> str:
     """
     Returns a minimal bootstrap PS1 that:
       1. Imports the ORCA self-signed cert into the local machine trust store (if provided)
       2. Downloads the full package ZIP from ORCA (no JWT — token-gated URL)
-      3. Expands it to a temp directory
+      3. Expands it to a staging directory (remote_dir if given, else $env:TEMP --
+         which resolves to C:\\Windows\\Temp under the SYSTEM-context scheduled
+         task this normally runs under. Some environments block execution
+         from C:\\Windows\\Temp via AppLocker/SRP/EDR policy, which fails the
+         collection silently -- remote_dir is the escape hatch for that.)
       4. Executes run_orca_collection.ps1 (which handles collection + self-delete + revoke)
+
+    remote_dir, if provided, is expected to already be validated by
+    validate_remote_dir() (an absolute Windows path, safe character set) --
+    it's interpolated directly into the generated script.
     """
     cert_block = ""
     if cert_b64:
@@ -313,11 +352,18 @@ $store.Close()
 Write-Host "[ORCA] Certificate trusted."
 """
 
+    if remote_dir:
+        base_dir_block = f"""$BaseDir = "{remote_dir}"
+if (-not (Test-Path $BaseDir)) {{ New-Item -ItemType Directory -Path $BaseDir -Force | Out-Null }}"""
+    else:
+        base_dir_block = "$BaseDir = $env:TEMP"
+
     return f"""#Requires -RunAsAdministrator
 $ErrorActionPreference = "Stop"
 {cert_block}
 $ZipUrl  = "{orca_url}/api/packages/{token}/{zip_name}"
-$TmpDir  = Join-Path $env:TEMP "orca_{token[:8]}"
+{base_dir_block}
+$TmpDir  = Join-Path $BaseDir "orca_{token[:8]}"
 $ZipPath = "$TmpDir.zip"
 try {{
     Write-Host "[ORCA] Downloading collection package..."
@@ -341,7 +387,7 @@ try {{
 
 # ── Package builder ───────────────────────────────────────────────────────────
 
-def build_package(asset_id: int, user_id: int, orca_url: str) -> dict:
+def build_package(asset_id: int, user_id: int, orca_url: str, remote_dir: Optional[str] = None) -> dict:
     """
     Build the collection ZIP for asset_id.
     Returns { download_url, bootstrap_url, oneliner, token, technique_count, expires_at }
@@ -359,6 +405,7 @@ def build_package(asset_id: int, user_id: int, orca_url: str) -> dict:
         case_name=asset["case_name"],
         user_id=user_id,
         technique_count=len(techniques),
+        remote_dir=remote_dir,
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:

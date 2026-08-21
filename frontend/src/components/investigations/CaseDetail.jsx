@@ -68,7 +68,7 @@ export default function CaseDetail({
   // Deploy state
   const [deployOpen, setDeployOpen]           = useState(false);
   const [deploySelected, setDeploySelected]   = useState(new Set());
-  const [deployCreds, setDeployCreds]         = useState({ username: '', password: '' });
+  const [deployCreds, setDeployCreds]         = useState({ username: '', password: '', remoteDir: '' });
   const [deployShowPass, setDeployShowPass]   = useState(false);
   const deployAbortRef                        = useRef(false);
   const autoSaveTimerRef                      = useRef(null);
@@ -500,7 +500,7 @@ export default function CaseDetail({
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/deploy/bulk`, {
         method: 'POST', credentials: 'include', headers: getAuthHeaders(),
-        body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password }),
+        body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password, remote_dir: deployCreds.remoteDir || null }),
       });
 
       if (!r.ok) { const e = await r.json(); alert(`DEPLOY_ERROR: ${e.detail || r.statusText}`); setDeployRunning(false); return; }
@@ -567,7 +567,7 @@ export default function CaseDetail({
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/deploy/triage`, {
         method: 'POST', credentials: 'include', headers: getAuthHeaders(),
-        body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password, categories: Array.from(triageSelected), trigger_transport: triageCreds.transport, domain: triageCreds.domain || null }),
+        body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password, categories: Array.from(triageSelected), trigger_transport: triageCreds.transport, domain: triageCreds.domain || null, remote_dir: deployCreds.remoteDir || null }),
       });
       if (!r.ok) { const e = await r.json(); alert(`TRIAGE_ERROR: ${e.detail || r.statusText}`); setTriageRunning(false); return; }
       const reader = r.body.getReader();
@@ -1071,6 +1071,13 @@ export default function CaseDetail({
             {deployShowPass ? 'HIDE' : 'SHOW'}
           </button>
         </div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 200 }}>
+        <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>REMOTE_DIR (optional)</span>
+        <input value={deployCreds.remoteDir} onChange={e => setDeployCreds(p => ({ ...p, remoteDir: e.target.value }))}
+          placeholder="Default: %TEMP% (C:\Windows\Temp)" disabled={deployRunning || triageRunning}
+          title="Staging directory on the target for the collection package. Leave blank to use the default (C:\Windows\Temp) — set this if that path is blocked by AppLocker/SRP/EDR policy in your environment."
+          style={{ ...InputStyle, fontSize: 10, padding: '6px 8px', opacity: (deployRunning || triageRunning) ? 0.5 : 1 }} />
       </div>
 
       {(caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE' && (

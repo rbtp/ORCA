@@ -1296,7 +1296,8 @@ CREATE TABLE public.package_tokens (
     revoked_at timestamp without time zone,
     technique_count integer DEFAULT 0,
     techniques_received integer DEFAULT 0,
-    completed_at timestamp without time zone
+    completed_at timestamp without time zone,
+    remote_dir character varying(255)
 );
 
 

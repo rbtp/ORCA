@@ -100,7 +100,8 @@ def _upsert_technique_run_log(asset_id: int, t_code: str, status: str, detail: s
 # ── Generate package ──────────────────────────────────────────────────────────
 
 @router.post("/api/assets/{asset_id}/package")
-async def generate_package(asset_id: int, request: Request, current_user=Depends(get_current_user)):
+async def generate_package(asset_id: int, request: Request, remote_dir: str = None,
+                            current_user=Depends(get_current_user)):
     with db.engine.connect() as conn:
         case_row = conn.execute(text(
             "SELECT case_name FROM assets WHERE id = :id"
@@ -114,6 +115,7 @@ async def generate_package(asset_id: int, request: Request, current_user=Depends
             asset_id=asset_id,
             user_id=current_user["id"],
             orca_url=orca_url,
+            remote_dir=remote_dir,
         )
         return result
     except ValueError as e:
@@ -134,7 +136,7 @@ async def download_bootstrap(token: str):
     """
     with db.engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT token, asset_id FROM package_tokens
+            SELECT token, asset_id, remote_dir FROM package_tokens
             WHERE token = :token
               AND revoked = FALSE
               AND expires_at > NOW()
@@ -166,6 +168,7 @@ async def download_bootstrap(token: str):
         asset_id=row["asset_id"],
         orca_url=orca_url,
         zip_name=zip_name,
+        remote_dir=row["remote_dir"],
     )
 
     return PlainTextResponse(content=bootstrap_ps1, media_type="text/plain")

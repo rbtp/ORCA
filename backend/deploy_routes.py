@@ -97,6 +97,7 @@ async def _deploy_single(
     queue: asyncio.Queue,
     transport: str = "SMB_TASK",
     current_user: Optional[dict] = None,
+    remote_dir: Optional[str] = None,
 ):
     async def emit(phase: str, message: str, error: str = None):
         await queue.put({
@@ -129,9 +130,12 @@ async def _deploy_single(
         orca_url = _get_orca_base_url()
         pkg = await loop.run_in_executor(
             _build_executor,
-            lambda: build_package(asset_id=asset_id, user_id=user_id, orca_url=orca_url)
+            lambda: build_package(asset_id=asset_id, user_id=user_id, orca_url=orca_url, remote_dir=remote_dir)
         )
         oneliner = pkg.get('oneliner', '')
+    except ValueError as e:
+        await emit('ERROR', f'{hostname}: {e}', str(e))
+        return
     except Exception as e:
         await emit('ERROR', f'{hostname}: Package build failed', str(e))
         return
@@ -184,6 +188,7 @@ class DeployRequest(BaseModel):
     password: str
     domain: Optional[str] = None
     transport: str = "SMB_TASK"  # "SMB_TASK" (default, port 445 only) or "WINRM" (opt-in fallback, needs port 5985)
+    remote_dir: Optional[str] = None  # staging dir on the target; None = $env:TEMP default
 
 
 @router.post("/bulk")
@@ -201,7 +206,8 @@ async def deploy_bulk(req: DeployRequest, current_user=Depends(get_current_user)
 
         async def run_all():
             tasks = [
-                _deploy_single(aid, user_id, req.username, req.password, req.domain, queue, req.transport, current_user)
+                _deploy_single(aid, user_id, req.username, req.password, req.domain, queue, req.transport,
+                                current_user, req.remote_dir)
                 for aid in req.asset_ids
             ]
             try:
@@ -246,6 +252,7 @@ class TriageRequest(BaseModel):
     trigger_transport: str = "SMB_TASK"  # "SMB_TASK" (default, port 445 only) or "WINRM" (opt-in fallback, needs port 5985)
     domain: Optional[str] = None
     cleanup: bool = True
+    remote_dir: Optional[str] = None  # staging dir on the target; None = $env:TEMP default
 
 
 @router.get("/triage-categories")
@@ -319,6 +326,7 @@ async def deploy_triage(req: TriageRequest, current_user=Depends(get_current_use
                         user_id=user_id,
                         orca_url=orca_url,
                         categories=req.categories,
+                        remote_dir=req.remote_dir,
                     )
                 )
                 oneliner = pkg.get('oneliner', '')
