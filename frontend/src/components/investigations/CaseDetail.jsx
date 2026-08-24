@@ -66,9 +66,13 @@ export default function CaseDetail({
   const [mountLoading, setMountLoading]   = useState({});
 
   // Deploy state
+  const getDefaultTransport = () => {
+    const v = localStorage.getItem('orca_default_transport');
+    return (v === 'WINRM' || v === 'SMB_TASK') ? v : 'SMB_TASK';
+  };
   const [deployOpen, setDeployOpen]           = useState(false);
   const [deploySelected, setDeploySelected]   = useState(new Set());
-  const [deployCreds, setDeployCreds]         = useState({ username: '', password: '', remoteDir: '' });
+  const [deployCreds, setDeployCreds]         = useState({ username: '', password: '', remoteDir: '', transport: getDefaultTransport() });
   const [deployShowPass, setDeployShowPass]   = useState(false);
   const deployAbortRef                        = useRef(false);
   const autoSaveTimerRef                      = useRef(null);
@@ -76,7 +80,7 @@ export default function CaseDetail({
   // Triage state
   const [triageCategories, setTriageCategories] = useState([]);
   const [triageSelected, setTriageSelected]     = useState(new Set());
-  const [triageCreds, setTriageCreds]           = useState({ username: '', password: '', transport: 'SMB_TASK', domain: '' });
+  const [triageCreds, setTriageCreds]           = useState({ username: '', password: '', transport: getDefaultTransport(), domain: '' });
   const [triageRunning, setTriageRunning]       = useState(false);
   const [triageStatus, setTriageStatus]         = useState({});
   const triageAbortRef                          = useRef(false);
@@ -500,7 +504,7 @@ export default function CaseDetail({
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/deploy/bulk`, {
         method: 'POST', credentials: 'include', headers: getAuthHeaders(),
-        body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password, remote_dir: deployCreds.remoteDir || null }),
+        body: JSON.stringify({ asset_ids: Array.from(deploySelected), username: deployCreds.username, password: deployCreds.password, remote_dir: deployCreds.remoteDir || null, transport: deployCreds.transport }),
       });
 
       if (!r.ok) { const e = await r.json(); alert(`DEPLOY_ERROR: ${e.detail || r.statusText}`); setDeployRunning(false); return; }
@@ -1080,16 +1084,21 @@ export default function CaseDetail({
           style={{ ...InputStyle, fontSize: 10, padding: '6px 8px', opacity: (deployRunning || triageRunning) ? 0.5 : 1 }} />
       </div>
 
-      {(caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 140 }}>
-          <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>TRANSPORT</span>
-          <select value={triageCreds.transport} onChange={e => setTriageCreds(p => ({ ...p, transport: e.target.value }))}
-            disabled={triageRunning} style={{ ...InputStyle, fontSize: 10, padding: '6px 8px' }}>
-            <option value="SMB_TASK">SMB / SCHTASK</option>
-            <option value="WINRM">WINRM</option>
-          </select>
-        </div>
-      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 140 }}>
+        <span style={{ color: '#888', fontSize: 9, letterSpacing: 1 }}>TRANSPORT</span>
+        <select
+          value={(caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE' ? triageCreds.transport : deployCreds.transport}
+          onChange={e => {
+            const v = e.target.value;
+            if ((caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE') setTriageCreds(p => ({ ...p, transport: v }));
+            else setDeployCreds(p => ({ ...p, transport: v }));
+          }}
+          disabled={deployRunning || triageRunning} style={{ ...InputStyle, fontSize: 10, padding: '6px 8px' }}
+          title="How the collection is triggered on the target. SMB/SCHTASK needs only port 445; WinRM needs port 5985 enabled on the target but avoids the dropped-file + service-creation pattern some AV/EDR flags.">
+          <option value="SMB_TASK">SMB / SCHTASK</option>
+          <option value="WINRM">WINRM</option>
+        </select>
+      </div>
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 1 }}>
         {(caseData.case_type || 'INVESTIGATION') === 'INCIDENT_RESPONSE' ? (

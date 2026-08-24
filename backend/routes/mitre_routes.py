@@ -23,6 +23,9 @@ class MapUpdatePayload(BaseModel):
 class VerdictUpdate(BaseModel):
     verdict: str
 
+class StarredUpdate(BaseModel):
+    starred: bool
+
 class VQLTestRequest(BaseModel):
     vql: str
 
@@ -754,10 +757,15 @@ async def get_modular_evidence(asset_id: int, t_code: str, current_user: dict = 
         if isinstance(summary_text, dict):
             summary_text = summary_text.get("message", str(summary_text))
         rows = session.execute(text("""
-            SELECT COALESCE(raw_data, json_build_object('file_name', file_name, 'file_path', file_path)::jsonb) as data
+            SELECT id, starred, COALESCE(raw_data, json_build_object('file_name', file_name, 'file_path', file_path)::jsonb) as data
             FROM evidence WHERE asset_id = :aid AND t_code = :t
         """), {"aid": asset_id, "t": t_code}).mappings().all()
-        evidence_list = [json.loads(r['data']) if isinstance(r['data'], str) else r['data'] for r in rows]
+        evidence_list = []
+        for r in rows:
+            d = json.loads(r['data']) if isinstance(r['data'], str) else dict(r['data'])
+            d['_orca_row_id'] = r['id']
+            d['_orca_starred'] = r['starred']
+            evidence_list.append(d)
 
         # For REGISTRY_* sub-techniques with no direct rows, slice from the merged REGISTRY rollup.
         if not evidence_list and t_code in _REGISTRY_SUBTREE_MAP:
@@ -793,12 +801,15 @@ async def get_evidence_rows_paginated(
     page: int = 0,
     page_size: int = 100,
     search: str = "",
+    starred_only: bool = False,
     current_user: dict = Depends(get_current_user),
 ):
     """
     Paginated evidence rows with optional server-side search.
     Used by EvidenceWindow for large artifacts (Event Logs, SRUM, etc.)
     Search is a case-insensitive substring match across the full raw_data JSONB.
+    starred_only, when true, restricts to rows the analyst has starred —
+    combines with search (AND), not a replacement for it.
     """
     params: dict = {
         "aid": asset_id,
@@ -814,22 +825,26 @@ async def get_evidence_rows_paginated(
     else:
         where_search = ""
 
+    where_starred = "AND starred = true" if starred_only else ""
+
     with db.engine.connect() as conn:
         total = conn.execute(text(
             "SELECT COUNT(*) FROM evidence"
-            f" WHERE asset_id = :aid AND t_code = :t {where_search}"  # nosec B608 — where_search is either empty or ' AND (raw_data::text ILIKE :q)'; no user data in clause structure
+            f" WHERE asset_id = :aid AND t_code = :t {where_search} {where_starred}"  # nosec B608 — where_search/where_starred are fixed literals, not user data
         ), params).scalar() or 0
 
         rows = conn.execute(text(
-            "SELECT raw_data FROM evidence"
-            f" WHERE asset_id = :aid AND t_code = :t {where_search}"  # nosec B608 — same as above
+            "SELECT id, starred, raw_data FROM evidence"
+            f" WHERE asset_id = :aid AND t_code = :t {where_search} {where_starred}"  # nosec B608 — same as above
             " ORDER BY id ASC LIMIT :limit OFFSET :offset"
         ), params).fetchall()
 
-    evidence = [
-        json.loads(r.raw_data) if isinstance(r.raw_data, str) else r.raw_data
-        for r in rows
-    ]
+    evidence = []
+    for r in rows:
+        d = json.loads(r.raw_data) if isinstance(r.raw_data, str) else (dict(r.raw_data) if r.raw_data else {})
+        d['_orca_row_id'] = r.id
+        d['_orca_starred'] = r.starred
+        evidence.append(d)
 
     return {
         "t_code":    t_code,
@@ -838,6 +853,18 @@ async def get_evidence_rows_paginated(
         "page_size": page_size,
         "rows":      evidence,
     }
+
+
+@router.post("/evidence/{asset_id}/{t_code}/row/{row_id}/star")
+async def set_evidence_row_starred(asset_id: int, t_code: str, row_id: int, data: StarredUpdate, current_user: dict = Depends(get_current_user)):
+    with db.engine.begin() as conn:
+        result = conn.execute(text("""
+            UPDATE evidence SET starred = :starred
+            WHERE id = :row_id AND asset_id = :aid AND t_code = :t
+        """), {"starred": data.starred, "row_id": row_id, "aid": asset_id, "t": t_code})
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Evidence row not found")
+    return {"status": "SUCCESS", "id": row_id, "starred": data.starred}
 
 
 @router.post("/evidence/{asset_id}/{t_code}/verdict")
@@ -1835,6 +1862,11 @@ async def get_threat_profile(identifier: str, asset_id: Optional[int] = None, cu
                     ref.live_analysis, ref.dead_disk_analysis, ref.collection_strategy AS bluf_text,
                     COALESCE(ar.verdict, 'Undetermined') AS verdict,
                     COALESCE(ar.evidence_imported, False) AS evidence_imported,
+                    EXISTS (
+                        SELECT 1 FROM public.evidence ev
+                        WHERE ev.asset_id = :asset_id AND ev.t_code = ref.t_code
+                          AND (ev.raw_data->>'_orca_fallback')::boolean = TRUE
+                    ) AS has_fallback_evidence,
                     mt.platforms,
                     mt.parent_t_code,
                     COALESCE(mt.is_subtechnique, FALSE) AS is_subtechnique,
@@ -1867,6 +1899,11 @@ async def get_threat_profile(identifier: str, asset_id: Optional[int] = None, cu
             " ref.live_analysis, ref.dead_disk_analysis, ref.collection_strategy AS bluf_text,"
             " COALESCE(ar.verdict, 'Undetermined') as verdict,"
             " COALESCE(ar.evidence_imported, False) as evidence_imported,"
+            " EXISTS ("
+            "     SELECT 1 FROM public.evidence ev"
+            "     WHERE ev.asset_id = :asset_id AND ev.t_code = mt.t_code"
+            "       AND (ev.raw_data->>'_orca_fallback')::boolean = TRUE"
+            " ) AS has_fallback_evidence,"
             " mt.platforms, mt.parent_t_code,"
             " COALESCE(mt.is_subtechnique, FALSE) as is_subtechnique,"
             " (SELECT COUNT(*) > 0 FROM public.tcode_notes tn"

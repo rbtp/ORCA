@@ -5,6 +5,7 @@ import threading
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from core.database_manager import db
 from pydantic import BaseModel
 from typing import Optional
@@ -30,6 +31,7 @@ class LibraryIOCRequest(BaseModel):
     description: Optional[str] = ""
     threat_actor: Optional[str] = ""
     severity: Optional[str] = "HIGH"
+    label: Optional[str] = ""
 
 
 # ── Library CRUD ───────────────────────────────────────────────────────────────
@@ -37,7 +39,7 @@ class LibraryIOCRequest(BaseModel):
 @router.get("/library")
 def list_library_iocs(current_user: dict = Depends(get_current_user)):
     sql = text("""
-        SELECT id, indicator_type, value, threat_actor, severity, description, added_at
+        SELECT id, indicator_type, value, threat_actor, severity, description, label, added_at
         FROM public.ref_ioc_library
         ORDER BY added_at DESC
     """)
@@ -51,14 +53,15 @@ def list_library_iocs(current_user: dict = Depends(get_current_user)):
 @router.post("/library")
 def add_library_ioc(req: LibraryIOCRequest, current_user: dict = Depends(get_current_user)):
     sql = text("""
-        INSERT INTO public.ref_ioc_library (indicator_type, value, description, threat_actor, severity)
-        VALUES (:indicator_type, :value, :description, :threat_actor, :severity)
+        INSERT INTO public.ref_ioc_library (indicator_type, value, description, threat_actor, severity, label)
+        VALUES (:indicator_type, :value, :description, :threat_actor, :severity, :label)
         ON CONFLICT (value) DO UPDATE SET
             indicator_type = EXCLUDED.indicator_type,
             description = EXCLUDED.description,
             threat_actor = EXCLUDED.threat_actor,
-            severity = EXCLUDED.severity
-        RETURNING id, indicator_type, value, threat_actor, severity, description, added_at
+            severity = EXCLUDED.severity,
+            label = EXCLUDED.label
+        RETURNING id, indicator_type, value, threat_actor, severity, description, label, added_at
     """)
     try:
         with db.engine.begin() as conn:
@@ -68,6 +71,7 @@ def add_library_ioc(req: LibraryIOCRequest, current_user: dict = Depends(get_cur
                 "description": req.description,
                 "threat_actor": req.threat_actor,
                 "severity": req.severity,
+                "label": req.label,
             })
             row = result.mappings().first()
             if row is None:
@@ -78,6 +82,38 @@ def add_library_ioc(req: LibraryIOCRequest, current_user: dict = Depends(get_cur
     except Exception as e:
         logger.error("add_library_ioc failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to save IOC")
+
+@router.put("/library/{ioc_id}")
+def edit_library_ioc(ioc_id: int, req: LibraryIOCRequest, current_user: dict = Depends(get_current_user)):
+    sql = text("""
+        UPDATE public.ref_ioc_library
+        SET indicator_type = :indicator_type, value = :value, description = :description,
+            threat_actor = :threat_actor, severity = :severity, label = :label
+        WHERE id = :id
+        RETURNING id, indicator_type, value, threat_actor, severity, description, label, added_at
+    """)
+    try:
+        with db.engine.begin() as conn:
+            result = conn.execute(sql, {
+                "id": ioc_id,
+                "indicator_type": req.indicator_type,
+                "value": req.value,
+                "description": req.description,
+                "threat_actor": req.threat_actor,
+                "severity": req.severity,
+                "label": req.label,
+            })
+            row = result.mappings().first()
+            if row is None:
+                raise HTTPException(status_code=404, detail="IOC not found")
+            return dict(row)
+    except HTTPException:
+        raise
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="Another IOC already has this value")
+    except Exception as e:
+        logger.error("edit_library_ioc failed for id=%s: %s", ioc_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update IOC")
 
 @router.delete("/library/{ioc_id}")
 def delete_library_ioc(ioc_id: int, current_user: dict = Depends(get_current_user)):

@@ -597,7 +597,8 @@ CREATE TABLE public.evidence (
     file_name text,
     file_path text,
     "timestamp" timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
-    raw_data jsonb
+    raw_data jsonb,
+    starred boolean DEFAULT false NOT NULL
 );
 
 
@@ -1352,6 +1353,7 @@ CREATE TABLE public.ref_ioc_library (
     threat_actor character varying(100),
     severity character varying(20) DEFAULT 'HIGH'::character varying,
     description text,
+    label character varying(100),
     added_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -2558,6 +2560,8 @@ CREATE INDEX idx_det_strategies_t_code ON public.mitre_detection_strategies USIN
 --
 
 CREATE INDEX idx_evidence_asset_tcode ON public.evidence USING btree (asset_id, t_code);
+
+CREATE INDEX idx_evidence_starred ON public.evidence USING btree (asset_id, t_code, starred) WHERE (starred = true);
 
 
 --

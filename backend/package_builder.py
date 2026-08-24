@@ -291,9 +291,16 @@ def build_triage_package(asset_id: int, user_id: int, orca_url: str, categories:
         "ServicePoint s,X509Certificate c,WebRequest r,int e){return true;}}'; "
         "[System.Net.ServicePointManager]::CertificatePolicy=New-Object TrustAll; "
     )
+    # Fetches the bootstrap script to a temp .ps1 and runs it with -File,
+    # rather than piping it straight into iex -- avoids the "download string,
+    # eval in memory" idiom that AV/EDR heavily signature, matching the
+    # file-based execution style already used one step later for the real
+    # collection script (the ps1.FullName invocation below).
     oneliner = (
         f"powershell -ExecutionPolicy Bypass -c \"{trust_all}"
-        f"iex (iwr '{bootstrap_url}' -UseBasicParsing).Content\""
+        f"$b=[IO.Path]::Combine($env:TEMP,'orca_boot_{token[:8]}.ps1'); "
+        f"(iwr '{bootstrap_url}' -UseBasicParsing).Content | Set-Content -Path $b -Encoding UTF8; "
+        f"& $b; Remove-Item $b -Force\""
     )
 
     return {
@@ -487,9 +494,16 @@ def build_package(asset_id: int, user_id: int, orca_url: str, remote_dir: Option
         "ServicePoint s,X509Certificate c,WebRequest r,int e){return true;}}'; "
         "[System.Net.ServicePointManager]::CertificatePolicy=New-Object TrustAll; "
     )
+    # Fetches the bootstrap script to a temp .ps1 and runs it with -File,
+    # rather than piping it straight into iex -- avoids the "download string,
+    # eval in memory" idiom that AV/EDR heavily signature, matching the
+    # file-based execution style already used one step later for the real
+    # collection script (the ps1.FullName invocation below).
     oneliner = (
         f"powershell -ExecutionPolicy Bypass -c \"{trust_all}"
-        f"iex (iwr '{bootstrap_url}' -UseBasicParsing).Content\""
+        f"$b=[IO.Path]::Combine($env:TEMP,'orca_boot_{token[:8]}.ps1'); "
+        f"(iwr '{bootstrap_url}' -UseBasicParsing).Content | Set-Content -Path $b -Encoding UTF8; "
+        f"& $b; Remove-Item $b -Force\""
     )
 
     return {

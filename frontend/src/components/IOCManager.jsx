@@ -93,8 +93,10 @@ export default function IOCManager() {
 
   const [newIoc, setNewIoc] = useState({
     indicator_type: 'FREE_TEXT', value: '',
-    description: '', severity: 'HIGH', threat_actor: '',
+    description: '', severity: 'HIGH', threat_actor: '', label: '',
   });
+  const [isEditing, setIsEditing] = useState(false);
+  const [editForm, setEditForm] = useState(null);
 
   const iocTypes = {
     HASH_SHA256: { label: 'SHA256',          regex: /^[a-fA-F0-9]{64}$/ },
@@ -160,7 +162,7 @@ export default function IOCManager() {
       });
       if (!res.ok) { setError('SAVE_FAILED'); return; }
       setIocs([await res.json(), ...iocs]);
-      setNewIoc({ indicator_type: 'FREE_TEXT', value: '', description: '', severity: 'HIGH', threat_actor: '' });
+      setNewIoc({ indicator_type: 'FREE_TEXT', value: '', description: '', severity: 'HIGH', threat_actor: '', label: '' });
       setIsAdding(false); setError('');
     } catch { setError('NETWORK_ERROR'); }
   };
@@ -172,6 +174,43 @@ export default function IOCManager() {
       setIocs(iocs.filter(i => i.id !== ioc.id));
       setSelectedIoc(null);
       setError('');
+    } catch { setError('NETWORK_ERROR'); }
+  };
+
+  const startEdit = (ioc) => {
+    setEditForm({
+      indicator_type: ioc.indicator_type || 'FREE_TEXT',
+      value: ioc.value || '',
+      description: ioc.description || '',
+      severity: ioc.severity || 'HIGH',
+      threat_actor: ioc.threat_actor || '',
+      label: ioc.label || '',
+    });
+    setIsEditing(true);
+    setError('');
+  };
+
+  const cancelEdit = () => { setIsEditing(false); setEditForm(null); setError(''); };
+
+  const saveEdit = async () => {
+    const config = iocTypes[editForm.indicator_type];
+    if (editForm.indicator_type !== 'FREE_TEXT' && !config.regex.test(editForm.value)) {
+      setError(`INVALID_FORMAT_FOR_${editForm.indicator_type}`); return;
+    }
+    try {
+      const res = await fetch(`${API}/api/ioc/library/${selectedIoc.id}`, {
+        method: 'PUT', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editForm),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setError(body.detail || 'SAVE_FAILED'); return;
+      }
+      const updated = await res.json();
+      setIocs(iocs.map(i => i.id === updated.id ? updated : i));
+      setSelectedIoc(updated);
+      setIsEditing(false); setEditForm(null); setError('');
     } catch { setError('NETWORK_ERROR'); }
   };
 
@@ -243,6 +282,7 @@ export default function IOCManager() {
                 <tr style={{ color: C.greyDim, borderBottom: `1px solid ${C.border}`, textAlign: 'left' }}>
                   <th style={{ padding: '12px 14px' }}>TYPE</th>
                   <th style={{ padding: '12px 14px' }}>VALUE</th>
+                  <th style={{ padding: '12px 14px', width: 130 }}>LABEL</th>
                   <th style={{ padding: '12px 14px', width: 90 }}>SEVERITY</th>
                   <th style={{ padding: '12px 14px', width: 140 }}>DB_HITS</th>
                 </tr>
@@ -254,7 +294,7 @@ export default function IOCManager() {
                   return (
                     <tr
                       key={ioc.id}
-                      onClick={() => { setSelectedIoc(ioc); setError(''); }}
+                      onClick={() => { setSelectedIoc(ioc); setIsEditing(false); setEditForm(null); setError(''); }}
                       style={{
                         borderBottom: `1px solid ${C.border}`, cursor: 'pointer',
                         background: selectedIoc?.id === ioc.id ? '#0e0e0e' : 'transparent',
@@ -265,6 +305,7 @@ export default function IOCManager() {
                     >
                       <td style={{ padding: '12px 14px', color: C.green }}>{(ioc.indicator_type || '').replace('HASH_', '')}</td>
                       <td style={{ padding: '12px 14px', color: '#eee', wordBreak: 'break-all', maxWidth: 300 }}>{ioc.value}</td>
+                      <td style={{ padding: '12px 14px', color: C.amber, fontSize: 11 }}>{ioc.label || <span style={{ color: '#555' }}>—</span>}</td>
                       <td style={{ padding: '12px 14px', color: ioc.severity === 'CRITICAL' ? C.red : ioc.severity === 'HIGH' ? C.amber : C.grey }}>{ioc.severity}</td>
                       <td style={{ padding: '12px 14px' }}>
                         {hasMatch
@@ -285,45 +326,91 @@ export default function IOCManager() {
         <aside style={{ background: C.bg, border: `1px solid ${C.border}`, padding: 18, alignSelf: 'start', position: 'sticky', top: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, alignItems: 'center' }}>
             <span style={{ color: C.green, fontSize: 11, fontWeight: 'bold', letterSpacing: 1 }}>[ INDICATOR ]</span>
-            <button onClick={() => { setSelectedIoc(null); setError(''); }} style={{ background: 'none', border: 'none', color: C.greyDim, cursor: 'pointer', fontSize: 14 }}>×</button>
+            <button onClick={() => { setSelectedIoc(null); setIsEditing(false); setEditForm(null); setError(''); }} style={{ background: 'none', border: 'none', color: C.greyDim, cursor: 'pointer', fontSize: 14 }}>×</button>
           </div>
-          <Field label="TYPE" value={(selectedIoc.indicator_type || '').replace('HASH_', '')} color={C.green} />
-          <Field label="SEVERITY" value={selectedIoc.severity} color={selectedIoc.severity === 'CRITICAL' ? C.red : C.amber} />
-          {selectedIoc.threat_actor && <Field label="THREAT ACTOR" value={selectedIoc.threat_actor} color={C.amber} />}
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 9, color: C.greyDim, marginBottom: 4, letterSpacing: 1 }}>VALUE</div>
-            <div style={{ color: '#eee', fontSize: 11, wordBreak: 'break-all', background: '#000', padding: '8px 10px', border: `1px solid ${C.border}` }}>{selectedIoc.value}</div>
-          </div>
-          {selectedIoc.description && <Field label="NOTE" value={selectedIoc.description} />}
 
-          {correlations[selectedIoc.value]?.length > 0 && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 9, color: C.red, marginBottom: 6, letterSpacing: 1 }}>EVIDENCE HITS — {correlations[selectedIoc.value].length}</div>
-              <div style={{ maxHeight: 220, overflowY: 'auto', border: `1px solid ${C.border}` }}>
-                {correlations[selectedIoc.value].map((m, idx) => (
-                  <div key={idx} style={{ padding: '7px 10px', borderBottom: `1px solid ${C.border}`, fontSize: 10 }}>
-                    <div style={{ color: C.green, marginBottom: 2 }}>{m.case_name} / {m.hostname}</div>
-                    <div style={{ color: C.greyDim }}>{m.t_code} — {m.detail}</div>
-                  </div>
-                ))}
+          {isEditing ? (
+            <>
+              <label style={Ls}>TYPE</label>
+              <select value={editForm.indicator_type} onChange={e => setEditForm({ ...editForm, indicator_type: e.target.value })} style={Is}>
+                {Object.entries(iocTypes).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
+
+              <label style={Ls}>VALUE</label>
+              <input value={editForm.value} onChange={e => { setEditForm({ ...editForm, value: e.target.value }); setError(''); }}
+                style={{ ...Is, borderColor: error ? C.red : '#222' }} />
+
+              <label style={Ls}>LABEL (optional)</label>
+              <input value={editForm.label} onChange={e => setEditForm({ ...editForm, label: e.target.value })}
+                placeholder="e.g. Confirmed Malicious, False Positive" style={Is} />
+
+              <label style={Ls}>SEVERITY</label>
+              <select value={editForm.severity} onChange={e => setEditForm({ ...editForm, severity: e.target.value })} style={Is}>
+                {['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].map(s => <option key={s}>{s}</option>)}
+              </select>
+
+              <label style={Ls}>THREAT ACTOR (optional)</label>
+              <input value={editForm.threat_actor} onChange={e => setEditForm({ ...editForm, threat_actor: e.target.value })}
+                placeholder="e.g. APT29, Lazarus Group" style={Is} />
+
+              <label style={Ls}>NOTE</label>
+              <textarea value={editForm.description} onChange={e => setEditForm({ ...editForm, description: e.target.value })}
+                style={{ ...Is, minHeight: 60, resize: 'vertical' }} />
+
+              {error && <div style={{ color: C.red, fontSize: 10, marginBottom: 8 }}>{error}</div>}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={saveEdit} style={{ flex: 1, background: C.green, border: 'none', padding: 8, fontWeight: 'bold', cursor: 'pointer', fontFamily: 'monospace', fontSize: 10, letterSpacing: 1 }}>SAVE</button>
+                <button onClick={cancelEdit} style={{ flex: 1, background: 'none', color: C.greyDim, border: `1px solid ${C.greyDim}`, cursor: 'pointer', fontFamily: 'monospace', fontSize: 10 }}>CANCEL</button>
               </div>
-            </div>
-          )}
-          {!correlations[selectedIoc.value] && lastScanTime && (
-            <div style={{ color: C.greyDim, fontSize: 10, marginBottom: 14 }}>No evidence hits in last scan.</div>
-          )}
-          {!lastScanTime && !isScanning && (
-            <div style={{ color: '#999', fontSize: 10, marginBottom: 14 }}>Run correlation scan to check evidence.</div>
-          )}
-          {isScanning && !correlations[selectedIoc.value] && (
-            <div style={{ color: C.amber, fontSize: 10, marginBottom: 14 }}>Scan in progress…</div>
-          )}
+            </>
+          ) : (
+            <>
+              <Field label="TYPE" value={(selectedIoc.indicator_type || '').replace('HASH_', '')} color={C.green} />
+              {selectedIoc.label && <Field label="LABEL" value={selectedIoc.label} color={C.amber} />}
+              <Field label="SEVERITY" value={selectedIoc.severity} color={selectedIoc.severity === 'CRITICAL' ? C.red : C.amber} />
+              {selectedIoc.threat_actor && <Field label="THREAT ACTOR" value={selectedIoc.threat_actor} color={C.amber} />}
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 9, color: C.greyDim, marginBottom: 4, letterSpacing: 1 }}>VALUE</div>
+                <div style={{ color: '#eee', fontSize: 11, wordBreak: 'break-all', background: '#000', padding: '8px 10px', border: `1px solid ${C.border}` }}>{selectedIoc.value}</div>
+              </div>
+              {selectedIoc.description && <Field label="NOTE" value={selectedIoc.description} />}
 
-          {error && <div style={{ color: C.red, fontSize: 10, marginBottom: 8 }}>{error}</div>}
-          <button
-            onClick={() => deleteIoc(selectedIoc)}
-            style={{ width: '100%', background: 'transparent', border: `1px solid ${C.red}`, color: C.red, padding: 8, fontSize: 10, cursor: 'pointer', letterSpacing: 1 }}
-          >DELETE_INDICATOR</button>
+              {correlations[selectedIoc.value]?.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 9, color: C.red, marginBottom: 6, letterSpacing: 1 }}>EVIDENCE HITS — {correlations[selectedIoc.value].length}</div>
+                  <div style={{ maxHeight: 220, overflowY: 'auto', border: `1px solid ${C.border}` }}>
+                    {correlations[selectedIoc.value].map((m, idx) => (
+                      <div key={idx} style={{ padding: '7px 10px', borderBottom: `1px solid ${C.border}`, fontSize: 10 }}>
+                        <div style={{ color: C.green, marginBottom: 2 }}>{m.case_name} / {m.hostname}</div>
+                        <div style={{ color: C.greyDim }}>{m.t_code} — {m.detail}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {!correlations[selectedIoc.value] && lastScanTime && (
+                <div style={{ color: C.greyDim, fontSize: 10, marginBottom: 14 }}>No evidence hits in last scan.</div>
+              )}
+              {!lastScanTime && !isScanning && (
+                <div style={{ color: '#999', fontSize: 10, marginBottom: 14 }}>Run correlation scan to check evidence.</div>
+              )}
+              {isScanning && !correlations[selectedIoc.value] && (
+                <div style={{ color: C.amber, fontSize: 10, marginBottom: 14 }}>Scan in progress…</div>
+              )}
+
+              {error && <div style={{ color: C.red, fontSize: 10, marginBottom: 8 }}>{error}</div>}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  onClick={() => startEdit(selectedIoc)}
+                  style={{ flex: 1, background: 'transparent', border: `1px solid ${C.green}`, color: C.green, padding: 8, fontSize: 10, cursor: 'pointer', letterSpacing: 1 }}
+                >EDIT_INDICATOR</button>
+                <button
+                  onClick={() => deleteIoc(selectedIoc)}
+                  style={{ flex: 1, background: 'transparent', border: `1px solid ${C.red}`, color: C.red, padding: 8, fontSize: 10, cursor: 'pointer', letterSpacing: 1 }}
+                >DELETE_INDICATOR</button>
+              </div>
+            </>
+          )}
         </aside>
       )}
 
@@ -341,6 +428,10 @@ export default function IOCManager() {
             <label style={Ls}>VALUE</label>
             <input value={newIoc.value} onChange={e => { setNewIoc({ ...newIoc, value: e.target.value }); setError(''); }}
               placeholder="Hash, IP, domain, filename…" style={{ ...Is, borderColor: error ? C.red : '#222' }} />
+
+            <label style={Ls}>LABEL (optional)</label>
+            <input value={newIoc.label} onChange={e => setNewIoc({ ...newIoc, label: e.target.value })}
+              placeholder="e.g. Confirmed Malicious, False Positive" style={Is} />
 
             <label style={Ls}>SEVERITY</label>
             <select value={newIoc.severity} onChange={e => setNewIoc({ ...newIoc, severity: e.target.value })} style={Is}>

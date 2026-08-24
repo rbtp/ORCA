@@ -541,6 +541,7 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
   const [activeSource, setActiveSource] = useState(null);
   const [loadingEv, setLoadingEv]       = useState(false);
   const [filter, setFilter]             = useState('');
+  const [starredOnly, setStarredOnly]   = useState(false);
   const [visibleCount, setVisibleCount] = useState(50);  // virtual scroll page size
   // Server-side pagination state (for large artifacts)
   const [evPage, setEvPage]             = useState(0);
@@ -571,6 +572,7 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
     setEvTotal(0);
     setEvSearch('');
     setEvSearchInput('');
+    setStarredOnly(false);
     fetch(`${import.meta.env.VITE_API_URL}/api/mitre/library/${sel}`, { headers: getAuth() })
       .then(r => r.json()).then(setProtocol).catch(() => setProtocol(null));
     fetch(`${import.meta.env.VITE_API_URL}/api/mitre/analytics/${sel}`, { headers: getAuth() })
@@ -600,12 +602,13 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
     } catch {}
   };
 
-  const loadEvidence = async (tCode, page = 0, search = '') => {
+  const loadEvidence = async (tCode, page = 0, search = '', starredOnlyArg = false) => {
     setLoadingEv(true); setEvidenceRows([]); setActiveSource(null); setVisibleCount(50);
     try {
       if (PAGINATED_TCODES.has(tCode)) {
         const params = new URLSearchParams({ page, page_size: EV_PAGE_SIZE });
         if (search) params.set('search', search);
+        if (starredOnlyArg) params.set('starred_only', 'true');
         const r = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/evidence/${assetId}/${tCode}/rows?${params}`, { headers: getAuth() });
         const d = await r.json();
         setEvidenceRows(d.rows || []);
@@ -647,6 +650,29 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
     await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/evidence/${assetId}/${sel}/verdict`,
       { method: 'POST', headers: getAuth(), body: JSON.stringify({ verdict }) });
     refreshTactics();
+  };
+
+  const updateRowStarred = (rowId, starred) => {
+    setEvidenceRows(prev => {
+      if (Array.isArray(prev)) return prev.map(r => r._orca_row_id === rowId ? { ...r, _orca_starred: starred } : r);
+      if (prev && typeof prev === 'object') {
+        const next = {};
+        for (const k of Object.keys(prev)) next[k] = prev[k].map(r => r._orca_row_id === rowId ? { ...r, _orca_starred: starred } : r);
+        return next;
+      }
+      return prev;
+    });
+  };
+
+  const toggleStar = async (row) => {
+    if (!row._orca_row_id || !sel) return;
+    const next = !row._orca_starred;
+    updateRowStarred(row._orca_row_id, next);
+    try {
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/evidence/${assetId}/${sel}/row/${row._orca_row_id}/star`,
+        { method: 'POST', headers: getAuth(), body: JSON.stringify({ starred: next }) });
+      if (!r.ok) updateRowStarred(row._orca_row_id, !next);
+    } catch { updateRowStarred(row._orca_row_id, !next); }
   };
 
   // ── Technique claim ─────────────────────────────────────────────────────
@@ -786,7 +812,9 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
 
   const isGrouped  = !Array.isArray(evidenceRows) && typeof evidenceRows === 'object';
   const baseRows   = isGrouped ? (evidenceRows[activeSource] || []) : evidenceRows;
-  const filteredRows = baseRows.filter(r => Object.values(r).some(v => String(v ?? '').toLowerCase().includes(filter.toLowerCase())));
+  const filteredRows = baseRows
+    .filter(r => !starredOnly || r._orca_starred)
+    .filter(r => Object.entries(r).filter(([k]) => k !== '_orca_row_id' && k !== '_orca_starred').some(([, v]) => String(v ?? '').toLowerCase().includes(filter.toLowerCase())));
   const dispRows   = filteredRows.slice(0, visibleCount);
   const curTactic  = tactics.find(t => t.t_code === sel);
   const curVerdict = (curTactic?.verdict || 'UNDETERMINED').toUpperCase();
@@ -895,7 +923,11 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
                 <div style={{ fontSize: 11, color: active ? C.grey : C.greyDim, marginTop: 1 }}>
                   {t.technique_name || t.name}
                 </div>
-                {ev && <div style={{ fontSize: 8, color: C.purple, marginTop: 2 }}>● EVIDENCE</div>}
+                {ev && (
+                  <div style={{ fontSize: 8, color: C.purple, marginTop: 2 }}>
+                    ● EVIDENCE{t.has_fallback_evidence && <span style={{ color: C.amber }} title="Fallback evidence — primary query returned 0 hits, this is a broader collection for analyst review"> ⚠</span>}
+                  </div>
+                )}
                 {lockedByOther && <div style={{ fontSize: 8, color: C.amber, marginTop: 2 }}>⚠ LOCKED — VIEW ONLY</div>}
               </div>
             );
@@ -1178,20 +1210,32 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
                         placeholder="SEARCH..."
                         value={evSearchInput}
                         onChange={e => setEvSearchInput(e.target.value)}
-                        onKeyDown={e => { if (e.key === 'Enter') { setEvSearch(evSearchInput); loadEvidence(sel, 0, evSearchInput); } }}
+                        onKeyDown={e => { if (e.key === 'Enter') { setEvSearch(evSearchInput); loadEvidence(sel, 0, evSearchInput, starredOnly); } }}
                         style={{ ...Inp, width: 200 }}
                       />
-                      <button onClick={() => { setEvSearch(evSearchInput); loadEvidence(sel, 0, evSearchInput); }}
+                      <button onClick={() => { setEvSearch(evSearchInput); loadEvidence(sel, 0, evSearchInput, starredOnly); }}
                         style={{ ...Btn, fontSize: 9, padding: '3px 8px' }}>GO</button>
-                      {evSearch && <button onClick={() => { setEvSearch(''); setEvSearchInput(''); loadEvidence(sel, 0, ''); }}
+                      {evSearch && <button onClick={() => { setEvSearch(''); setEvSearchInput(''); loadEvidence(sel, 0, '', starredOnly); }}
                         style={{ ...Btn, fontSize: 9, padding: '3px 8px', color: C.greyDim }}>CLR</button>}
+                      <button onClick={() => { const next = !starredOnly; setStarredOnly(next); loadEvidence(sel, 0, evSearch, next); }}
+                        title="Show only starred evidence"
+                        style={{ padding: '3px 8px', background: starredOnly ? '#332900' : 'transparent', border: `1px solid ${starredOnly ? '#ffd700' : C.border}`, color: starredOnly ? '#ffd700' : C.greyDim, cursor: 'pointer', fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold' }}>
+                        ★ STARRED
+                      </button>
                     </div>
                   </>
                 ) : (
                   <>
                     <span style={{ color: C.greyDim, fontSize: 10 }}>{dispRows.length}/{filteredRows.length} RECORDS</span>
-                    <input placeholder="FILTER..." value={filter} onChange={e => { setFilter(e.target.value); setVisibleCount(50); }}
-                      style={{ ...Inp, width: 180 }} />
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input placeholder="FILTER..." value={filter} onChange={e => { setFilter(e.target.value); setVisibleCount(50); }}
+                        style={{ ...Inp, width: 180 }} />
+                      <button onClick={() => setStarredOnly(v => !v)}
+                        title="Show only starred evidence"
+                        style={{ padding: '3px 8px', background: starredOnly ? '#332900' : 'transparent', border: `1px solid ${starredOnly ? '#ffd700' : C.border}`, color: starredOnly ? '#ffd700' : C.greyDim, cursor: 'pointer', fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold' }}>
+                        ★ STARRED
+                      </button>
+                    </div>
                   </>
                 )}
               </div>
@@ -1302,6 +1346,13 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
                       const isFallback = item._orca_fallback === true;
                       return (
                         <div key={idx} style={{ background: C.bgCard, border: `1px solid ${isFallback ? '#ffaa00' : C.border}`, padding: 12, position: 'relative' }}>
+                          {item._orca_row_id != null && (
+                            <button onClick={() => toggleStar(item)}
+                              title={item._orca_starred ? 'Unstar this evidence' : 'Star this evidence'}
+                              style={{ position: 'absolute', top: -9, left: 8, background: item._orca_starred ? '#ffd700' : '#111', color: item._orca_starred ? '#000' : '#666', border: `1px solid ${item._orca_starred ? '#ffd700' : C.border}`, fontSize: 11, lineHeight: 1, padding: '2px 6px', fontWeight: 'bold', cursor: 'pointer' }}>
+                              {item._orca_starred ? '★' : '☆'}
+                            </button>
+                          )}
                           <div style={{ position: 'absolute', top: -9, right: 8, background: isFallback ? '#ffaa00' : C.green, color: '#000', fontSize: 9, padding: '1px 5px', fontWeight: 'bold' }}>
                             INDEX_{(PAGINATED_TCODES.has(sel) ? evPage * EV_PAGE_SIZE + idx : idx).toString().padStart(3, '0')}
                           </div>
@@ -1311,7 +1362,7 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
                             </div>
                           )}
                           {Object.entries(item).map(([k, v]) => {
-                            if (k === 'VQLSource' || k === '_Source' || k === '_orca_fallback' || k === '_orca_fallback_note') return null;
+                            if (k === 'VQLSource' || k === '_Source' || k === '_orca_fallback' || k === '_orca_fallback_note' || k === '_orca_row_id' || k === '_orca_starred') return null;
                             return (
                               <div key={k} style={{ display: 'flex', marginBottom: 5, borderBottom: `1px solid #0d0d0d`, paddingBottom: 3 }}>
                                 <div style={{ color: isFallback ? '#ffaa00' : C.green, minWidth: 155, fontSize: 11, fontWeight: 'bold', flexShrink: 0 }}>{k.toUpperCase()}:</div>
@@ -1605,6 +1656,7 @@ const ArtifactTreeTab = ({ assetId, assetName }) => {
   const [evidenceRows, setEvidenceRows]               = useState([]);
   const [loadingEv, setLoadingEv]                     = useState(false);
   const [filter, setFilter]                           = useState('');
+  const [starredOnly, setStarredOnly]                 = useState(false);
   const [visibleCount, setVisibleCount]               = useState(50);
   const [ctxMenu, setCtxMenu]                         = useState({ visible: false, x: 0, y: 0, text: '' });
   const [notes, setNotes]                             = useState([]);
@@ -1629,12 +1681,13 @@ const ArtifactTreeTab = ({ assetId, assetName }) => {
 
   useEffect(() => { loadCategories(); }, [assetId]);
 
-  const loadEvidence = async (tCode, page = 0, search = '') => {
+  const loadEvidence = async (tCode, page = 0, search = '', starredOnlyArg = false) => {
     setLoadingEv(true); setEvidenceRows([]); setVisibleCount(50); setFilter('');
     try {
       if (PAGINATED_TCODES.has(tCode)) {
         const params = new URLSearchParams({ page, page_size: EV_PAGE_SIZE });
         if (search) params.set('search', search);
+        if (starredOnlyArg) params.set('starred_only', 'true');
         const r = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/evidence/${assetId}/${tCode}/rows?${params}`, { headers: getAuth() });
         const d = await r.json();
         setEvidenceRows(d.rows || []);
@@ -1651,9 +1704,24 @@ const ArtifactTreeTab = ({ assetId, assetName }) => {
     finally { setLoadingEv(false); }
   };
 
+  const updateRowStarred = (rowId, starred) => {
+    setEvidenceRows(prev => prev.map(r => r._orca_row_id === rowId ? { ...r, _orca_starred: starred } : r));
+  };
+
+  const toggleStar = async (row) => {
+    if (!row._orca_row_id || !sel) return;
+    const next = !row._orca_starred;
+    updateRowStarred(row._orca_row_id, next);
+    try {
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/evidence/${assetId}/${sel}/row/${row._orca_row_id}/star`,
+        { method: 'POST', headers: getAuth(), body: JSON.stringify({ starred: next }) });
+      if (!r.ok) updateRowStarred(row._orca_row_id, !next);
+    } catch { updateRowStarred(row._orca_row_id, !next); }
+  };
+
   useEffect(() => {
     if (!sel) return;
-    setEvPage(0); setEvTotal(0); setEvSearch(''); setEvSearchInput('');
+    setEvPage(0); setEvTotal(0); setEvSearch(''); setEvSearchInput(''); setStarredOnly(false);
     loadEvidence(sel);
     fetch(`${import.meta.env.VITE_API_URL}/api/mitre/evidence/${assetId}/${sel}/notes/v2`, { headers: getAuth() })
       .then(r => r.ok ? r.json() : []).then(setNotes).catch(() => setNotes([]));
@@ -1707,7 +1775,9 @@ const ArtifactTreeTab = ({ assetId, assetName }) => {
   };
 
   const isRegistryView = REGISTRY_TCODES.has(sel);
-  const filteredRows = isRegistryView ? [] : evidenceRows.filter(r => Object.values(r).some(v => String(v ?? '').toLowerCase().includes(filter.toLowerCase())));
+  const filteredRows = isRegistryView ? [] : evidenceRows
+    .filter(r => !starredOnly || r._orca_starred)
+    .filter(r => Object.entries(r).filter(([k]) => k !== '_orca_row_id' && k !== '_orca_starred').some(([, v]) => String(v ?? '').toLowerCase().includes(filter.toLowerCase())));
   const dispRows     = filteredRows.slice(0, visibleCount);
 
   return (
@@ -1878,19 +1948,31 @@ const ArtifactTreeTab = ({ assetId, assetName }) => {
                             placeholder="SEARCH..."
                             value={evSearchInput}
                             onChange={e => setEvSearchInput(e.target.value)}
-                            onKeyDown={e => { if (e.key === 'Enter') { setEvSearch(evSearchInput); loadEvidence(sel, 0, evSearchInput); } }}
+                            onKeyDown={e => { if (e.key === 'Enter') { setEvSearch(evSearchInput); loadEvidence(sel, 0, evSearchInput, starredOnly); } }}
                             style={{ ...Inp, width: 200 }}
                           />
-                          <button onClick={() => { setEvSearch(evSearchInput); loadEvidence(sel, 0, evSearchInput); }}
+                          <button onClick={() => { setEvSearch(evSearchInput); loadEvidence(sel, 0, evSearchInput, starredOnly); }}
                             style={{ ...Btn, fontSize: 9, padding: '3px 8px' }}>GO</button>
-                          {evSearch && <button onClick={() => { setEvSearch(''); setEvSearchInput(''); loadEvidence(sel, 0, ''); }}
+                          {evSearch && <button onClick={() => { setEvSearch(''); setEvSearchInput(''); loadEvidence(sel, 0, '', starredOnly); }}
                             style={{ ...Btn, fontSize: 9, padding: '3px 8px', color: C.greyDim }}>CLR</button>}
+                          <button onClick={() => { const next = !starredOnly; setStarredOnly(next); loadEvidence(sel, 0, evSearch, next); }}
+                            title="Show only starred evidence"
+                            style={{ padding: '3px 8px', background: starredOnly ? '#332900' : 'transparent', border: `1px solid ${starredOnly ? '#ffd700' : C.border}`, color: starredOnly ? '#ffd700' : C.greyDim, cursor: 'pointer', fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold' }}>
+                            ★ STARRED
+                          </button>
                         </div>
                       </>
                     ) : (
                       <>
                         <span style={{ color: C.greyDim, fontSize: 10 }}>{dispRows.length}/{filteredRows.length} RECORDS</span>
-                        <input placeholder="FILTER..." value={filter} onChange={e => { setFilter(e.target.value); setVisibleCount(50); }} style={{ ...Inp, width: 180 }} />
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                          <input placeholder="FILTER..." value={filter} onChange={e => { setFilter(e.target.value); setVisibleCount(50); }} style={{ ...Inp, width: 180 }} />
+                          <button onClick={() => setStarredOnly(v => !v)}
+                            title="Show only starred evidence"
+                            style={{ padding: '3px 8px', background: starredOnly ? '#332900' : 'transparent', border: `1px solid ${starredOnly ? '#ffd700' : C.border}`, color: starredOnly ? '#ffd700' : C.greyDim, cursor: 'pointer', fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold' }}>
+                            ★ STARRED
+                          </button>
+                        </div>
                       </>
                     )}
                   </div>
@@ -1915,11 +1997,18 @@ const ArtifactTreeTab = ({ assetId, assetName }) => {
                       <>
                         {(PAGINATED_TCODES.has(sel) ? evidenceRows : dispRows).map((item, idx) => (
                           <div key={idx} style={{ background: C.bgCard, border: `1px solid ${C.border}`, padding: 12, position: 'relative', marginBottom: 14 }}>
+                            {item._orca_row_id != null && (
+                              <button onClick={() => toggleStar(item)}
+                                title={item._orca_starred ? 'Unstar this evidence' : 'Star this evidence'}
+                                style={{ position: 'absolute', top: -9, left: 8, background: item._orca_starred ? '#ffd700' : '#111', color: item._orca_starred ? '#000' : '#666', border: `1px solid ${item._orca_starred ? '#ffd700' : C.border}`, fontSize: 11, lineHeight: 1, padding: '2px 6px', fontWeight: 'bold', cursor: 'pointer' }}>
+                                {item._orca_starred ? '★' : '☆'}
+                              </button>
+                            )}
                             <div style={{ position: 'absolute', top: -9, right: 8, background: C.red, color: '#fff', fontSize: 9, padding: '1px 5px', fontWeight: 'bold' }}>
                               INDEX_{(PAGINATED_TCODES.has(sel) ? evPage * EV_PAGE_SIZE + idx : idx).toString().padStart(3, '0')}
                             </div>
                             {Object.entries(item).map(([k, v]) => {
-                              if (['VQLSource','_Source','_orca_fallback','_orca_fallback_note'].includes(k)) return null;
+                              if (['VQLSource','_Source','_orca_fallback','_orca_fallback_note','_orca_row_id','_orca_starred'].includes(k)) return null;
                               const display = v === null || v === undefined || v === '' || v === '---' ? '---' : typeof v === 'object' ? JSON.stringify(v) : v.toString();
                               return (
                                 <div key={k} style={{ display: 'flex', marginBottom: 5, borderBottom: `1px solid #0d0d0d`, paddingBottom: 3 }}>
