@@ -14,9 +14,11 @@ import tempfile
 import posixpath
 import shutil
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator
 
 import evidence_normalizer
+from config import cfg
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +373,48 @@ async def _collect_smb_task(ip, username, password, domain, vr_exe, target_files
             except Exception: pass
 
 
+def _scmr_run_bat(ip, username, password, domain, bat_name):
+    """
+    Run an already-staged `C:\\Windows\\Temp\\{bat_name}` via a throwaway
+    Windows service (svcctl/SCM RPC) -- the trigger mechanism shared by both
+    _run_remote_command_smb_task (stages the bat itself) and
+    _run_remote_command_smb_push (stages a bat alongside a pushed package).
+    Runs synchronously; call via run_in_executor. See
+    _run_remote_command_smb_task's docstring for why hSchRpcRun-vs-svcctl
+    naming aside, this returns almost immediately regardless of how long the
+    triggered command actually runs.
+    """
+    from impacket.dcerpc.v5 import scmr, transport as dce_transport
+
+    svc_name = f"orca{uuid.uuid4().hex[:8]}"
+    rpctransport = dce_transport.DCERPCTransportFactory(f"ncacn_np:{ip}[\\pipe\\svcctl]")
+    rpctransport.set_credentials(username, password, domain or "", "", "", None)
+    dce = rpctransport.get_dce_rpc()
+    dce.connect()
+    dce.bind(scmr.MSRPC_UUID_SCMR)
+    sc = scmr.hROpenSCManagerW(dce)['lpScHandle']
+    bin_path = f'C:\\Windows\\System32\\cmd.exe /c "C:\\Windows\\Temp\\{bat_name}"'
+    svc = scmr.hRCreateServiceW(
+        dce, sc, svc_name, svc_name,
+        lpBinaryPathName=bin_path,
+        dwStartType=scmr.SERVICE_DEMAND_START,
+        dwErrorControl=scmr.SERVICE_ERROR_IGNORE,
+    )['lpServiceHandle']
+    try:
+        try:
+            scmr.hRStartServiceW(dce, svc)
+        except Exception:
+            pass  # timeout expected — cmd.exe doesn't call SetServiceStatus
+    finally:
+        try:
+            scmr.hRDeleteService(dce, svc)
+        except Exception:
+            pass
+        scmr.hRCloseServiceHandle(dce, svc)
+        scmr.hRCloseServiceHandle(dce, sc)
+        dce.disconnect()
+
+
 async def _run_remote_command_smb_task(ip, username, password, domain, command, timeout=60):
     """
     Trigger a Windows command line on a remote host via SMB + Task Scheduler
@@ -391,10 +435,8 @@ async def _run_remote_command_smb_task(ip, username, password, domain, command, 
     removes the task's metadata, not any process it already started.
     """
     from impacket.smbconnection import SMBConnection
-    from impacket.dcerpc.v5 import scmr, transport as dce_transport
     import io as _io
 
-    svc_name = f"orca{uuid.uuid4().hex[:8]}"
     bat_name = f"orca_{uuid.uuid4().hex[:8]}.bat"
     # Write the oneliner into a BAT file so quote escaping in lpBinaryPathName
     # is avoided entirely.  start /b detaches PowerShell from cmd.exe so
@@ -404,39 +446,11 @@ async def _run_remote_command_smb_task(ip, username, password, domain, command, 
     bat_remote = f"Temp\\{bat_name}"
 
     def _trigger():
-        # 1. Upload BAT launcher via SMB ADMIN$
         smb = SMBConnection(ip, ip)
         smb.login(username, password, domain or "")
         smb.putFile("ADMIN$", bat_remote, _io.BytesIO(bat_content).read)
         smb.logoff()
-
-        # 2. Run the BAT via svcctl — no quoting issues in lpBinaryPathName
-        rpctransport = dce_transport.DCERPCTransportFactory(f"ncacn_np:{ip}[\\pipe\\svcctl]")
-        rpctransport.set_credentials(username, password, domain or "", "", "", None)
-        dce = rpctransport.get_dce_rpc()
-        dce.connect()
-        dce.bind(scmr.MSRPC_UUID_SCMR)
-        sc = scmr.hROpenSCManagerW(dce)['lpScHandle']
-        bin_path = f'C:\\Windows\\System32\\cmd.exe /c "C:\\Windows\\Temp\\{bat_name}"'
-        svc = scmr.hRCreateServiceW(
-            dce, sc, svc_name, svc_name,
-            lpBinaryPathName=bin_path,
-            dwStartType=scmr.SERVICE_DEMAND_START,
-            dwErrorControl=scmr.SERVICE_ERROR_IGNORE,
-        )['lpServiceHandle']
-        try:
-            try:
-                scmr.hRStartServiceW(dce, svc)
-            except Exception:
-                pass  # timeout expected — cmd.exe doesn't call SetServiceStatus
-        finally:
-            try:
-                scmr.hRDeleteService(dce, svc)
-            except Exception:
-                pass
-            scmr.hRCloseServiceHandle(dce, svc)
-            scmr.hRCloseServiceHandle(dce, sc)
-            dce.disconnect()
+        _scmr_run_bat(ip, username, password, domain, bat_name)
 
     loop = asyncio.get_event_loop()
     try:
@@ -446,6 +460,86 @@ async def _run_remote_command_smb_task(ip, username, password, domain, command, 
         return -1, "", f"SMB_TASK_TIMEOUT: no response within {timeout}s"
     except Exception as e:
         return -1, "", f"SMB_TASK_ERROR: {e}"
+
+
+async def _run_remote_command_smb_push(ip, username, password, domain, local_zip_path, remote_dir=None, timeout=300):
+    """
+    Deliver an ORCA collection package (cert + zip + a small local launcher
+    script) directly to the target over the same SMB session used for
+    triggering, then run it entirely locally on the target -- instead of the
+    old flow where the target reached back out over HTTPS to download the
+    bootstrap script and then the package.
+
+    This removes the two most heavily-signatured indicators in that old
+    flow: the "fetch and execute" download-cradle shape (nothing is ever
+    IEX'd or DownloadFile'd — the package is just... already there), and the
+    dynamically-compiled ICertificatePolicy cert-validation bypass (the cert
+    is trusted properly via Import-Certificate before the collection script
+    ever runs, so it doesn't need its own bypass — see package_builder.py's
+    cert_trusted parameter). The trigger mechanism itself is unchanged: same
+    throwaway-service SCM RPC as _run_remote_command_smb_task, since that
+    part isn't what generated these specific findings.
+
+    `remote_dir`: same meaning as elsewhere (validated absolute Windows path,
+    e.g. C:\\ORCA_Staging) — defaults to C:\\Windows\\Temp when not given,
+    matching the SMB ADMIN$ share's target.
+    """
+    from impacket.smbconnection import SMBConnection
+    import io as _io
+    from package_builder import generate_smb_push_launcher_ps1
+
+    # share + base_rel are SMB-relative (what putFile/createDirectory take);
+    # stage_abs_base is the real Windows path they map to, which the pushed
+    # launcher script needs since it runs locally on the target, not over
+    # SMB. These aren't the same arithmetic for both cases: a custom
+    # remote_dir's share (e.g. C$) maps to the drive root, but the default
+    # ADMIN$ share maps to C:\Windows specifically, not C:\ -- so the
+    # absolute path needs deriving per-case, not by formula from share alone.
+    if remote_dir:
+        drive, _, rest = remote_dir.partition(":\\")
+        drive = drive.upper() or "C"
+        share = f"{drive}$"
+        base_rel = rest
+        stage_abs_base = f"{drive}:\\{rest}" if rest else f"{drive}:\\"
+    else:
+        share, base_rel = "ADMIN$", "Temp"
+        stage_abs_base = "C:\\Windows\\Temp"
+
+    stage_name = f"orca_{uuid.uuid4().hex[:8]}"
+    stage_rel = f"{base_rel}\\{stage_name}" if base_rel else stage_name
+    stage_abs = f"{stage_abs_base}\\{stage_name}"
+
+    launcher_content = generate_smb_push_launcher_ps1(stage_abs).encode("utf-8")
+    zip_bytes = Path(local_zip_path).read_bytes()
+    cert_bytes = None
+    if cfg.SSL_CERTFILE and os.path.exists(cfg.SSL_CERTFILE):
+        cert_bytes = Path(cfg.SSL_CERTFILE).read_bytes()
+
+    bat_name = f"orca_{uuid.uuid4().hex[:8]}.bat"
+    trigger_command = f'powershell -ExecutionPolicy Bypass -File "{stage_abs}\\orca_launch.ps1"'
+    bat_content = f"@echo off\r\nstart \"\" /b {trigger_command}\r\ndel \"%~f0\"\r\n".encode("utf-8")
+    bat_remote = f"Temp\\{bat_name}"
+
+    def _push_and_trigger():
+        smb = SMBConnection(ip, ip)
+        smb.login(username, password, domain or "")
+        smb.createDirectory(share, stage_rel)
+        smb.putFile(share, f"{stage_rel}\\orca_pkg.zip", _io.BytesIO(zip_bytes).read)
+        if cert_bytes:
+            smb.putFile(share, f"{stage_rel}\\orca_cert.cer", _io.BytesIO(cert_bytes).read)
+        smb.putFile(share, f"{stage_rel}\\orca_launch.ps1", _io.BytesIO(launcher_content).read)
+        smb.putFile("ADMIN$", bat_remote, _io.BytesIO(bat_content).read)
+        smb.logoff()
+        _scmr_run_bat(ip, username, password, domain, bat_name)
+
+    loop = asyncio.get_event_loop()
+    try:
+        await asyncio.wait_for(loop.run_in_executor(None, _push_and_trigger), timeout=timeout)
+        return 0, "", ""
+    except asyncio.TimeoutError:
+        return -1, "", f"SMB_PUSH_TIMEOUT: no response within {timeout}s"
+    except Exception as e:
+        return -1, "", f"SMB_PUSH_ERROR: {e}"
 
 
 async def _run_remote_command_winrm(ip, username, password, domain, command, timeout=60):
@@ -527,6 +621,25 @@ async def run_remote_command(ip, username, password, domain, command, timeout=60
     if t == "SMB_TASK":
         return await _run_remote_command_smb_task(ip, username, password, domain, command, timeout)
     return -1, "", f"UNKNOWN_TRANSPORT: {transport}"
+
+
+async def push_and_trigger_package(ip, username, password, domain, local_zip_path,
+                                    remote_dir=None, timeout=300, transport="SMB_TASK"):
+    """
+    Public entry point for SMB-push package delivery (see
+    _run_remote_command_smb_push) -- deploy_routes.py's alternative to
+    run_remote_command() + package_builder.py's HTTP-download bootstrap
+    chain, for callers that want the package delivered without the target
+    ever making an outbound HTTP(S) request to fetch it.
+
+    Only implemented for SMB_TASK currently; WinRM has no file-copy plumbing
+    built here and still goes through the download-based flow via
+    run_remote_command().
+    """
+    t = (transport or "SMB_TASK").upper()
+    if t != "SMB_TASK":
+        return -1, "", f"SMB_PUSH_UNSUPPORTED_TRANSPORT: {transport}"
+    return await _run_remote_command_smb_push(ip, username, password, domain, local_zip_path, remote_dir, timeout)
 
 
 async def _dispatch(transport, ip, username, password, domain, vr_exe, target_files, local_output_dir, asset_id, cleanup, queue):

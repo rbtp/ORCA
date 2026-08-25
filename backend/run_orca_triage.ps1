@@ -5,16 +5,7 @@
 
 $ErrorActionPreference = "Continue"
 
-Add-Type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class OrcaTrustAll : ICertificatePolicy {
-    public bool CheckValidationResult(ServicePoint s, X509Certificate c, WebRequest r, int e) {
-        return true;
-    }
-}
-"@
-[System.Net.ServicePointManager]::CertificatePolicy = New-Object OrcaTrustAll
+{{CERT_BYPASS_BLOCK}}
 [System.Net.ServicePointManager]::SecurityProtocol  = [System.Net.SecurityProtocolType]::Tls12
 
 # Config (injected at package build time)

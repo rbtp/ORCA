@@ -53,6 +53,37 @@ def validate_remote_dir(remote_dir: Optional[str]) -> Optional[str]:
     return remote_dir
 
 
+# run_orca_collection.ps1 / run_orca_triage.ps1 both make several HTTPS calls
+# back to ORCA over their run (per-technique results, heartbeats, start/
+# complete) and need ORCA's self-signed cert trusted for those to work. Two
+# ways to get there:
+#   - cert_trusted=False (default): the script disables cert validation for
+#     its own process via an ICertificatePolicy override -- self-contained,
+#     but that pattern (dynamically-compiled cert-bypass class) is itself a
+#     heavily-signatured EDR indicator.
+#   - cert_trusted=True: used by the SMB-push delivery path (vr_remote.py's
+#     _run_remote_command_smb_push), which imports the real cert into the
+#     target's trust store via Import-Certificate *before* this script ever
+#     runs -- so normal cert validation just works, and this block is empty.
+_CERT_BYPASS_BLOCK = '''# Trust ORCA self-signed cert (compatible with Windows PowerShell 5.1)
+Add-Type @"
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+public class OrcaTrustAll : ICertificatePolicy {
+    public bool CheckValidationResult(ServicePoint s, X509Certificate c, WebRequest r, int e) {
+        return true;
+    }
+}
+"@
+[System.Net.ServicePointManager]::CertificatePolicy = New-Object OrcaTrustAll'''
+
+
+def _cert_bypass_block(cert_trusted: bool) -> str:
+    if cert_trusted:
+        return "# ORCA cert already imported into the trust store by the SMB-push delivery step"
+    return _CERT_BYPASS_BLOCK
+
+
 # ── Token management ──────────────────────────────────────────────────────────
 
 def create_package_token(asset_id: int, case_name: str, user_id: int, technique_count: int,
@@ -215,7 +246,7 @@ def get_triage_techniques(categories: list) -> list[dict]:
 
 
 def build_triage_package(asset_id: int, user_id: int, orca_url: str, categories: list,
-                          remote_dir: Optional[str] = None) -> dict:
+                          remote_dir: Optional[str] = None, cert_trusted: bool = False) -> dict:
     asset = get_asset_info(asset_id)
     if not asset:
         raise ValueError(f"Asset {asset_id} not found")
@@ -272,6 +303,7 @@ def build_triage_package(asset_id: int, user_id: int, orca_url: str, categories:
             .replace("{{ASSET_ID}}", str(asset_id))
             .replace("{{PACKAGE_TOKEN}}", token)
             .replace("{{CASE_NAME}}", asset["case_name"])
+            .replace("{{CERT_BYPASS_BLOCK}}", _cert_bypass_block(cert_trusted))
         )
         (pkg_dir / "run_orca_triage.ps1").write_text(ps1_filled, encoding="utf-8")
 
@@ -309,6 +341,7 @@ def build_triage_package(asset_id: int, user_id: int, orca_url: str, categories:
         "bootstrap_url": bootstrap_url,
         "oneliner": oneliner,
         "zip_name": zip_name,
+        "zip_path": str(zip_path),
         "technique_count": len(techniques),
         "expires_at": (datetime.utcnow() + timedelta(hours=PACKAGE_TOKEN_TTL_HOURS)).isoformat(),
         "asset_hostname": asset["hostname"],
@@ -325,6 +358,44 @@ def get_asset_info(asset_id: int) -> Optional[dict]:
             WHERE a.id = :asset_id
         """), {"asset_id": asset_id}).mappings().fetchone()
     return dict(row) if row else None
+
+
+# ── SMB-push launcher ─────────────────────────────────────────────────────────
+
+def generate_smb_push_launcher_ps1(stage_dir: str) -> str:
+    """
+    Returns a small PS1 that runs entirely from files already pushed to
+    `stage_dir` via SMB (vr_remote.py's _run_remote_command_smb_push) --
+    no network calls of its own, since the cert, the package ZIP, and this
+    script itself all arrive over the same SMB session used to trigger it.
+
+    Imports the ORCA cert the normal way (Import-Certificate), rather than
+    the ICertificatePolicy bypass class run_orca_collection.ps1 otherwise
+    uses -- once genuinely trusted, that script's own HTTPS calls (results,
+    heartbeats) validate normally and don't need cert_trusted=False's bypass
+    either. See package_builder.py's _cert_bypass_block.
+    """
+    return f"""#Requires -RunAsAdministrator
+$ErrorActionPreference = "Stop"
+$Dir = "{stage_dir}"
+try {{
+    $certPath = Join-Path $Dir "orca_cert.cer"
+    if (Test-Path $certPath) {{
+        Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\\LocalMachine\\Root | Out-Null
+        Remove-Item $certPath -Force -ErrorAction SilentlyContinue
+    }}
+    Expand-Archive -Path (Join-Path $Dir "orca_pkg.zip") -DestinationPath $Dir -Force
+    Remove-Item (Join-Path $Dir "orca_pkg.zip") -Force -ErrorAction SilentlyContinue
+    $ps1 = Get-ChildItem -Path $Dir -Filter "run_orca_*.ps1" -Recurse |
+        Where-Object {{ $_.FullName -ne $PSCommandPath }} | Select-Object -First 1
+    if (-not $ps1) {{ throw "No ORCA collection script found in pushed package" }}
+    & powershell.exe -ExecutionPolicy Bypass -File $ps1.FullName
+}} catch {{
+    Write-Host "[ORCA ERROR] $_"
+}} finally {{
+    Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue
+}}
+"""
 
 
 # ── Bootstrap generator ───────────────────────────────────────────────────────
@@ -394,7 +465,8 @@ try {{
 
 # ── Package builder ───────────────────────────────────────────────────────────
 
-def build_package(asset_id: int, user_id: int, orca_url: str, remote_dir: Optional[str] = None) -> dict:
+def build_package(asset_id: int, user_id: int, orca_url: str, remote_dir: Optional[str] = None,
+                   cert_trusted: bool = False) -> dict:
     """
     Build the collection ZIP for asset_id.
     Returns { download_url, bootstrap_url, oneliner, token, technique_count, expires_at }
@@ -468,6 +540,7 @@ def build_package(asset_id: int, user_id: int, orca_url: str, remote_dir: Option
             .replace("{{ASSET_ID}}", str(asset_id))
             .replace("{{PACKAGE_TOKEN}}", token)
             .replace("{{CASE_NAME}}", asset["case_name"])
+            .replace("{{CERT_BYPASS_BLOCK}}", _cert_bypass_block(cert_trusted))
         )
         (pkg_dir / "run_orca_collection.ps1").write_text(ps1_filled, encoding="utf-8")
 
@@ -512,6 +585,7 @@ def build_package(asset_id: int, user_id: int, orca_url: str, remote_dir: Option
         "bootstrap_url": bootstrap_url,
         "oneliner": oneliner,
         "zip_name": zip_name,
+        "zip_path": str(zip_path),
         "technique_count": len(techniques),
         "expires_at": (datetime.utcnow() + timedelta(hours=PACKAGE_TOKEN_TTL_HOURS)).isoformat(),
         "asset_hostname": asset["hostname"],

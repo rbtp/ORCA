@@ -28,7 +28,7 @@ from sqlalchemy import text
 from auth_utils import get_current_user, user_can_access_case
 from config import cfg
 from core.database_manager import db
-from package_builder import build_package, build_triage_package
+from package_builder import build_package, build_triage_package, validate_remote_dir
 
 import vr_remote
 
@@ -124,15 +124,25 @@ async def _deploy_single(
         await emit('ERROR', f'{hostname}: No IP address configured', 'NO_IP')
         return
 
+    # SMB_TASK pushes the whole package over the same SMB session used to
+    # trigger it (see vr_remote.push_and_trigger_package) instead of having
+    # the target reach back out over HTTPS to download it -- avoids the
+    # download-cradle + cert-validation-bypass pattern that flow has. WinRM
+    # doesn't have that plumbing built yet, so it still uses the old
+    # HTTP-download bootstrap chain unchanged.
+    use_smb_push = transport.upper() == 'SMB_TASK'
+
     await emit('DEPLOYING', f'{hostname}: Building collection package...')
     try:
         loop = asyncio.get_event_loop()
         orca_url = _get_orca_base_url()
         pkg = await loop.run_in_executor(
             _build_executor,
-            lambda: build_package(asset_id=asset_id, user_id=user_id, orca_url=orca_url, remote_dir=remote_dir)
+            lambda: build_package(asset_id=asset_id, user_id=user_id, orca_url=orca_url,
+                                   remote_dir=remote_dir, cert_trusted=use_smb_push)
         )
         oneliner = pkg.get('oneliner', '')
+        zip_path = pkg.get('zip_path', '')
     except ValueError as e:
         await emit('ERROR', f'{hostname}: {e}', str(e))
         return
@@ -140,7 +150,11 @@ async def _deploy_single(
         await emit('ERROR', f'{hostname}: Package build failed', str(e))
         return
 
-    if not oneliner:
+    if use_smb_push:
+        if not zip_path:
+            await emit('ERROR', f'{hostname}: Package built but no package path returned', 'NO_ZIP_PATH')
+            return
+    elif not oneliner:
         await emit('ERROR', f'{hostname}: Package built but no deploy command returned', 'NO_ONELINER')
         return
 
@@ -149,13 +163,19 @@ async def _deploy_single(
     await asyncio.sleep(0.2)
     await emit('AUTHENTICATING', f'{hostname}: Authenticating as {username}...')
 
-    returncode, stdout, stderr = await _run_remote_trigger(ip, username, password, oneliner, domain, transport)
+    if use_smb_push:
+        returncode, stdout, stderr = await vr_remote.push_and_trigger_package(
+            ip, username, password, domain, zip_path,
+            remote_dir=validate_remote_dir(remote_dir), transport=transport,
+        )
+    else:
+        returncode, stdout, stderr = await _run_remote_trigger(ip, username, password, oneliner, domain, transport)
     stderr_lower = stderr.lower()
 
     auth_errors  = ['access is denied', 'authentication failed', 'unauthorized', 'logon failure',
                      'the user name or password is incorrect', 'status_logon_failure']
     reach_errors = ['network path was not found', 'could not find', 'winrm_timeout', 'smb_task_timeout',
-                     'target machine actively refused', 'no route to host', 'connection refused',
+                     'smb_push_timeout', 'target machine actively refused', 'no route to host', 'connection refused',
                      'name or service not known', 'rpc server is unavailable']
 
     if any(e in stderr_lower for e in auth_errors):
@@ -315,6 +335,7 @@ async def deploy_triage(req: TriageRequest, current_user=Depends(get_current_use
                 return
 
             hostname = asset.get('hostname', str(asset_id))
+            use_smb_push = req.trigger_transport.upper() == 'SMB_TASK'
             await emit('STAGING', f'{hostname}: Building triage package...')
             try:
                 loop = asyncio.get_event_loop()
@@ -327,16 +348,24 @@ async def deploy_triage(req: TriageRequest, current_user=Depends(get_current_use
                         orca_url=orca_url,
                         categories=req.categories,
                         remote_dir=req.remote_dir,
+                        cert_trusted=use_smb_push,
                     )
                 )
                 oneliner = pkg.get('oneliner', '')
+                zip_path = pkg.get('zip_path', '')
             except Exception as e:
                 await emit('ERROR', f'{hostname}: Package build failed — {e}', str(e))
                 return
 
             trigger_label = 'WinRM' if req.trigger_transport.upper() == 'WINRM' else 'SMB/Task Scheduler'
             await emit('CONNECTING', f'{hostname} ({ip}): Deploying via {trigger_label}...')
-            returncode, stdout, stderr = await _run_remote_trigger(ip, req.username, req.password, oneliner, req.domain, req.trigger_transport)
+            if use_smb_push:
+                returncode, stdout, stderr = await vr_remote.push_and_trigger_package(
+                    ip, req.username, req.password, req.domain, zip_path,
+                    remote_dir=validate_remote_dir(req.remote_dir), transport=req.trigger_transport,
+                )
+            else:
+                returncode, stdout, stderr = await _run_remote_trigger(ip, req.username, req.password, oneliner, req.domain, req.trigger_transport)
             stderr_lower = stderr.lower()
 
             if any(e in stderr_lower for e in ['access is denied', 'authentication failed', 'unauthorized', 'logon failure',
@@ -344,7 +373,7 @@ async def deploy_triage(req: TriageRequest, current_user=Depends(get_current_use
                 await emit('ERROR', f'{hostname}: Authentication failed', stderr[:300])
                 return
             if any(e in stderr_lower for e in ['network path was not found', 'could not find', 'winrm_timeout', 'smb_task_timeout',
-                                                'connection refused', 'rpc server is unavailable']):
+                                                'smb_push_timeout', 'connection refused', 'rpc server is unavailable']):
                 await emit('ERROR', f'{hostname}: Host unreachable', stderr[:300])
                 return
             if returncode == -1:
