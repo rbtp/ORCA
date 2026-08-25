@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import socket
+import tempfile
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -482,8 +484,39 @@ _AGENT_BIN_MAP = {
     "syft.exe":         os.path.join("syftgrype", "syft.exe"),
 }
 
+# Arsenal Image Mounter isn't a single-file binary -- aim_cli.exe needs its
+# whole directory of dependent DLLs (~300MB across 800+ files) alongside it,
+# so it's committed to git as individual files (backend/bin/arsenal/) rather
+# than one archive, since a single pre-built zip would exceed GitHub's 100MB
+# per-file limit. Zipped on first request and cached in /tmp (bin/ is a
+# read-only mount in the container) for orca_agent.py to download as one file.
+_ARSENAL_ZIP_CACHE = Path(tempfile.gettempdir()) / "orca_arsenal_cache.zip"
+
+
+def _build_arsenal_zip() -> Path:
+    if _ARSENAL_ZIP_CACHE.exists():
+        return _ARSENAL_ZIP_CACHE
+    arsenal_dir = Path(__file__).parent / "bin" / "arsenal"
+    if not arsenal_dir.is_dir():
+        raise HTTPException(404, "arsenal/ not present on server")
+    tmp_path = _ARSENAL_ZIP_CACHE.with_suffix(".building")
+    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in arsenal_dir.rglob("*"):
+            if f.is_file():
+                zf.write(f, f.relative_to(arsenal_dir))
+    tmp_path.rename(_ARSENAL_ZIP_CACHE)
+    return _ARSENAL_ZIP_CACHE
+
+
 @router.get("/download/bin/{filename}")
 async def download_binary(filename: str, current_user: dict = Depends(get_current_user)):
+    if filename == "arsenal.zip":
+        zip_path = _build_arsenal_zip()
+        return Response(
+            content=zip_path.read_bytes(),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": 'attachment; filename="arsenal.zip"'},
+        )
     if filename not in _AGENT_BIN_MAP:
         raise HTTPException(404, f"Binary not available for agent deployment: {filename}")
     bin_root = Path(__file__).parent / "bin"
@@ -499,7 +532,7 @@ async def download_binary(filename: str, current_user: dict = Depends(get_curren
 
 @router.get("/download/orca_agent.py")
 async def download_orca_agent():
-    agent_path = Path(__file__).parent.parent / "agent" / "orca_agent.py"
+    agent_path = Path(__file__).parent / "agent" / "orca_agent.py"
     if not agent_path.exists():
         raise HTTPException(404, "Agent script not found on server")
     return Response(
@@ -507,6 +540,28 @@ async def download_orca_agent():
         media_type="text/plain",
         headers={"Content-Disposition": "attachment; filename=orca_agent.py"},
     )
+
+
+@router.post("/mint-install-token")
+async def mint_install_token(current_user: dict = Depends(get_current_user)):
+    """
+    For installs the SMB/WinRM deploy flow can't reach -- the Docker host
+    itself (no self-SMB), or any machine you'd rather set up by hand. Mints
+    the same kind of long-lived agent-scoped token /deploy generates, but
+    just hands it back instead of pushing anything anywhere; the frontend
+    turns it into a copy-paste install command (or pairs it with agent/install.bat).
+    """
+    orca_url = _get_orca_base_url()
+    token = create_access_token(
+        data={
+            "sub": f"agent-manual@{current_user.get('sub', 'unknown')}",
+            "role": "agent",
+            "id": None,
+            "initials": "AG",
+        },
+        expires_delta=timedelta(days=365),
+    )
+    return {"server_url": orca_url, "token": token}
 
 
 @router.post("/deploy")

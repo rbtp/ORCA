@@ -36,10 +36,10 @@
             const path_to_root = "../../";
             const default_light_theme = "clamav";
             const default_dark_theme = "clamav";
-            window.path_to_searchindex_js = "../../searchindex-1b5ba28b.js";
+            window.path_to_searchindex_js = "../../searchindex-f120d447.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../../toc-cbaddea7.js"></script>
+        <script src="../../toc-0c194aa2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -175,20 +175,20 @@
 <p>A “fork” on GitHub is a personal playground. Though the word “fork” in the concept of open source traditionally referred to creating (and maintaining) a new variant of a project, forks on GitHub/GitLab/BitBucket/etc these days typically refer to a personal copy of the project where a user can test modifications to fix a bug or add a feature before contributing it back to the project in the form of a “pull request”.</p>
 <h3 id="create-and-maintain-a-personal-fork"><a class="header" href="#create-and-maintain-a-personal-fork">Create and Maintain a Personal Fork</a></h3>
 <p>You may only have one for any project, but it is very easy to create:</p>
-<p><img src="../../images/create-a-fork.png" alt="Create a Fork"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="../../images/create-a-fork.png" alt="Create a Fork"><span class="img-wrapper"><img src="../../images/create-a-fork.png" alt="Create a Fork"></span></label></p>
 <p>You can rename it as needed so you won’t confused a clone of your fork with that of the upstream <code>clamav</code> repository. Go to the “Settings” page and change the name to add your name in a suffix:</p>
-<p><img src="../../images/change-fork-name.png" alt="Change Fork Name"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="../../images/change-fork-name.png" alt="Change Fork Name"><span class="img-wrapper"><img src="../../images/change-fork-name.png" alt="Change Fork Name"></span></label></p>
 <p>You’re free to add or delete branches in your fork as you see fit, but I would advise against adding your own commits to the existing branches. The existing branches, particularly the <code>main</code> branch, are a reference from which you can create your own branches for your work. Adding your own commits to the existing branches will break your ability to synchronize with the upstream <code>Cisco-Talos/clamav</code> repository, and without more advanced Git experience you won’t be able to correct it.</p>
 <blockquote>
 <p><em>Tip</em>: If you’ve managed to screw up the commit history in your fork to the point where you don’t know how to fix it, you can always delete your fork and create a new one.</p>
 </blockquote>
 <p>Your fork is a snapshot of the upstream <code>clamav</code> repository at the moment at which you created it. Left unmaintained, your fork’s default branch will get left behind. Unlike BitBucket, GitHub will not sync branches for you automatically. If your branch is behind, it is simple to sync the branch on your fork using GitHub’s GUI by pressing the “Fetch Upstream” button:</p>
-<p><img src="../../images/fork-is-behind.png" alt="Sync and Merge"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="../../images/fork-is-behind.png" alt="Sync and Merge"><span class="img-wrapper"><img src="../../images/fork-is-behind.png" alt="Sync and Merge"></span></label></p>
 <p>You can sync other branches too. Simply switch branches to the desired branch and press “Fetch Upstream” again.</p>
 <h3 id="working-with-a-clone-of-your-fork-on-the-command-line"><a class="header" href="#working-with-a-clone-of-your-fork-on-the-command-line">Working with a Clone of your Fork on the Command Line</a></h3>
 <p>If you don’t already have an SSH key for your GitHub account, I recommend creating one. Navigate to your Account Settings and under SSH and GPG keys, click the “New SSH key” button. If you’re unfamiliar with how to generate an SSH key, there’s a nearby link “generating SSH keys” with additional instructions.</p>
 <p>Next, clone your ClamAV <em>fork</em>. Use the “Code” button on the default page for your fork to copy the “SSH” URL. If you don’t want to use an SSH key for GitHub authentication, use the HTTPS URL instead:</p>
-<p><img src="../../images/clone-your-fork.png" alt="Clone your Fork"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="../../images/clone-your-fork.png" alt="Clone your Fork"><span class="img-wrapper"><img src="../../images/clone-your-fork.png" alt="Clone your Fork"></span></label></p>
 <p>Now open up a terminal and type:</p>
 <pre><code class="language-bash">git clone &lt;paste that Git URL&gt;
 cd clamav-YourNameHere
@@ -276,13 +276,15 @@ git rebase upstream/main
 
         <script src="../../elasticlunr-ef4e11c1.min.js"></script>
         <script src="../../mark-09e88c2c.min.js"></script>
-        <script src="../../searcher-c2a407aa.js"></script>
+        <script src="../../searcher-09f2665d.js"></script>
 
         <script src="../../clipboard-1626706a.min.js"></script>
         <script src="../../highlight-abc7f01d.js"></script>
         <script src="../../book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="../../mermaid-eefea253.min.js"></script>
+        <script src="../../mermaid-init-ccf746f1.js"></script>
 
 
 

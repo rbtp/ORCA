@@ -1200,6 +1200,7 @@ CREATE TABLE public.mitre_techniques (
 CREATE TABLE public.mount_sessions (
     id integer NOT NULL,
     asset_id integer NOT NULL,
+    agent_id character varying(64),
     image_path text NOT NULL,
     device_number character varying(20),
     drive_letter character varying(5),

@@ -35,6 +35,8 @@ export default function AgentDeployModal({ isOpen, onClose }) {
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployDone, setDeployDone] = useState(null);  // null/'SUCCESS'/'FAILED'
   const [confirmDelete, setConfirmDelete] = useState(null); // agent_id pending confirm
+  const [installToken, setInstallToken]   = useState(null); // {server_url, token} once generated
+  const [installLoading, setInstallLoading] = useState(false);
   const logsEndRef = useRef(null);
   // This modal is permanently mounted by App.jsx (isOpen just toggles an
   // early `return null` below, the instance never unmounts) -- so nothing
@@ -57,7 +59,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
   // Load fleet when modal opens
   useEffect(() => {
     if (!isOpen) return;
-    setLogs([]); setDeployDone(null);
+    setLogs([]); setDeployDone(null); setInstallToken(null);
 
     fetch(`${API}/api/agent/list`, { credentials: 'include', headers: getAuth() })
       .then(r => r.ok ? r.json() : [])
@@ -146,6 +148,22 @@ export default function AgentDeployModal({ isOpen, onClose }) {
     setPassword('');
     onClose();
   };
+
+  const handleGenerateInstallToken = async () => {
+    setInstallLoading(true);
+    try {
+      const r = await fetch(`${API}/api/agent/mint-install-token`, { method: 'POST', credentials: 'include', headers: getAuth() });
+      if (r.ok) setInstallToken(await r.json());
+    } catch {}
+    finally { setInstallLoading(false); }
+  };
+
+  const installCommand = installToken ? [
+    `python -c "import json,urllib.request;`,
+    `urllib.request.urlretrieve('${installToken.server_url}/api/agent/download/orca_agent.py','orca_agent.py');`,
+    `open('config.json','w').write(json.dumps({'server_url':'${installToken.server_url}','token':'${installToken.token}','bin_dir':'./bin','poll_interval':5}))"`,
+    `&& pip install requests --quiet && python orca_agent.py`,
+  ].join(' ') : '';
 
   if (!isOpen) return null;
 
@@ -272,12 +290,28 @@ export default function AgentDeployModal({ isOpen, onClose }) {
               </button>
             </div>
 
-            {/* Manual install note */}
+            {/* Manual install — for machines the SMB deploy above can't reach:
+                the Docker host itself (no self-SMB), or anywhere you'd rather
+                set up by hand. */}
             <div style={{ padding: '10px 14px', background: 'rgba(255,170,0,0.05)', border: `1px solid ${C.amber}`, marginBottom: 12 }}>
-              <div style={{ ...mono, fontSize: 10, color: C.amber, marginBottom: 6 }}>MANUAL_INSTALL — Run on target workstation:</div>
-              <div style={{ ...mono, fontSize: 10, color: C.greyDim, userSelect: 'all', lineHeight: 1.6 }}>
-                {`python -c "import urllib.request; urllib.request.urlretrieve('${window.location.origin}/api/agent/download/orca_agent.py','orca_agent.py')" && pip install requests && python orca_agent.py`}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <div style={{ ...mono, fontSize: 10, color: C.amber }}>MANUAL_INSTALL — run on the target machine (incl. this server's own Windows host)</div>
+                <button onClick={handleGenerateInstallToken} disabled={installLoading}
+                  style={{ ...Btn, padding: '3px 10px', fontSize: 9, background: 'none', border: `1px solid ${C.amber}`, color: C.amber }}>
+                  {installLoading ? '⟳' : installToken ? '↻ REGENERATE' : '▶ GENERATE_COMMAND'}
+                </button>
               </div>
+              {installToken ? (
+                <div style={{ ...mono, fontSize: 10, color: C.greyDim, userSelect: 'all', lineHeight: 1.6, wordBreak: 'break-all' }}>
+                  {installCommand}
+                </div>
+              ) : (
+                <div style={{ ...mono, fontSize: 10, color: C.greyDim, lineHeight: 1.6 }}>
+                  Generates a one-time install command with a scoped agent token embedded — needs Python
+                  on the target already. For a persistent Windows service instead (survives reboots), use
+                  the token above with <span style={{ color: C.grey }}>agent/install.bat</span> from the repo.
+                </div>
+              )}
             </div>
 
             {/* Deployment log */}

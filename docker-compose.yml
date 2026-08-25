@@ -21,6 +21,7 @@ services:
     volumes:
       - orca-certs:/app/certs          # shared TLS certs (writable — backend generates on first boot)
       - ./backend/bin:/app/bin:ro
+      - ./agent:/app/agent:ro          # orca_agent.py, served to remote targets via /api/agent/download/orca_agent.py
       - orca-evidence:/app/evidence
       - ${MEMORY_DUMPS_DIR:-./memory-dumps}:/app/memory-dumps:ro  # host dir for memory images (set MEMORY_DUMPS_DIR in .env)
       - ${CASES_DIR:-./cases}:/app/cases:rw                       # investigation working dirs (set CASES_DIR in .env)

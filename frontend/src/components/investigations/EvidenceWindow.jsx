@@ -3209,8 +3209,6 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
       }).catch(() => {});
   }, [assetId]);
 
-  const CLAM = 'C:\\Users\\Sentinel\\Desktop\\Tests\\ORCAWEB\\backend\\bin\\clamav';
-
   const addLog = (m, type = 'info') => setLogs(p => [{ t: ts(), m, type }, ...p].slice(0, 500));
   const stopScan = () => {
     try { readerRef.current?.cancel(); } catch {} readerRef.current = null;
@@ -3269,7 +3267,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
     addLog('Running freshclam — this may take a moment...');
     try {
       const resp = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/scan/clam/update`,
-        { method: 'POST', headers: getAuth(), body: JSON.stringify({ clam_base: CLAM }) });
+        { method: 'POST', headers: getAuth(), body: JSON.stringify({}) });
       const d = await resp.json();
       setUpdateResult(d);
       addLog(d.message || 'Update complete.', d.status === 'SUCCESS' ? 'success' : 'error');
@@ -3301,7 +3299,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
     try {
       const resp = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/scan/clam`, {
         method: 'POST', headers: getAuth(),
-        body: JSON.stringify({ asset_id: String(assetId), scan_path: scanPath, recursive, remove, clam_base: CLAM })
+        body: JSON.stringify({ asset_id: String(assetId), scan_path: scanPath, recursive, remove })
       });
       if (!resp.ok) { const e = await resp.json(); addLog('BACKEND: ' + (e.detail || resp.statusText), 'error'); setIsScanning(false); return; }
       const reader = resp.body.getReader(); readerRef.current = reader;

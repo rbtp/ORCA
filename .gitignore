@@ -39,6 +39,11 @@ backend/bin/clamav/**/*.cld
 backend/bin/clamav/**/*.sign
 backend/bin/clamav/**/freshclam.dat
 
+# Generated at request time by agent_routes.py from the already-committed
+# backend/bin/arsenal/ directory -- a pre-built zip of it exceeds GitHub's
+# 100MB single-file limit, so it's never committed, only cached in /tmp.
+backend/bin/arsenal.zip
+
 # MITRE ATT&CK STIX bundle -- same reasoning, operator-supplied at deploy
 # time (see backend/data/README.md), not vendored.
 backend/data/mitre-attack.json

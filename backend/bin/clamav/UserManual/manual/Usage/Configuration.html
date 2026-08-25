@@ -36,10 +36,10 @@
             const path_to_root = "../../";
             const default_light_theme = "clamav";
             const default_dark_theme = "clamav";
-            window.path_to_searchindex_js = "../../searchindex-1b5ba28b.js";
+            window.path_to_searchindex_js = "../../searchindex-f120d447.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../../toc-cbaddea7.js"></script>
+        <script src="../../toc-0c194aa2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -232,13 +232,13 @@ cp clamav-milter.conf.example clamav-milter.conf
 copy .\conf_examples\clamd.conf.sample .\clamd.conf
 </code></pre>
 <p>Run:</p>
-<pre><code class="language-ps1">write.exe .\freshclam.conf
+<pre><code class="language-ps1">notepad .\freshclam.conf
 </code></pre>
-<p>WordPad will pop up. Delete the line that says “Example”. You may also wish to set additional options to enable features or alter default behavior, such as the receive-timeout. Save the file and close WordPad.</p>
+<p>Notepad will pop up. Delete the line that says “Example”. You may also wish to set additional options to enable features or alter default behavior, such as the receive-timeout. Save the file and close Notepad.</p>
 <p>Run:</p>
-<pre><code class="language-ps1">write.exe .\clamd.conf
+<pre><code class="language-ps1">notepad .\clamd.conf
 </code></pre>
-<p>WordPad will pop up. Delete the line that says “Example”. You may also wish to set additional options to enable features or alter default behavior, such as enabling logging. Save the file and close WordPad.</p>
+<p>Notepad will pop up. Delete the line that says “Example”. You may also wish to set additional options to enable features or alter default behavior, such as enabling logging. Save the file and close Notepad.</p>
 <h4 id="additional-notes-about-the-config-files-and-database-directories"><a class="header" href="#additional-notes-about-the-config-files-and-database-directories">Additional notes about the config files and database directories</a></h4>
 <p>The install directory is but one of a few locations ClamAV may search for configs and for signature databases.</p>
 <p>Config files path search order:</p>
@@ -435,13 +435,15 @@ useradd -g clamav -s /bin/false -c "Clam Antivirus" clamav
 
         <script src="../../elasticlunr-ef4e11c1.min.js"></script>
         <script src="../../mark-09e88c2c.min.js"></script>
-        <script src="../../searcher-c2a407aa.js"></script>
+        <script src="../../searcher-09f2665d.js"></script>
 
         <script src="../../clipboard-1626706a.min.js"></script>
         <script src="../../highlight-abc7f01d.js"></script>
         <script src="../../book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="../../mermaid-eefea253.min.js"></script>
+        <script src="../../mermaid-init-ccf746f1.js"></script>
 
 
 

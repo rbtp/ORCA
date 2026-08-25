@@ -61,10 +61,9 @@ class _Config:
         "ORCA_GRYPE_EXE",
         os.path.join(_BASE, "bin", "syftgrype", f"grype{_EXE}")
     )
-    AIM_CLI: str = os.environ.get(
-        "ORCA_AIM_CLI",
-        os.path.join(_BASE, "bin", "arsenal", f"aim_cli{_EXE}")
-    )
+    # Arsenal Image Mounter (aim_cli) has no Linux build and is never executed
+    # in this process -- disk mounting is dispatched to a Windows ORCA agent
+    # instead (main.py's /api/assets/mount), so there's no local-path config here.
 
     # ── Memory / forensics binaries ───────────────────────────────────────────
     VOL3_BASE: str = os.environ.get(
@@ -75,9 +74,42 @@ class _Config:
         "ORCA_WINPMEM_BASE",
         os.path.join(_BASE, "bin", "remora", "volatility3")
     )
+    # CLAM_BASE: the vendored Windows ClamAV bundle -- only ever served for
+    # download to remote targets via /api/agent/download/bin/clamscan.exe
+    # (agent_routes.py's _AGENT_BIN_MAP), never executed in this process.
     CLAM_BASE: str = os.environ.get(
         "ORCA_CLAM_BASE",
         os.path.join(_BASE, "bin", "clamav")
+    )
+    # CLAM_EXE / CLAM_FRESHCLAM_EXE / CLAM_DB_DIR: for scanning directly inside
+    # this process's own OS (mitre_routes.py's /scan/clam -- e.g. a dead-disk
+    # image mounted locally). Must match the container's actual platform: the
+    # Windows vendored copy only runs on Windows; on Linux this points at the
+    # apt-installed system clamscan/freshclam (Dockerfile installs `clamav
+    # clamav-daemon` and pre-creates /var/lib/clamav for exactly this).
+    CLAM_EXE: str = os.environ.get(
+        "ORCA_CLAM_EXE",
+        os.path.join(_BASE, "bin", "clamav", "clamscan.exe") if platform.system() == "Windows"
+        else "/usr/bin/clamscan"
+    )
+    CLAM_FRESHCLAM_EXE: str = os.environ.get(
+        "ORCA_CLAM_FRESHCLAM_EXE",
+        os.path.join(_BASE, "bin", "clamav", "freshclam.exe") if platform.system() == "Windows"
+        else "/usr/bin/freshclam"
+    )
+    CLAM_DB_DIR: str = os.environ.get(
+        "ORCA_CLAM_DB_DIR",
+        os.path.join(_BASE, "bin", "clamav") if platform.system() == "Windows"
+        else "/var/lib/clamav"
+    )
+    # Linux only: Debian's default /etc/clamav/freshclam.conf sets
+    # UpdateLogFile, which freshclam locks/writes to regardless of --stdout --
+    # bypass it with our own minimal config instead. Windows freshclam.exe
+    # already auto-discovers freshclam.conf next to itself in bin/clamav/.
+    CLAM_FRESHCLAM_CONF: str = os.environ.get(
+        "ORCA_CLAM_FRESHCLAM_CONF",
+        os.path.join(_BASE, "clamav_freshclam_linux.conf") if platform.system() != "Windows"
+        else ""
     )
 
     # ── Parallel collection ───────────────────────────────────────────────────

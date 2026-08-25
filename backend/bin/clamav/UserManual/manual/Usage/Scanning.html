@@ -36,10 +36,10 @@
             const path_to_root = "../../";
             const default_light_theme = "clamav";
             const default_dark_theme = "clamav";
-            window.path_to_searchindex_js = "../../searchindex-1b5ba28b.js";
+            window.path_to_searchindex_js = "../../searchindex-f120d447.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../../toc-cbaddea7.js"></script>
+        <script src="../../toc-0c194aa2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -179,7 +179,11 @@
 <li><a href="#daemon">Daemon</a>
 <ul>
 <li><a href="#clamd">ClamD</a></li>
-<li><a href="#clamdscan">ClamDScan</a></li>
+<li><a href="#clamdscan">ClamDScan</a>
+<ul>
+<li><a href="#clamdscan-mode-and-option-interactions">ClamDScan mode and option interactions</a></li>
+</ul>
+</li>
 <li><a href="#clamdtop">ClamDTop</a></li>
 <li><a href="#on-access-scanning">On-Access Scanning</a>
 <ul>
@@ -220,24 +224,9 @@
 <h3 id="clamd"><a class="header" href="#clamd">ClamD</a></h3>
 <p><code>clamd</code> is a multi-threaded daemon that uses <em>libclamav</em> to scan files for viruses. Scanning behavior can be fully configured to fit most needs by modifying <code>clamd.conf</code>.</p>
 <p>As <code>clamd</code> requires a virus signature database to run, we recommend setting up ClamAV’s official signatures before running <code>clamd</code> using <code>freshclam</code>.</p>
-<p>The daemon works by listening for commands on the sockets specified in <code>clamd.conf</code>. Listening is supported over both unix local sockets and TCP sockets.</p>
-<p><strong>IMPORTANT:</strong> <code>clamd</code> does not currently protect or authenticate traffic coming over the TCP socket, meaning it will accept any and all of the following commands listed from <em>any</em> source. Thus, we strongly recommend following best networking practices when setting up your <code>clamd</code> instance. I.e. don’t expose your TCP socket to the Internet.</p>
-<p>Here is a quick list of the commands accepted by <code>clamd</code> over the socket.</p>
-<ul>
-<li><code>PING</code></li>
-<li><code>VERSION</code></li>
-<li><code>RELOAD</code></li>
-<li><code>SHUTDOWN</code></li>
-<li><code>SCAN</code> <em>file/directory</em></li>
-<li><code>RAWSCAN</code> <em>file/directory</em></li>
-<li><code>CONTSCAN</code> <em>file/directory</em></li>
-<li><code>MULTISCAN</code> <em>file/directory</em></li>
-<li><code>ALLMATCHSCAN</code> <em>file/directory</em></li>
-<li><code>INSTREAM</code></li>
-<li><code>FILDES</code></li>
-<li><code>STATS</code></li>
-<li><code>IDSESSION, END</code></li>
-</ul>
+<p>The daemon works by listening for commands on the sockets specified in <code>clamd.conf</code>. Listening is supported over both Unix local sockets and TCP sockets.</p>
+<p><strong>IMPORTANT:</strong> <code>clamd</code> does not currently protect or authenticate traffic coming over the TCP socket, meaning it will accept commands from any source that can reach that socket. Thus, we strongly recommend following best networking practices when setting up your <code>clamd</code> instance. I.e. don’t expose your TCP socket to the Internet.</p>
+<p>For details about socket types, command framing, scan commands, streaming file contents, passing file descriptors, and reading one or more scan results, see the <a href="ClamdProtocol.html">ClamD protocol guide</a>.</p>
 <p>As with most ClamAV tools, you can find out more about these by invoking the command:</p>
 <pre><code class="language-bash">man clamd
 </code></pre>
@@ -258,6 +247,31 @@
 <p>Again, running <code>clamdscan</code>, once you have a working <code>clamd</code> instance, is simple:</p>
 <pre><code class="language-bash">clamdscan [*options*] [*file/directory/-*]
 </code></pre>
+<h4 id="clamdscan-mode-and-option-interactions"><a class="header" href="#clamdscan-mode-and-option-interactions">ClamDScan mode and option interactions</a></h4>
+<p><code>clamdscan</code> sends scan work to a running <code>clamd</code> daemon. What it sends depends first on the socket type, and then on command-line options:</p>
+<ul>
+<li>Unix/local socket:
+<ul>
+<li>By default, <code>clamdscan</code> asks the local daemon to open the paths you provide. The daemon must be able to see those paths and have permission to read them.</li>
+<li>With <code>--fdpass</code>, <code>clamdscan</code> opens each file itself and passes the open file to the daemon. This is useful when the daemon runs as a different user or sees a different filesystem view. This option only works with a Unix/local socket and fd-passing support.</li>
+<li>With <code>--stream</code>, <code>clamdscan</code> sends file contents to the daemon instead of asking the daemon to open paths.</li>
+<li>With <code>--multiscan</code>, directory scans can use multiple daemon worker threads. If <code>--stream</code> or <code>--fdpass</code> is also used, <code>clamdscan</code> walks the requested paths itself and submits individual file scans while still allowing the daemon to process multiple files in parallel.</li>
+<li><code>--allmatch</code> is only effective when <code>clamdscan</code> is asking the daemon to open paths directly and is not using <code>--multiscan</code>, <code>--stream</code>, or <code>--fdpass</code>.</li>
+</ul>
+</li>
+<li>TCP socket:
+<ul>
+<li>When the daemon is remote, <code>clamdscan</code> sends file contents instead of local paths because client paths may not exist on the daemon host.</li>
+<li>When the daemon is local and <code>clamdscan</code> can determine that it is local, <code>clamdscan</code> may ask the daemon to open local paths directly.</li>
+<li><code>--stream</code> forces <code>clamdscan</code> to send file contents, even when the daemon is local.</li>
+<li><code>--fdpass</code> is not available over TCP. Use either <code>--stream</code> or <code>--fdpass</code> for a scan, based on the socket type and how the daemon can access the files.</li>
+<li>With <code>--multiscan</code>, local directory scans may use multiple daemon worker threads. Remote scans and <code>--stream</code> scans are handled as individual file scans, while still allowing the daemon to process multiple files in parallel.</li>
+<li><code>--allmatch</code> is only effective when <code>clamdscan</code> is asking a local daemon to open paths directly and is not using <code>--multiscan</code> or <code>--stream</code>.</li>
+</ul>
+</li>
+</ul>
+<p><code>--allmatch</code> is not useful with <code>--multiscan</code>; use it only for scans where <code>clamdscan</code> is asking a local daemon to open paths directly. For quarantine, choose one action for a scan: <code>--move</code>, <code>--copy</code>, or <code>--remove</code>.</p>
+<p>Quarantine actions such as <code>--move</code>, <code>--copy</code>, and <code>--remove</code> are performed by <code>clamdscan</code>, not by <code>clamd</code>. For directory scans with quarantine actions enabled, <code>clamdscan</code> resolves the action path for each file before requesting the scan. When <code>--multiscan</code> is also enabled, <code>clamdscan</code> submits individual file scans so it can preserve the scan result to action-path association while still allowing <code>clamd</code> to process multiple files in parallel.</p>
 <h3 id="clamdtop"><a class="header" href="#clamdtop">ClamDTop</a></h3>
 <p><code>clamdtop</code> is a tool to monitor one or multiple instances of <code>clamd</code>. It has a colorized <em>ncurses</em> interface, which shows each job queued, memory usage, and information about the loaded signature database for the connected <code>clamd</code> instance(s). By default it will attempt to connect to the local <code>clamd</code> as defined in <code>clamd.conf</code>. However, you can specify other <code>clamd</code> instances at the command line.</p>
 <p>To learn more, use the commands</p>
@@ -363,7 +377,7 @@
 <p>This affects:</p>
 <ul>
 <li>The API, notably the <code>cl_scanfile()</code> function</li>
-<li>ClamD socket input, e.g. the commands <code>SCAN</code>, <code>CONTSCAN</code>, <code>MUTLISCAN</code>, etc.</li>
+<li>ClamD socket input, e.g. the commands <code>SCAN</code>, <code>CONTSCAN</code>, <code>MULTISCAN</code>, etc.</li>
 <li>ClamD socket output, i.e replies to the above queries</li>
 </ul>
 <p>For legacy reasons ANSI (i.e. <code>CP_ACP</code>) input will still be accepted and processed as before, but with two important remarks:</p>
@@ -381,7 +395,7 @@
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../../manual/OnAccess.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../../manual/Usage/ClamdProtocol.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -395,7 +409,7 @@
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../../manual/OnAccess.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../../manual/Usage/ClamdProtocol.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -425,13 +439,15 @@
 
         <script src="../../elasticlunr-ef4e11c1.min.js"></script>
         <script src="../../mark-09e88c2c.min.js"></script>
-        <script src="../../searcher-c2a407aa.js"></script>
+        <script src="../../searcher-09f2665d.js"></script>
 
         <script src="../../clipboard-1626706a.min.js"></script>
         <script src="../../highlight-abc7f01d.js"></script>
         <script src="../../book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="../../mermaid-eefea253.min.js"></script>
+        <script src="../../mermaid-init-ccf746f1.js"></script>
 
 
 

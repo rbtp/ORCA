@@ -64,6 +64,7 @@ export default function CaseDetail({
   const [mountExpanded, setMountExpanded] = useState({});
   const [mountForms, setMountForms]       = useState({});
   const [mountLoading, setMountLoading]   = useState({});
+  const [mountAgents, setMountAgents]     = useState([]);
 
   // Deploy state
   const getDefaultTransport = () => {
@@ -235,6 +236,13 @@ export default function CaseDetail({
 
   useEffect(() => { loadCompletion(); }, [caseName]);
 
+  useEffect(() => {
+    fetch(`${import.meta.env.VITE_API_URL}/api/agent/list`, { credentials: 'include', headers: getAuthHeaders() })
+      .then(r => r.ok ? r.json() : [])
+      .then(data => setMountAgents((data || []).filter(a => a.status === 'ONLINE' && (a.capabilities || []).includes('aim'))))
+      .catch(() => setMountAgents([]));
+  }, []);
+
   const handleInvestigateAsset = (id) => {
     setIsEvidenceOpen(false);
     setInvestigatingAssetId(null);
@@ -391,12 +399,12 @@ export default function CaseDetail({
 
   const handleMount = async (assetId) => {
     const form = mountForms[String(assetId)] || {};
-    if (!form.imagePath) return;
+    if (!form.imagePath || !form.agentId) return;
     setMountLoading(prev => ({ ...prev, [String(assetId)]: true }));
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/mount`, {
         method: 'POST', credentials: 'include', headers: getAuthHeaders(),
-        body: JSON.stringify({ asset_id: assetId, image_path: form.imagePath, drive_letter: form.driveLetter || null, provider: form.provider || 'auto', readonly: true }),
+        body: JSON.stringify({ asset_id: assetId, agent_id: form.agentId, image_path: form.imagePath, drive_letter: form.driveLetter || null, provider: form.provider || 'auto', readonly: true }),
       });
       const d = await r.json();
       if (r.ok) {
@@ -887,10 +895,22 @@ export default function CaseDetail({
                         <tr><td colSpan={6} style={{ padding: '0 0 12px 0', borderBottom: '1px solid #111' }}>
                           <div style={{ background: '#060606', border: '1px solid #1a1a1a', margin: '0 10px', padding: '12px 16px', fontFamily: 'monospace', fontSize: 10 }}>
                             <div style={{ color: '#888', fontSize: 9, letterSpacing: 1, marginBottom: 10 }}>IMAGE_MOUNT_CONTROLLER — {a.hostname.toUpperCase()}</div>
+                            {mountAgents.length === 0 && (
+                              <div style={{ color: '#ffaa00', fontSize: 9, marginBottom: 8 }}>
+                                NO_MOUNT_AGENTS_ONLINE — deploy or install an ORCA agent with Arsenal Image Mounter first (Agent Fleet).
+                              </div>
+                            )}
                             <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 10 }}>
                               <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 2, minWidth: 250 }}>
                                 <span style={{ color: '#666', fontSize: 9 }}>IMAGE_PATH</span>
-                                <input value={form.imagePath || ''} onChange={e => setMountForms(prev => ({ ...prev, [aId]: { ...form, imagePath: e.target.value } }))} placeholder="C:\images\suspect.E01" style={{ background: '#000', border: '1px solid #2a2a2a', color: '#00ff41', fontFamily: 'monospace', fontSize: 10, padding: '5px 8px', outline: 'none' }} />
+                                <input value={form.imagePath || ''} onChange={e => setMountForms(prev => ({ ...prev, [aId]: { ...form, imagePath: e.target.value } }))} placeholder="C:\images\suspect.E01 or \\fileserver\evidence\suspect.E01" style={{ background: '#000', border: '1px solid #2a2a2a', color: '#00ff41', fontFamily: 'monospace', fontSize: 10, padding: '5px 8px', outline: 'none' }} />
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 140 }}>
+                                <span style={{ color: '#666', fontSize: 9 }}>MOUNT_VIA_AGENT</span>
+                                <select value={form.agentId || ''} onChange={e => setMountForms(prev => ({ ...prev, [aId]: { ...form, agentId: e.target.value } }))} style={{ background: '#000', border: '1px solid #2a2a2a', color: '#00ff41', fontFamily: 'monospace', fontSize: 10, padding: '5px 6px', outline: 'none' }}>
+                                  <option value="">SELECT_AGENT</option>
+                                  {mountAgents.map(ag => <option key={ag.agent_id} value={ag.agent_id}>{ag.hostname}</option>)}
+                                </select>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                                 <span style={{ color: '#666', fontSize: 9 }}>DRIVE_LETTER</span>
@@ -905,7 +925,7 @@ export default function CaseDetail({
                                   {['auto', 'LibEwf', 'DiscUtils', 'LibQcow', 'None'].map(p => <option key={p} value={p}>{p}</option>)}
                                 </select>
                               </div>
-                              <button onClick={() => handleMount(a.id)} disabled={loading || !form.imagePath || !!activeMount}
+                              <button onClick={() => handleMount(a.id)} disabled={loading || !form.imagePath || !form.agentId || !!activeMount}
                                 style={{ background: activeMount ? '#111' : '#00ff41', color: activeMount ? '#444' : '#000', border: 'none', fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold', padding: '7px 14px', cursor: activeMount ? 'not-allowed' : 'pointer', letterSpacing: 1, opacity: loading ? 0.5 : 1 }}>
                                 {loading ? 'MOUNTING...' : activeMount ? 'ALREADY_MOUNTED' : '[ MOUNT_IMAGE ]'}
                               </button>
@@ -913,7 +933,7 @@ export default function CaseDetail({
                             {activeMount && (
                               <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 10px', background: 'rgba(155,89,255,0.06)', border: '1px solid #2a1a4a', marginBottom: 8 }}>
                                 <div style={{ display: 'flex', gap: 16 }}>
-                                  {[['DEVICE', activeMount.device_number], ['DRIVE', activeMount.drive_letter ? `${activeMount.drive_letter}:` : '—'], ['PHYSICAL', activeMount.physical_drive], ['PROVIDER', activeMount.provider]].map(([l, v]) => v && (
+                                  {[['AGENT', mountAgents.find(ag => ag.agent_id === activeMount.agent_id)?.hostname || activeMount.agent_id], ['DEVICE', activeMount.device_number], ['DRIVE', activeMount.drive_letter ? `${activeMount.drive_letter}:` : '—'], ['PHYSICAL', activeMount.physical_drive], ['PROVIDER', activeMount.provider]].map(([l, v]) => v && (
                                     <div key={l} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                                       <span style={{ color: '#bbb', fontSize: 8 }}>{l}</span>
                                       <span style={{ color: '#9b59ff', fontSize: 10 }}>{v}</span>

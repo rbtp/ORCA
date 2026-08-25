@@ -27,7 +27,7 @@
  * @macro
  * Version number of the clamav package release
  */
-#define CLAMAV_VERSION "1.5.2"
+#define CLAMAV_VERSION "1.5.4"
 
 /**
  * @macro
@@ -35,7 +35,7 @@
  * release. This is a 24 bit number with 8 bits for major number, 8 bits
  * for minor and 8 bits for patch. Version 1.2.3 becomes 0x010203.
  */
-#define CLAMAV_VERSION_NUM 0x010502
+#define CLAMAV_VERSION_NUM 0x010504
 
 /**
  * @macro

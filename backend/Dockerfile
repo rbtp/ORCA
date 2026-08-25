@@ -26,15 +26,15 @@ RUN npm install
 
 COPY . .
 
-RUN mkdir -p /app/certs /var/lib/clamav
+RUN mkdir -p /app/certs /var/lib/clamav /var/log/clamav
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Drop to non-root user; pre-create writable directories with correct ownership
 RUN useradd -r -u 1000 -g root -s /bin/false orca && \
-    mkdir -p /app/certs /app/evidence /app/.cache /var/lib/clamav /tmp/orca_behavioral && \
-    chown -R orca:root /app /var/lib/clamav /tmp/orca_behavioral /entrypoint.sh && \
+    mkdir -p /app/certs /app/evidence /app/.cache /var/lib/clamav /var/log/clamav /tmp/orca_behavioral && \
+    chown -R orca:root /app /var/lib/clamav /var/log/clamav /tmp/orca_behavioral /entrypoint.sh && \
     chmod -R g+w /app /var/lib/clamav /tmp/orca_behavioral
 
 # Volatility3 resolves its cache via XDG_CACHE_HOME or expanduser("~").

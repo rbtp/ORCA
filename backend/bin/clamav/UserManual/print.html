@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "clamav";
             const default_dark_theme = "clamav";
-            window.path_to_searchindex_js = "searchindex-1b5ba28b.js";
+            window.path_to_searchindex_js = "searchindex-f120d447.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-cbaddea7.js"></script>
+        <script src="toc-0c194aa2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1653,9 +1653,15 @@ detailed verbosity so you can verify that the paths are correct:</p>
 <h4 id="spamassassin---clamavplugin--clamd"><a class="header" href="#spamassassin---clamavplugin--clamd">SpamAssassin - ClamAVPlugin | clamd</a></h4>
 <p>A ClamAV plug in fpr SpamAssassin 3.X</p>
 <p><a href="https://cwiki.apache.org/confluence/display/SPAMASSASSIN/ClamAVPlugin">Get ClamAVPlugin</a></p>
-<h4 id="clamav-rest"><a class="header" href="#clamav-rest">clamav-rest</a></h4>
+<h4 id="clamav-rest-java-based"><a class="header" href="#clamav-rest-java-based">clamav-rest (java based)</a></h4>
 <p>Simple ClamAV REST proxy. Builds on top of <a href="#clamav-java">clamav-java</a> which is a minimal Java client for ClamAV.</p>
 <p><a href="https://github.com/solita/clamav-rest">Get clamav-rest</a></p>
+<h4 id="clamav-rest-go-based"><a class="header" href="#clamav-rest-go-based">clamav-rest (go based)</a></h4>
+<p>ClamAV REST front-end.</p>
+<p><a href="https://github.com/EclipseFdn/clamav-rest">Get clamav-rest</a></p>
+<h4 id="clamav-rest-new-go-based"><a class="header" href="#clamav-rest-new-go-based">clamav-rest-new (go based)</a></h4>
+<p>ClamAV REST front-end.</p>
+<p><a href="https://github.com/EclipseFdn/clamav-rest-new">Get clamav-rest-new</a></p>
 <h3 id="filesystem--on-access-scanning"><a class="header" href="#filesystem--on-access-scanning">Filesystem &amp; On-Access Scanning</a></h3>
 <h4 id="clam-sentinel"><a class="header" href="#clam-sentinel">Clam Sentinel</a></h4>
 <p>Clam sentinel is a program that detects file system changes and automatically scans the files added or modified using ClamWin. Require the installation of ClamWin. For Microsoft Windows 98/98SE/Me/2000/XP/Vista, Windows 7 and Windows 8.1.</p>
@@ -1831,6 +1837,8 @@ sudo dscl . create /Users/clamav PrimaryGroupID 799 # Must match the above gid!
 <li><a href="#usage">Usage</a>
 <ul>
 <li><a href="#purpose">Purpose</a></li>
+<li><a href="#high-level-software-diagram">High-Level Software Diagram</a></li>
+<li><a href="#rough-scan-flowchart">Rough Scan Flowchart</a></li>
 <li><a href="#daemon">Daemon</a></li>
 <li><a href="#scanner">Scanner</a></li>
 <li><a href="#signature-testing-and-management">Signature Testing and Management</a></li>
@@ -1840,11 +1848,97 @@ sudo dscl . create /Users/clamav PrimaryGroupID 799 # Must match the above gid!
 </ul>
 <h2 id="purpose"><a class="header" href="#purpose">Purpose</a></h2>
 <p>This user guide presents an overview of the various ways that <em>libclamav</em> can be used through the tools provided by ClamAV. To learn more about how to better use each facet of ClamAV that interests you, please follow the links provided.</p>
+<h2 id="high-level-software-diagram"><a class="header" href="#high-level-software-diagram">High-Level Software Diagram</a></h2>
+<pre class="mermaid">flowchart TD
+    subgraph CLAMAV[ClamAV Programs, Services, Libraries, and Data]
+        DB[(Virus Databases)]
+        NET[(ClamAV mirrors / update source)]
+
+        LF[libfreshclam&lt;br/&gt;update library]
+
+        FC[freshclam&lt;br/&gt;updates databases]
+        CD[clamd&lt;br/&gt;scanner daemon]
+        CS[clamscan&lt;br/&gt;standalone scanner]
+        CDS[clamdscan&lt;br/&gt;client for clamd]
+        CDT[clamdtop&lt;br/&gt;monitor for clamd]
+        COA[clamonacc&lt;br/&gt;on-access scanner]
+        CMI[clamav-milter&lt;br/&gt;mail filter]
+        ST[sigtool&lt;br/&gt;signature/db utility]
+        CBC[clambc&lt;br/&gt;bytecode utility]
+        CCF[clamconf&lt;br/&gt;config/report utility]
+        CSU[clamsubmit&lt;br/&gt;sample submission tool]
+
+        NET --&gt; FC
+        LF --&gt; FC
+        FC --&gt; DB
+
+        DB --&gt; CD
+        DB --&gt; CS
+        DB --&gt; ST
+        DB --&gt; CBC
+
+        CDS --&gt; CD
+        CDT --&gt; CD
+        COA --&gt; CD
+        CMI --&gt; CD
+    end
+
+</pre>
+
+<h2 id="rough-scan-flowchart"><a class="header" href="#rough-scan-flowchart">Rough Scan Flowchart</a></h2>
+<pre class="mermaid">flowchart LR
+    subgraph DIRECT[Direct scan flow]
+        direction LR
+        CS[clamscan]
+        CS_VERDICT[Scan verdicts / alerts]
+        CS_META[Logs / metadata]
+
+        CS --&gt;|report verdict| CS_VERDICT
+        CS --&gt;|emit logs / metadata| CS_META
+    end
+
+    subgraph CLIENTSERVER[Client/server scan flow]
+        direction LR
+
+        subgraph CLIENTS[ ]
+            direction TB
+            CDS[clamdscan]
+            COA[clamonacc]
+            CMI[clamav-milter]
+        end
+
+        subgraph DAEMON[ ]
+            direction TB
+            CD[clamd]
+        end
+
+        subgraph OUTPUTS[ ]
+            direction TB
+            CD_VERDICT[Scan verdicts / alerts]
+            CD_META[Logs / metadata]
+        end
+
+        CDS --&gt;|request scan| CD
+        COA --&gt;|request scan| CD
+        CMI --&gt;|request scan| CD
+
+        CDS --&gt;|report verdict| CD_VERDICT
+        COA --&gt;|report verdict| CD_VERDICT
+        CMI --&gt;|report verdict| CD_VERDICT
+
+        CDS --&gt;|emit logs / metadata| CD_META
+        COA --&gt;|emit logs / metadata| CD_META
+        CMI --&gt;|emit logs / metadata| CD_META
+    end
+
+</pre>
+
 <h2 id="daemon"><a class="header" href="#daemon">Daemon</a></h2>
 <p>The ClamAV Daemon, or <a href="#clamd"><code>clamd</code></a>, is a multi-threaded daemon that uses <em>libclamav</em> to <a href="#scanning">scan files for viruses</a>. ClamAV provides a number of tools which interface with this daemon. They are, as follows:</p>
 <ul>
 <li><a href="#clamdscan-1"><code>clamdscan</code></a> - a simple scanning client</li>
-<li><a href="#On-access-scanning"><code>on-access scanning</code></a> - provides real-time protection via a <code>clamd</code> instance</li>
+<li><a href="#On-access-scanning"><code>clamonacc</code></a> - provides on-access scanning (aka real-time protection via a <code>clamd</code> instance</li>
+<li><a href="#On-access-scanning"><code>clamav-milter</code></a> - a mail filtering plugin for the Sendmail email processing server software to scan emails</li>
 <li><a href="#clamdtop"><code>clamdtop</code></a> - a resource monitoring interface for <code>clamd</code></li>
 </ul>
 <h2 id="scanner"><a class="header" href="#scanner">Scanner</a></h2>
@@ -1862,7 +1956,6 @@ sudo dscl . create /Users/clamav PrimaryGroupID 799 # Must match the above gid!
 <li><a href="#clamdconf"><code>clamd.conf</code></a> - for configuring the behavior of the ClamAV Daemon <code>clamd</code> and associated tools</li>
 <li><a href="#freshclamconf"><code>freschclam.conf</code></a> - for configuring the behavior of the signature database update tool, <code>freshclam</code></li>
 </ul>
-<p>ClamAV also provides a mail filtering tool called <a href="#clamav-milterconf"><code>clamav-milter</code></a> which can be attached to a <code>clamd</code> instance for mail scanning purposes.</p>
 <p>Additionally, a tool called <a href="#clamconf"><code>clamconf</code></a> allows users to check the configurations used by each other tool, pulling information from the configuration files listed above, alongside other relevant information.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="configuration-1"><a class="header" href="#configuration-1">Configuration</a></h1>
@@ -1926,13 +2019,13 @@ cp clamav-milter.conf.example clamav-milter.conf
 copy .\conf_examples\clamd.conf.sample .\clamd.conf
 </code></pre>
 <p>Run:</p>
-<pre><code class="language-ps1">write.exe .\freshclam.conf
+<pre><code class="language-ps1">notepad .\freshclam.conf
 </code></pre>
-<p>WordPad will pop up. Delete the line that says “Example”. You may also wish to set additional options to enable features or alter default behavior, such as the receive-timeout. Save the file and close WordPad.</p>
+<p>Notepad will pop up. Delete the line that says “Example”. You may also wish to set additional options to enable features or alter default behavior, such as the receive-timeout. Save the file and close Notepad.</p>
 <p>Run:</p>
-<pre><code class="language-ps1">write.exe .\clamd.conf
+<pre><code class="language-ps1">notepad .\clamd.conf
 </code></pre>
-<p>WordPad will pop up. Delete the line that says “Example”. You may also wish to set additional options to enable features or alter default behavior, such as enabling logging. Save the file and close WordPad.</p>
+<p>Notepad will pop up. Delete the line that says “Example”. You may also wish to set additional options to enable features or alter default behavior, such as enabling logging. Save the file and close Notepad.</p>
 <h4 id="additional-notes-about-the-config-files-and-database-directories"><a class="header" href="#additional-notes-about-the-config-files-and-database-directories">Additional notes about the config files and database directories</a></h4>
 <p>The install directory is but one of a few locations ClamAV may search for configs and for signature databases.</p>
 <p>Config files path search order:</p>
@@ -2162,7 +2255,11 @@ freshclam: error while loading shared libraries: libclamav.so.7: cannot open sha
 <li><a href="#daemon-1">Daemon</a>
 <ul>
 <li><a href="#clamd">ClamD</a></li>
-<li><a href="#clamdscan-1">ClamDScan</a></li>
+<li><a href="#clamdscan-1">ClamDScan</a>
+<ul>
+<li><a href="#clamdscan-mode-and-option-interactions">ClamDScan mode and option interactions</a></li>
+</ul>
+</li>
 <li><a href="#clamdtop">ClamDTop</a></li>
 <li><a href="#on-access-scanning-1">On-Access Scanning</a>
 <ul>
@@ -2203,24 +2300,9 @@ freshclam: error while loading shared libraries: libclamav.so.7: cannot open sha
 <h3 id="clamd"><a class="header" href="#clamd">ClamD</a></h3>
 <p><code>clamd</code> is a multi-threaded daemon that uses <em>libclamav</em> to scan files for viruses. Scanning behavior can be fully configured to fit most needs by modifying <code>clamd.conf</code>.</p>
 <p>As <code>clamd</code> requires a virus signature database to run, we recommend setting up ClamAV’s official signatures before running <code>clamd</code> using <code>freshclam</code>.</p>
-<p>The daemon works by listening for commands on the sockets specified in <code>clamd.conf</code>. Listening is supported over both unix local sockets and TCP sockets.</p>
-<p><strong>IMPORTANT:</strong> <code>clamd</code> does not currently protect or authenticate traffic coming over the TCP socket, meaning it will accept any and all of the following commands listed from <em>any</em> source. Thus, we strongly recommend following best networking practices when setting up your <code>clamd</code> instance. I.e. don’t expose your TCP socket to the Internet.</p>
-<p>Here is a quick list of the commands accepted by <code>clamd</code> over the socket.</p>
-<ul>
-<li><code>PING</code></li>
-<li><code>VERSION</code></li>
-<li><code>RELOAD</code></li>
-<li><code>SHUTDOWN</code></li>
-<li><code>SCAN</code> <em>file/directory</em></li>
-<li><code>RAWSCAN</code> <em>file/directory</em></li>
-<li><code>CONTSCAN</code> <em>file/directory</em></li>
-<li><code>MULTISCAN</code> <em>file/directory</em></li>
-<li><code>ALLMATCHSCAN</code> <em>file/directory</em></li>
-<li><code>INSTREAM</code></li>
-<li><code>FILDES</code></li>
-<li><code>STATS</code></li>
-<li><code>IDSESSION, END</code></li>
-</ul>
+<p>The daemon works by listening for commands on the sockets specified in <code>clamd.conf</code>. Listening is supported over both Unix local sockets and TCP sockets.</p>
+<p><strong>IMPORTANT:</strong> <code>clamd</code> does not currently protect or authenticate traffic coming over the TCP socket, meaning it will accept commands from any source that can reach that socket. Thus, we strongly recommend following best networking practices when setting up your <code>clamd</code> instance. I.e. don’t expose your TCP socket to the Internet.</p>
+<p>For details about socket types, command framing, scan commands, streaming file contents, passing file descriptors, and reading one or more scan results, see the <a href="#clamd-protocol">ClamD protocol guide</a>.</p>
 <p>As with most ClamAV tools, you can find out more about these by invoking the command:</p>
 <pre><code class="language-bash">man clamd
 </code></pre>
@@ -2241,6 +2323,31 @@ freshclam: error while loading shared libraries: libclamav.so.7: cannot open sha
 <p>Again, running <code>clamdscan</code>, once you have a working <code>clamd</code> instance, is simple:</p>
 <pre><code class="language-bash">clamdscan [*options*] [*file/directory/-*]
 </code></pre>
+<h4 id="clamdscan-mode-and-option-interactions"><a class="header" href="#clamdscan-mode-and-option-interactions">ClamDScan mode and option interactions</a></h4>
+<p><code>clamdscan</code> sends scan work to a running <code>clamd</code> daemon. What it sends depends first on the socket type, and then on command-line options:</p>
+<ul>
+<li>Unix/local socket:
+<ul>
+<li>By default, <code>clamdscan</code> asks the local daemon to open the paths you provide. The daemon must be able to see those paths and have permission to read them.</li>
+<li>With <code>--fdpass</code>, <code>clamdscan</code> opens each file itself and passes the open file to the daemon. This is useful when the daemon runs as a different user or sees a different filesystem view. This option only works with a Unix/local socket and fd-passing support.</li>
+<li>With <code>--stream</code>, <code>clamdscan</code> sends file contents to the daemon instead of asking the daemon to open paths.</li>
+<li>With <code>--multiscan</code>, directory scans can use multiple daemon worker threads. If <code>--stream</code> or <code>--fdpass</code> is also used, <code>clamdscan</code> walks the requested paths itself and submits individual file scans while still allowing the daemon to process multiple files in parallel.</li>
+<li><code>--allmatch</code> is only effective when <code>clamdscan</code> is asking the daemon to open paths directly and is not using <code>--multiscan</code>, <code>--stream</code>, or <code>--fdpass</code>.</li>
+</ul>
+</li>
+<li>TCP socket:
+<ul>
+<li>When the daemon is remote, <code>clamdscan</code> sends file contents instead of local paths because client paths may not exist on the daemon host.</li>
+<li>When the daemon is local and <code>clamdscan</code> can determine that it is local, <code>clamdscan</code> may ask the daemon to open local paths directly.</li>
+<li><code>--stream</code> forces <code>clamdscan</code> to send file contents, even when the daemon is local.</li>
+<li><code>--fdpass</code> is not available over TCP. Use either <code>--stream</code> or <code>--fdpass</code> for a scan, based on the socket type and how the daemon can access the files.</li>
+<li>With <code>--multiscan</code>, local directory scans may use multiple daemon worker threads. Remote scans and <code>--stream</code> scans are handled as individual file scans, while still allowing the daemon to process multiple files in parallel.</li>
+<li><code>--allmatch</code> is only effective when <code>clamdscan</code> is asking a local daemon to open paths directly and is not using <code>--multiscan</code> or <code>--stream</code>.</li>
+</ul>
+</li>
+</ul>
+<p><code>--allmatch</code> is not useful with <code>--multiscan</code>; use it only for scans where <code>clamdscan</code> is asking a local daemon to open paths directly. For quarantine, choose one action for a scan: <code>--move</code>, <code>--copy</code>, or <code>--remove</code>.</p>
+<p>Quarantine actions such as <code>--move</code>, <code>--copy</code>, and <code>--remove</code> are performed by <code>clamdscan</code>, not by <code>clamd</code>. For directory scans with quarantine actions enabled, <code>clamdscan</code> resolves the action path for each file before requesting the scan. When <code>--multiscan</code> is also enabled, <code>clamdscan</code> submits individual file scans so it can preserve the scan result to action-path association while still allowing <code>clamd</code> to process multiple files in parallel.</p>
 <h3 id="clamdtop"><a class="header" href="#clamdtop">ClamDTop</a></h3>
 <p><code>clamdtop</code> is a tool to monitor one or multiple instances of <code>clamd</code>. It has a colorized <em>ncurses</em> interface, which shows each job queued, memory usage, and information about the loaded signature database for the connected <code>clamd</code> instance(s). By default it will attempt to connect to the local <code>clamd</code> as defined in <code>clamd.conf</code>. However, you can specify other <code>clamd</code> instances at the command line.</p>
 <p>To learn more, use the commands</p>
@@ -2346,7 +2453,7 @@ freshclam: error while loading shared libraries: libclamav.so.7: cannot open sha
 <p>This affects:</p>
 <ul>
 <li>The API, notably the <code>cl_scanfile()</code> function</li>
-<li>ClamD socket input, e.g. the commands <code>SCAN</code>, <code>CONTSCAN</code>, <code>MUTLISCAN</code>, etc.</li>
+<li>ClamD socket input, e.g. the commands <code>SCAN</code>, <code>CONTSCAN</code>, <code>MULTISCAN</code>, etc.</li>
 <li>ClamD socket output, i.e replies to the above queries</li>
 </ul>
 <p>For legacy reasons ANSI (i.e. <code>CP_ACP</code>) input will still be accepted and processed as before, but with two important remarks:</p>
@@ -2355,6 +2462,349 @@ freshclam: error while loading shared libraries: libclamav.so.7: cannot open sha
 <li>ANSI sequences which are also valid UTF-8 sequences will be handled as UTF-8.</li>
 </ol>
 <p>As a side note, console output (stdin and stderr) will always be OEM encoded, even when redirected to a file.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="clamd-protocol"><a class="header" href="#clamd-protocol">ClamD Protocol</a></h1>
+<p>Table Of Contents</p>
+<ul>
+<li><a href="#clamd-protocol">ClamD Protocol</a>
+<ul>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#socket-types">Socket Types</a></li>
+<li><a href="#command-framing">Command Framing</a></li>
+<li><a href="#scan-commands">Scan Commands</a>
+<ul>
+<li><a href="#scan-path">SCAN path</a></li>
+<li><a href="#contscan-path">CONTSCAN path</a></li>
+<li><a href="#multiscan-path">MULTISCAN path</a></li>
+<li><a href="#allmatchscan-path">ALLMATCHSCAN path</a></li>
+<li><a href="#instream">INSTREAM</a></li>
+<li><a href="#fildes">FILDES</a></li>
+<li><a href="#legacy-stream">Legacy STREAM</a></li>
+</ul>
+</li>
+<li><a href="#other-commands">Other Commands</a>
+<ul>
+<li><a href="#ping">PING</a></li>
+<li><a href="#version">VERSION</a></li>
+<li><a href="#versioncommands">VERSIONCOMMANDS</a></li>
+<li><a href="#reload">RELOAD</a></li>
+<li><a href="#selfcheck">SELFCHECK</a></li>
+<li><a href="#shutdown">SHUTDOWN</a></li>
+<li><a href="#stats">STATS</a></li>
+</ul>
+</li>
+<li><a href="#reading-replies">Reading Replies</a></li>
+<li><a href="#idsession">IDSESSION</a>
+<ul>
+<li><a href="#using-idsession-for-parallel-scanning">Using IDSESSION for parallel scanning</a></li>
+<li><a href="#commands-accepted-inside-idsession">Commands accepted inside IDSESSION</a></li>
+<li><a href="#idsession-replies">IDSESSION replies</a></li>
+<li><a href="#avoiding-idsession-deadlocks">Avoiding IDSESSION deadlocks</a></li>
+</ul>
+</li>
+<li><a href="#protocol-limits">Protocol Limits</a></li>
+<li><a href="#examples">Examples</a>
+<ul>
+<li><a href="#basic-checks">Basic checks</a></li>
+<li><a href="#instream-example">INSTREAM example</a></li>
+<li><a href="#fildes-example">FILDES example</a></li>
+<li><a href="#idsession-example">IDSESSION example</a></li>
+</ul>
+</li>
+<li><a href="#clamdscan-behavior">ClamDScan Behavior</a>
+<ul>
+<li><a href="#mode-selection">Mode selection</a></li>
+<li><a href="#multiscan-behavior">Multiscan behavior</a></li>
+<li><a href="#option-interactions">Option interactions</a>
+<ul>
+<li><a href="#transport-override-options">Transport override options</a></li>
+<li><a href="#--fdpass-with-tcp-sockets"><code>--fdpass</code> with TCP sockets</a></li>
+<li><a href="#remote-tcp-scans">Remote TCP scans</a></li>
+<li><a href="#--multiscan-and---allmatch"><code>--multiscan</code> and <code>--allmatch</code></a></li>
+<li><a href="#--allmatch"><code>--allmatch</code></a></li>
+<li><a href="#--multiscan-and---stream"><code>--multiscan</code> and <code>--stream</code></a></li>
+<li><a href="#--multiscan-and---fdpass"><code>--multiscan</code> and <code>--fdpass</code></a></li>
+<li><a href="#quarantine-actions">Quarantine actions</a></li>
+<li><a href="#quarantine-actions-with-multiscan">Quarantine actions with multiscan</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p><code>clamd</code> is a long-running scanning daemon. Clients such as <code>clamdscan</code>, <code>clamonacc</code>, mail filters, and custom integrations connect to a configured socket and send simple command records.</p>
+<p>Use <code>clamdscan</code> for normal command-line scanning. Use this protocol directly when a custom client needs to choose how to submit work: by daemon-visible path, by streamed file contents, or by passing an already-open file descriptor.</p>
+<p>Custom clients should use <code>VERSIONCOMMANDS</code> during startup or compatibility checks. It reports the command names recognized by the connected daemon. Some recognized commands may still be disabled by <code>clamd.conf</code> or unavailable because the required platform support was not compiled in.</p>
+<h2 id="socket-types"><a class="header" href="#socket-types">Socket Types</a></h2>
+<p><code>clamd</code> can listen on a Unix/local socket, a TCP socket, or both.</p>
+<p>Unix/local sockets:</p>
+<ul>
+<li>Support path-based commands such as <code>SCAN</code>, <code>CONTSCAN</code>, <code>MULTISCAN</code>, and <code>ALLMATCHSCAN</code>.</li>
+<li>Support <code>INSTREAM</code> for streaming file contents.</li>
+<li>Support <code>FILDES</code> when ClamAV is built with file descriptor passing support.</li>
+<li>Are the only socket type that can use <code>FILDES</code>.</li>
+</ul>
+<p>TCP sockets:</p>
+<ul>
+<li>Support path-based commands if the path is meaningful on the daemon host.</li>
+<li>Support <code>INSTREAM</code> for sending file contents over the socket.</li>
+<li>Do not support <code>FILDES</code>.</li>
+<li>Are not encrypted or authenticated by <code>clamd</code>. Do not expose a TCP socket to untrusted networks.</li>
+</ul>
+<p>Path-based scan commands are resolved by <code>clamd</code>, not by the client. A path sent over TCP must exist on the system where <code>clamd</code> runs and must be accessible to the daemon process. When <code>clamdscan</code> connects to a remote daemon over TCP, it streams local file contents with <code>INSTREAM</code> instead of sending local client paths for the daemon to open.</p>
+<h2 id="command-framing"><a class="header" href="#command-framing">Command Framing</a></h2>
+<p>New clients should use explicit command framing. The first byte selects the command terminator:</p>
+<ul>
+<li><code>zCOMMAND\0</code> uses a NUL byte as the command terminator. This is the recommended form because it does not conflict with newlines in command arguments.</li>
+<li><code>nCOMMAND\n</code> uses a newline as the command terminator.</li>
+</ul>
+<p>In the examples above, <code>\0</code> means a literal NUL byte, and <code>\n</code> means a literal newline byte.</p>
+<p><code>clamd</code> replies with the same record terminator style selected by the command. For example, <code>zPING\0</code> receives a NUL-terminated <code>PONG</code> reply, and <code>nPING\n</code> receives a newline-terminated <code>PONG</code> reply. Some multiline diagnostic replies, notably <code>STATS</code>, contain embedded newline bytes and end with a final <code>END</code> record.</p>
+<p>Legacy unprefixed commands are accepted for some commands outside of <code>IDSESSION</code>, but new clients should not use them. Unprefixed commands are not accepted inside <code>IDSESSION</code>.</p>
+<p>Framed command examples:</p>
+<pre><code class="language-text">zPING\0
+nVERSIONCOMMANDS\n
+zSCAN /srv/uploads/sample.bin\0
+</code></pre>
+<h2 id="scan-commands"><a class="header" href="#scan-commands">Scan Commands</a></h2>
+<h3 id="scan-path"><a class="header" href="#scan-path">SCAN path</a></h3>
+<p><code>SCAN path</code> scans one file or recursively scans one directory. A full path is required. For directory scans, <code>SCAN</code> stops after a virus is found.</p>
+<h3 id="contscan-path"><a class="header" href="#contscan-path">CONTSCAN path</a></h3>
+<p><code>CONTSCAN path</code> scans one file or recursively scans one directory and continues scanning after detections are found.</p>
+<h3 id="multiscan-path"><a class="header" href="#multiscan-path">MULTISCAN path</a></h3>
+<p><code>MULTISCAN path</code> scans a directory recursively and asks <code>clamd</code> to use multiple worker threads for that directory tree. If the target is not a directory, <code>clamd</code> falls back to non-multiscan scanning behavior.</p>
+<p><code>MULTISCAN</code> is server-side directory parallelism: the client sends one directory path, and the daemon walks and schedules work for that tree.</p>
+<h3 id="allmatchscan-path"><a class="header" href="#allmatchscan-path">ALLMATCHSCAN path</a></h3>
+<p><code>ALLMATCHSCAN path</code> is like <code>SCAN</code>, but enables all-match behavior so scanning can continue within a file after a match. This command must use <code>n</code> or <code>z</code> framing.</p>
+<p><code>ALLMATCHSCAN</code> can be disabled with <code>AllowAllMatchScan</code> in <code>clamd.conf</code>. If disabled, <code>clamd</code> returns an error for the command.</p>
+<h3 id="instream"><a class="header" href="#instream">INSTREAM</a></h3>
+<p><code>INSTREAM</code> sends file contents to <code>clamd</code> on the same socket. This command must use <code>n</code> or <code>z</code> framing.</p>
+<p>After the command record, send one or more chunks. Each chunk starts with a 4-byte unsigned length in network byte order, followed by that many bytes of data:</p>
+<pre><code class="language-text">4-byte big-endian length
+chunk bytes
+</code></pre>
+<p>End the stream with a zero-length chunk:</p>
+<pre><code class="language-text">00 00 00 00
+</code></pre>
+<p>The total streamed size must not exceed <code>StreamMaxLength</code> in <code>clamd.conf</code>. If the stream exceeds that limit, <code>clamd</code> replies with an <code>INSTREAM size limit exceeded</code> error.</p>
+<h3 id="fildes"><a class="header" href="#fildes">FILDES</a></h3>
+<p><code>FILDES</code> passes an already-open file descriptor to <code>clamd</code> using Unix socket ancillary data. It only works over Unix/local sockets and only when file descriptor passing support is available.</p>
+<p>After the <code>FILDES</code> command, send the descriptor using an RFC 2292 / BSD 4.4 style ancillary-data message. The descriptor message must include at least one dummy byte. The descriptor may be sent in the same packet as the command or in a subsequent packet.</p>
+<h3 id="legacy-stream"><a class="header" href="#legacy-stream">Legacy STREAM</a></h3>
+<p>The old <code>STREAM</code> command is no longer supported by current <code>clamd</code>. Use <code>INSTREAM</code> instead.</p>
+<h2 id="other-commands"><a class="header" href="#other-commands">Other Commands</a></h2>
+<h3 id="ping"><a class="header" href="#ping">PING</a></h3>
+<p><code>PING</code> checks whether <code>clamd</code> is responding. A healthy daemon replies with <code>PONG</code>.</p>
+<h3 id="version"><a class="header" href="#version">VERSION</a></h3>
+<p><code>VERSION</code> prints the ClamAV program and database version. It is enabled by default and can be disabled with <code>EnableVersionCommand</code> in <code>clamd.conf</code>. If disabled, <code>clamd</code> replies with <code>COMMAND UNAVAILABLE</code>.</p>
+<h3 id="versioncommands"><a class="header" href="#versioncommands">VERSIONCOMMANDS</a></h3>
+<p><code>VERSIONCOMMANDS</code> prints version information followed by a <code>COMMANDS:</code> list. Use this to discover protocol support for the connected daemon.</p>
+<p><code>VERSIONCOMMANDS</code> must use <code>n</code> or <code>z</code> framing.</p>
+<h3 id="reload"><a class="header" href="#reload">RELOAD</a></h3>
+<p><code>RELOAD</code> requests a database reload. It is available only when <code>EnableReloadCommand</code> is enabled in <code>clamd.conf</code>. If unavailable, <code>clamd</code> replies with <code>COMMAND UNAVAILABLE</code>.</p>
+<h3 id="selfcheck"><a class="header" href="#selfcheck">SELFCHECK</a></h3>
+<p><code>SELFCHECK</code> checks whether the loaded databases are current. It is available only when <code>EnableSelfCheckCommand</code> is enabled in <code>clamd.conf</code>. If unavailable, <code>clamd</code> replies with <code>COMMAND UNAVAILABLE</code>.</p>
+<h3 id="shutdown"><a class="header" href="#shutdown">SHUTDOWN</a></h3>
+<p><code>SHUTDOWN</code> requests a clean daemon exit. It is available only when <code>EnableShutdownCommand</code> is enabled in <code>clamd.conf</code>. If unavailable, <code>clamd</code> replies with <code>COMMAND UNAVAILABLE</code>.</p>
+<h3 id="stats"><a class="header" href="#stats">STATS</a></h3>
+<p><code>STATS</code> prints queue, task, and memory statistics. It is enabled by default and can be disabled with <code>EnableStatsCommand</code> in <code>clamd.conf</code>. If disabled, <code>clamd</code> replies with <code>COMMAND UNAVAILABLE</code>.</p>
+<p>The exact <code>STATS</code> output format is not stable. Parse it as diagnostic text, not as a fixed schema.</p>
+<h2 id="reading-replies"><a class="header" href="#reading-replies">Reading Replies</a></h2>
+<p>For non-session commands, read reply records until <code>clamd</code> closes the connection. A scan can produce multiple reply records, especially when scanning a directory.</p>
+<p>Common scan replies look like:</p>
+<pre><code class="language-text">/path/to/file: OK
+/path/to/file: Eicar-Signature FOUND
+/path/to/file: Access denied ERROR
+stream: OK
+stream: Eicar-Signature FOUND
+</code></pre>
+<p>The reply record terminator is selected by the command framing: newline for <code>n</code> commands and NUL for <code>z</code> commands.</p>
+<p>For <code>STATS</code>, read until the <code>END</code> line. <code>STATS</code> output contains newline-delimited diagnostic text even when the command uses <code>z</code> framing; the final <code>END</code> record uses the command terminator.</p>
+<h2 id="idsession"><a class="header" href="#idsession">IDSESSION</a></h2>
+<p><code>IDSESSION</code> lets a client send multiple requests over one socket. Start the session with <code>zIDSESSION\0</code> or <code>nIDSESSION\n</code>, then send prefixed commands, and finish with <code>zEND\0</code> or <code>nEND\n</code>.</p>
+<p>Every command inside <code>IDSESSION</code>, including <code>END</code>, must use <code>n</code> or <code>z</code> framing. Legacy unprefixed commands are rejected inside a session.</p>
+<h3 id="using-idsession-for-parallel-scanning"><a class="header" href="#using-idsession-for-parallel-scanning">Using IDSESSION for parallel scanning</a></h3>
+<p><code>IDSESSION</code> is the client-driven alternative to directory-based <code>MULTISCAN</code> for multithreaded scanning.</p>
+<p><code>MULTISCAN</code> asks the daemon to walk one directory tree and parallelize that server-side directory scan. <code>IDSESSION</code> lets the client send many per-file requests over one connection so <code>clamd</code> can dispatch those requests to worker threads while the client keeps control of path resolution, streaming, descriptor passing, filtering, and result-to-action mapping.</p>
+<h3 id="commands-accepted-inside-idsession"><a class="header" href="#commands-accepted-inside-idsession">Commands accepted inside IDSESSION</a></h3>
+<p>Accepted inside <code>IDSESSION</code>:</p>
+<ul>
+<li><code>SCAN</code></li>
+<li><code>INSTREAM</code></li>
+<li><code>FILDES</code></li>
+<li><code>VERSION</code></li>
+<li><code>VERSIONCOMMANDS</code></li>
+<li><code>PING</code></li>
+<li><code>STATS</code></li>
+<li><code>END</code></li>
+</ul>
+<p>Not accepted inside <code>IDSESSION</code>:</p>
+<ul>
+<li><code>CONTSCAN</code></li>
+<li><code>MULTISCAN</code></li>
+<li><code>ALLMATCHSCAN</code></li>
+<li><code>RELOAD</code></li>
+<li><code>SHUTDOWN</code></li>
+<li><code>SELFCHECK</code></li>
+</ul>
+<p><code>FILDES</code> inside <code>IDSESSION</code> still requires a Unix/local socket and descriptor passing support. <code>INSTREAM</code> inside <code>IDSESSION</code> uses the same chunk format as non-session <code>INSTREAM</code>.</p>
+<h3 id="idsession-replies"><a class="header" href="#idsession-replies">IDSESSION replies</a></h3>
+<p>Replies inside <code>IDSESSION</code> are prefixed with the numeric request ID. IDs start at 1 for the first command after <code>IDSESSION</code>; the <code>IDSESSION</code> command itself does not consume a visible reply ID.</p>
+<pre><code class="language-text">1: /path/a: OK
+2: /path/b: Eicar-Signature FOUND
+3: PONG
+</code></pre>
+<p>Requests are processed asynchronously, so replies can arrive out of order. Match replies to requests by numeric ID, not by arrival order.</p>
+<p>Avoid mixing <code>STATS</code> with other in-flight session work unless the client is prepared to handle multiline diagnostic output.</p>
+<h3 id="avoiding-idsession-deadlocks"><a class="header" href="#avoiding-idsession-deadlocks">Avoiding IDSESSION deadlocks</a></h3>
+<p>An <code>IDSESSION</code> client must keep reading replies while it sends more commands. The recommended implementation is a nonblocking socket with <code>select()</code> or <code>poll()</code>: when sending would block, wait until the socket is writable or there are replies to read.</p>
+<p>Alternating blocking <code>send()</code> and <code>recv()</code> calls can deadlock. If <code>clamd</code> detects that a client has deadlocked or is not following the session protocol, it may close the connection.</p>
+<h2 id="protocol-limits"><a class="header" href="#protocol-limits">Protocol Limits</a></h2>
+<p>Path command length is limited by the daemon command receive buffer. Current <code>clamd</code> allocates <code>PATH_MAX + 8</code> bytes for a command record, plus an internal NUL byte, so the complete framed command must fit in that buffer: the <code>n</code> or <code>z</code> prefix, command name, separating space when present, path argument, and command terminator.</p>
+<p>Because <code>PATH_MAX</code> is platform dependent, clients should treat path commands as limited to the daemon host’s normal path-length limit. Use <code>INSTREAM</code> or <code>FILDES</code> when a local client path is too long, ambiguous, or not meaningful on the daemon host.</p>
+<p><code>INSTREAM</code> file content is not part of the command-length limit. Each chunk length is a 32-bit unsigned value in network byte order, and the total stream is limited by <code>StreamMaxLength</code> in <code>clamd.conf</code>. If a chunk would exceed the remaining stream quota, <code>clamd</code> replies with an <code>INSTREAM size limit exceeded</code> error.</p>
+<p>There is no separate configured limit for the total number of requests in one <code>IDSESSION</code>. Request IDs are finite implementation integers, so clients should not treat one session as an infinite stream; start a new session for extremely large batches.</p>
+<p>In practice, concurrency and queueing are bounded much earlier by <code>MaxThreads</code>, <code>MaxQueue</code>, file descriptor limits, socket buffers, daemon memory, and timeouts such as <code>CommandReadTimeout</code> and <code>ReadTimeout</code>. A robust client should cap its own number of in-flight requests and continuously drain replies; it should not enqueue an unbounded tree into one session without backpressure.</p>
+<h2 id="examples"><a class="header" href="#examples">Examples</a></h2>
+<p>The following examples use NUL-terminated <code>z</code> commands. Replace <code>/run/clamav/clamd.sock</code> with the socket configured by <code>LocalSocket</code>, or replace the Unix-socket connection code with a TCP socket connection when connecting to <code>TCPSocket</code>.</p>
+<h3 id="basic-checks"><a class="header" href="#basic-checks">Basic checks</a></h3>
+<p>For quick shell checks against a Unix socket, <code>nc -U</code> is convenient:</p>
+<pre><code class="language-bash">printf 'zPING\0' | nc -U /run/clamav/clamd.sock | tr '\0' '\n'
+printf 'zVERSIONCOMMANDS\0' | nc -U /run/clamav/clamd.sock | tr '\0' '\n'
+printf 'zSCAN /srv/uploads/sample.bin\0' | nc -U /run/clamav/clamd.sock | tr '\0' '\n'
+</code></pre>
+<p>For a TCP socket on port 3310:</p>
+<pre><code class="language-bash">printf 'zPING\0' | nc 127.0.0.1 3310 | tr '\0' '\n'
+</code></pre>
+<h3 id="instream-example"><a class="header" href="#instream-example">INSTREAM example</a></h3>
+<p>This example sends file contents with <code>INSTREAM</code>:</p>
+<pre><code class="language-python">import socket
+import struct
+
+socket_path = "/run/clamav/clamd.sock"
+sample_path = "/srv/uploads/sample.bin"
+
+with open(sample_path, "rb") as sample, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.connect(socket_path)
+    sock.sendall(b"zINSTREAM\0")
+    while True:
+        chunk = sample.read(1024 * 1024)
+        if not chunk:
+            break
+        sock.sendall(struct.pack("&gt;I", len(chunk)))
+        sock.sendall(chunk)
+    sock.sendall(struct.pack("&gt;I", 0))
+
+    reply = b""
+    while True:
+        data = sock.recv(4096)
+        if not data:
+            break
+        reply += data
+
+print(reply.replace(b"\0", b"\n").decode("utf-8", "replace"))
+</code></pre>
+<h3 id="fildes-example"><a class="header" href="#fildes-example">FILDES example</a></h3>
+<p>This example sends an open file descriptor with <code>FILDES</code>:</p>
+<pre><code class="language-python">import array
+import os
+import socket
+
+socket_path = "/run/clamav/clamd.sock"
+sample_path = "/srv/uploads/sample.bin"
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.connect(socket_path)
+    sock.sendall(b"zFILDES\0")
+    fd = os.open(sample_path, os.O_RDONLY)
+    try:
+        fds = array.array("i", [fd])
+        sock.sendmsg([b"x"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
+    finally:
+        os.close(fd)
+
+    reply = b""
+    while True:
+        data = sock.recv(4096)
+        if not data:
+            break
+        reply += data
+
+print(reply.replace(b"\0", b"\n").decode("utf-8", "replace"))
+</code></pre>
+<h3 id="idsession-example"><a class="header" href="#idsession-example">IDSESSION example</a></h3>
+<p>This example sends a small bounded batch through <code>IDSESSION</code>. Clients that send many requests should use nonblocking I/O and read replies while writing new requests.</p>
+<pre><code class="language-python">import socket
+
+socket_path = "/run/clamav/clamd.sock"
+paths = ["/srv/uploads/a.bin", "/srv/uploads/b.bin", "/srv/uploads/c.bin"]
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.connect(socket_path)
+    sock.sendall(b"zIDSESSION\0")
+    for path in paths:
+        sock.sendall(("zSCAN " + path).encode("utf-8") + b"\0")
+    sock.sendall(b"zPING\0")
+    sock.sendall(b"zEND\0")
+
+    replies = b""
+    while True:
+        data = sock.recv(4096)
+        if not data:
+            break
+        replies += data
+
+for record in replies.split(b"\0"):
+    if record:
+        print(record.decode("utf-8", "replace"))
+</code></pre>
+<p>Example <code>IDSESSION</code> replies:</p>
+<pre><code class="language-text">4: PONG
+1: /srv/uploads/a.bin: OK
+2: /srv/uploads/b.bin: Eicar-Signature FOUND
+3: /srv/uploads/c.bin: OK
+</code></pre>
+<p>The reply order above is valid. Clients should match replies to requests with the numeric ID rather than assuming replies arrive in the same order as requests were sent.</p>
+<h2 id="clamdscan-behavior"><a class="header" href="#clamdscan-behavior">ClamDScan Behavior</a></h2>
+<p><code>clamdscan</code> is the standard command-line client for <code>clamd</code>. It chooses a scan transport based on the socket type and command-line options, then maps daemon replies back to the paths it reports to the user.</p>
+<h3 id="mode-selection"><a class="header" href="#mode-selection">Mode selection</a></h3>
+<p><code>clamdscan</code> chooses one scan transport before sending scan requests:</p>
+<ul>
+<li>Local daemon path mode, no <code>--stream</code>, no usable <code>--fdpass</code>: path-based scan commands. This can use a Unix/local socket or a TCP socket that <code>clamdscan</code> determines is local.</li>
+<li>Unix/local socket with <code>--fdpass</code>: <code>FILDES</code>.</li>
+<li>Remote TCP socket or <code>--stream</code>: <code>INSTREAM</code>.</li>
+<li>Standard input: <code>FILDES</code> on a local socket when possible, otherwise <code>INSTREAM</code>.</li>
+</ul>
+<h3 id="multiscan-behavior"><a class="header" href="#multiscan-behavior">Multiscan behavior</a></h3>
+<p><code>clamdscan --multiscan</code> has different meanings depending on the selected transport:</p>
+<ul>
+<li>In local path mode, directory scans use server-side <code>MULTISCAN</code>.</li>
+<li>With <code>--stream</code> or remote TCP sockets, files are sent through <code>IDSESSION</code> with <code>INSTREAM</code>.</li>
+<li>With <code>--fdpass</code> on a local socket, files are sent through <code>IDSESSION</code> with <code>FILDES</code>.</li>
+</ul>
+<p>The <code>IDSESSION</code> forms are client-driven per-file parallelism. They can keep multiple <code>clamd</code> worker threads busy, but they are not the same as sending a whole directory to the daemon with <code>MULTISCAN</code>.</p>
+<h3 id="option-interactions"><a class="header" href="#option-interactions">Option interactions</a></h3>
+<p>The following notes explain how <code>clamdscan</code> options change the effective scan mode.</p>
+<h4 id="transport-override-options"><a class="header" href="#transport-override-options">Transport override options</a></h4>
+<p><code>--stream</code> and <code>--fdpass</code> select different ways to submit local files to the daemon. Use one transport override for a scan. <code>--stream</code> sends file contents with <code>INSTREAM</code>; <code>--fdpass</code> passes open files with <code>FILDES</code>.</p>
+<h4 id="--fdpass-with-tcp-sockets"><a class="header" href="#--fdpass-with-tcp-sockets"><code>--fdpass</code> with TCP sockets</a></h4>
+<p><code>--fdpass</code> only works with a Unix/local socket and fd-passing support. It is not available over TCP.</p>
+<h4 id="remote-tcp-scans"><a class="header" href="#remote-tcp-scans">Remote TCP scans</a></h4>
+<p>When <code>clamdscan</code> connects to a remote <code>clamd</code> over TCP, it streams file contents with <code>INSTREAM</code>. It does not send local file paths for the remote daemon to open.</p>
+<h4 id="--multiscan-and---allmatch"><a class="header" href="#--multiscan-and---allmatch"><code>--multiscan</code> and <code>--allmatch</code></a></h4>
+<p><code>--allmatch</code> is not useful with <code>--multiscan</code>. If you need all-match behavior, run without <code>--multiscan</code>.</p>
+<h4 id="--allmatch"><a class="header" href="#--allmatch"><code>--allmatch</code></a></h4>
+<p><code>--allmatch</code> is only effective for local path-mode scans that are not using <code>--multiscan</code>, <code>--stream</code>, or <code>--fdpass</code>.</p>
+<h4 id="--multiscan-and---stream"><a class="header" href="#--multiscan-and---stream"><code>--multiscan</code> and <code>--stream</code></a></h4>
+<p>This combination is supported, but it means client-driven <code>IDSESSION</code> with <code>INSTREAM</code>, not server-side directory <code>MULTISCAN</code>.</p>
+<h4 id="--multiscan-and---fdpass"><a class="header" href="#--multiscan-and---fdpass"><code>--multiscan</code> and <code>--fdpass</code></a></h4>
+<p>This combination is supported on Unix/local sockets, but it means client-driven <code>IDSESSION</code> with <code>FILDES</code>, not server-side directory <code>MULTISCAN</code>.</p>
+<h4 id="quarantine-actions"><a class="header" href="#quarantine-actions">Quarantine actions</a></h4>
+<p>Choose one quarantine action for a scan: <code>--move</code>, <code>--copy</code>, or <code>--remove</code>.</p>
+<h4 id="quarantine-actions-with-multiscan"><a class="header" href="#quarantine-actions-with-multiscan">Quarantine actions with multiscan</a></h4>
+<p>Quarantine actions such as <code>--move</code>, <code>--copy</code>, and <code>--remove</code> are performed by <code>clamdscan</code>, not by <code>clamd</code>. For directory scans with quarantine actions enabled, <code>clamdscan</code> resolves the action path for each file before requesting the scan. When <code>--multiscan</code> is also enabled, <code>clamdscan</code> uses client-driven per-file scan requests so it can preserve the scan result to action-path association while still allowing <code>clamd</code> to process multiple requests in parallel.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="on-access-scanning-2"><a class="header" href="#on-access-scanning-2">On-Access Scanning</a></h1>
 <h2 id="purpose-1"><a class="header" href="#purpose-1">Purpose</a></h2>
@@ -3570,7 +4020,7 @@ Firefox.boundElements;Engine:81-255,Target:0;0&amp;1&amp;2;6576656e742e6
 <p>Introduced in ClamAV 0.105</p>
 <p>Format: <code>fuzzy_img#&lt;hash&gt;#&lt;dist&gt;</code></p>
 <p>For example if you wanted to match on this image…</p>
-<p><img src="images/cisco.png" alt="logo.png"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="images/cisco.png" alt="logo.png"><span class="img-wrapper"><img src="images/cisco.png" alt="logo.png"></span></label></p>
 <p>…you would make a signature like this:</p>
 <pre><code>logo.png;Engine:150-255,Target:0;0;fuzzy_img#af2ad01ed42993c7#0
 </code></pre>
@@ -4586,19 +5036,13 @@ For a full list of ClamAV file types, see the <a href="#clamav-file-types">ClamA
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="clamav-git-work-flow-1"><a class="header" href="#clamav-git-work-flow-1">ClamAV Git Work Flow</a></h1>
 <p>ClamAV’s Git work flow isn’t very complicated, but it is more structured than most. It looks like this. Note that in the diagrams below, merged branches are regular merges and will add all of the commits from the source branch to the destination branch. The diagram doesn’t show all the merged commits, for simplicity:</p>
-<p><img src="images/clamav-git-workflow.png" alt="Git Work Flow"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="images/clamav-git-workflow.png" alt="Git Work Flow"><span class="img-wrapper"><img src="images/clamav-git-workflow.png" alt="Git Work Flow"></span></label></p>
 <h4 id="main"><a class="header" href="#main"><code>main</code>:</a></h4>
 <p>The development branch. testing is done in pull-requests (PR’s), so this branch should be stable, though we make no guarantees.</p>
 <h4 id="rel10-rel11-etc"><a class="header" href="#rel10-rel11-etc"><code>rel/1.0</code>, <code>rel/1.1</code>, etc.:</a></h4>
 <p>Feature release branches. These always contain the latest stable patch versions for each feature release.</p>
 <p>When development towards the next feature release is complete, a new <code>rel/X.Y</code> branch is created from <code>main</code> and a release tag is created.</p>
-<p>When a new patch version is needed, a <code>dev/X.Y.Z</code> branch is created from the <code>rel/X.Y</code> branch.  When development of that patch version is complete, the <code>dev/X.Y.Z</code> branch is merged back into the <code>rel/X.Y</code> branch, and a release tag is created.</p>
-<h4 id="dev101-dev102-etc"><a class="header" href="#dev101-dev102-etc"><code>dev/1.0.1</code>, <code>dev/1.0.2</code>, etc.:</a></h4>
-<p>A development branch used to test hotfixes prior to a patch release.</p>
-<h4 id="secdev101-etc"><a class="header" href="#secdev101-etc"><code>sec/dev/1.0.1</code>, etc.:</a></h4>
-<p>A private development branch used to test security-related hotfixes prior to a patch release. This branch will be rebased like any feature branch as needed up until the release.</p>
-<p>The ClamAV team maintains an internal mirror of the <code>clamav</code> repository in order to facilitate private branches, which are not a normal feature of the Git version control system.</p>
-<p>On release day, the private <code>sec/dev/1.0.1</code> branch would be pulled into the public <code>dev/1.0.1</code> branch and then into the <code>rel/1.0</code> branch where it would be tagged as “<code>clamav-1.0.1</code>”.</p>
+<p>The ClamAV team develops security fixes in an internal mirror of the <code>clamav</code> repository. Work for the next patch release takes place on an internal <code>rel/X.Y</code> branch. When the release is ready, the team publishes those commits to the corresponding public branch and creates a release tag. For example, ClamAV 1.0.1 would be published from the internal <code>rel/1.0</code> branch to the public <code>rel/1.0</code> branch and tagged <code>clamav-1.0.1</code>.</p>
 <h4 id="featuredescription"><a class="header" href="#featuredescription"><code>feature/description</code>:</a></h4>
 <p>A long-running branch for adding a major feature. It may be rebased several times with the default branch before it is ready to merge.</p>
 <h4 id="clam--description-issue--description"><a class="header" href="#clam--description-issue--description"><code>CLAM-####-description</code>, <code>issue-####-description</code>:</a></h4>
@@ -4608,20 +5052,20 @@ For a full list of ClamAV file types, see the <a href="#clamav-file-types">ClamA
 <p>A “fork” on GitHub is a personal playground. Though the word “fork” in the concept of open source traditionally referred to creating (and maintaining) a new variant of a project, forks on GitHub/GitLab/BitBucket/etc these days typically refer to a personal copy of the project where a user can test modifications to fix a bug or add a feature before contributing it back to the project in the form of a “pull request”.</p>
 <h3 id="create-and-maintain-a-personal-fork"><a class="header" href="#create-and-maintain-a-personal-fork">Create and Maintain a Personal Fork</a></h3>
 <p>You may only have one for any project, but it is very easy to create:</p>
-<p><img src="images/create-a-fork.png" alt="Create a Fork"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="images/create-a-fork.png" alt="Create a Fork"><span class="img-wrapper"><img src="images/create-a-fork.png" alt="Create a Fork"></span></label></p>
 <p>You can rename it as needed so you won’t confused a clone of your fork with that of the upstream <code>clamav</code> repository. Go to the “Settings” page and change the name to add your name in a suffix:</p>
-<p><img src="images/change-fork-name.png" alt="Change Fork Name"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="images/change-fork-name.png" alt="Change Fork Name"><span class="img-wrapper"><img src="images/change-fork-name.png" alt="Change Fork Name"></span></label></p>
 <p>You’re free to add or delete branches in your fork as you see fit, but I would advise against adding your own commits to the existing branches. The existing branches, particularly the <code>main</code> branch, are a reference from which you can create your own branches for your work. Adding your own commits to the existing branches will break your ability to synchronize with the upstream <code>Cisco-Talos/clamav</code> repository, and without more advanced Git experience you won’t be able to correct it.</p>
 <blockquote>
 <p><em>Tip</em>: If you’ve managed to screw up the commit history in your fork to the point where you don’t know how to fix it, you can always delete your fork and create a new one.</p>
 </blockquote>
 <p>Your fork is a snapshot of the upstream <code>clamav</code> repository at the moment at which you created it. Left unmaintained, your fork’s default branch will get left behind. Unlike BitBucket, GitHub will not sync branches for you automatically. If your branch is behind, it is simple to sync the branch on your fork using GitHub’s GUI by pressing the “Fetch Upstream” button:</p>
-<p><img src="images/fork-is-behind.png" alt="Sync and Merge"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="images/fork-is-behind.png" alt="Sync and Merge"><span class="img-wrapper"><img src="images/fork-is-behind.png" alt="Sync and Merge"></span></label></p>
 <p>You can sync other branches too. Simply switch branches to the desired branch and press “Fetch Upstream” again.</p>
 <h3 id="working-with-a-clone-of-your-fork-on-the-command-line"><a class="header" href="#working-with-a-clone-of-your-fork-on-the-command-line">Working with a Clone of your Fork on the Command Line</a></h3>
 <p>If you don’t already have an SSH key for your GitHub account, I recommend creating one. Navigate to your Account Settings and under SSH and GPG keys, click the “New SSH key” button. If you’re unfamiliar with how to generate an SSH key, there’s a nearby link “generating SSH keys” with additional instructions.</p>
 <p>Next, clone your ClamAV <em>fork</em>. Use the “Code” button on the default page for your fork to copy the “SSH” URL. If you don’t want to use an SSH key for GitHub authentication, use the HTTPS URL instead:</p>
-<p><img src="images/clone-your-fork.png" alt="Clone your Fork"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="images/clone-your-fork.png" alt="Clone your Fork"><span class="img-wrapper"><img src="images/clone-your-fork.png" alt="Clone your Fork"></span></label></p>
 <p>Now open up a terminal and type:</p>
 <pre><code class="language-bash">git clone &lt;paste that Git URL&gt;
 cd clamav-YourNameHere
@@ -6439,6 +6883,10 @@ DatabaseMirror database.clamav.net
 <p>Please note that some not RFC compliant DNS servers (namely the one shipped with the <em>Alcatel</em> (now <em>Thomson</em>) <strong>SpeedTouch 510 modem</strong>) can’t resolve <code>TXT</code> record. If that’s the case, please recompile ClamAV with the CMake option: <code>-D ENABLE_FRESHCLAM_DNS_FIX=ON</code></p>
 <hr>
 <p>For other questions regarding issues with the signature databases, see our <a href="#clamav-virus-database-faq">Virus Database FAQ</a>.</p>
+<h2 id="why-does-clamav-require-cmake-317-or-newer"><a class="header" href="#why-does-clamav-require-cmake-317-or-newer">Why does ClamAV require CMake 3.17 or newer?</a></h2>
+<p>ClamAV requires CMake 3.17 or newer so that CMake uses the modern behavior for linking private dependencies of static libraries. CMake 3.17 introduced policy CMP0099, which preserves link directories from private static library dependencies.</p>
+<p>Without that behavior, some static dependency packages can export private dependencies as bare linker flags, such as <code>-lssh2</code>, <code>-lcrypto</code>, or <code>-lnghttp2</code>, while carrying the library search directory separately. Older CMake policy behavior may drop that search directory from the final link command, causing errors like <code>cannot find -lssh2</code> even when the static library is installed.</p>
+<p>If your operating system provides an older CMake package, install a newer CMake from your package manager, from Python’s <code>pip</code> or <code>pipx</code>, or directly from the <a href="https://cmake.org/download/">CMake website</a>.</p>
 <h2 id="clamav-becomes-unresponsive"><a class="header" href="#clamav-becomes-unresponsive">ClamAV becomes unresponsive</a></h2>
 <p>ClamAV requires a lot of memory in order to function properly. It is particularly common in environments like Docker / Kubernetes for a container to lack the required memory needed for the <code>clamd</code> process to reload the databases after the daily signature update. This may cause the process to crash or become unresponsive. You can find <a href="#memory-ram-requirements">more information here</a>.</p>
 <h2 id="clamav-stops-responding-after-about-24-hours"><a class="header" href="#clamav-stops-responding-after-about-24-hours">ClamAV stops responding after about 24 hours</a></h2>
@@ -6987,8 +7435,8 @@ whereis clamscan
 <tr><th>Feature release</th><th>First Published</th><th>Latest patch version</th><th>Expected End of Life (EOL)</th><th>Signature load testing until</th><th>Signature FP testing until</th><th>DB downloads allowed until</th><th>Patch versions continue until</th></tr>
 </thead>
 <tbody>
-<tr><td>1.5</td><td>Oct-7 2025</td><td>1.5.1</td><td>1.7 + 4 months</td><td>1.7 + 4 months</td><td>1.6 published</td><td>1.7 + 4 months</td><td>1.6 + 4 months, or 1.7</td></tr>
-<tr><td><strong>1.4  LTS</strong></td><td><strong>Aug-15 2024</strong></td><td><strong>1.4.3</strong></td><td><strong>Aug-15 2027</strong> (3 years)</td><td><strong>Aug-15 2027</strong>  (4 years)</td><td>Oct-7 2025 (1.5 published)</td><td><strong>Aug-15 2028</strong>  (4 years)</td><td><strong>Aug-15 2027</strong>  (3 years)</td></tr>
+<tr><td>1.5</td><td>Oct-7 2025</td><td>1.5.3</td><td>1.7 + 4 months</td><td>1.7 + 4 months</td><td>1.6 published</td><td>1.7 + 4 months</td><td>1.6 + 4 months, or 1.7</td></tr>
+<tr><td><strong>1.4  LTS</strong></td><td><strong>Aug-15 2024</strong></td><td><strong>1.4.5</strong></td><td><strong>Aug-15 2027</strong> (3 years)</td><td><strong>Aug-15 2027</strong>  (4 years)</td><td>Oct-7 2025 (1.5 published)</td><td><strong>Aug-15 2028</strong>  (4 years)</td><td><strong>Aug-15 2027</strong>  (3 years)</td></tr>
 <tr><td>1.3</td><td>Feb-7 2024</td><td>1.3.2</td><td>Feb-7 2026 (1.5 + 4 months)</td><td>Feb-7 2026 (1.5 + 4 months)</td><td>Aug-15 2024 (1.4 published)</td><td>Feb-7 2026 (1.5 + 4 months)</td><td>Dec-15 2024 (1.4 + 4 months, or 1.5)</td></tr>
 <tr><td>1.2</td><td>Aug-28 2023</td><td>1.2.3</td><td>Dec-15 2024 (1.4 + 4 months)</td><td>Dec-15 2024 (1.4 + 4 months)</td><td>Feb-7 2024 (1.3 published)</td><td>Dec-15 2024 (1.4 + 4 months)</td><td>Jun-7 2024 (1.3 + 4 months, or 1.4)</td></tr>
 <tr><td>1.1</td><td>May-1 2023</td><td>1.1.3</td><td>Jun-7 2024 (1.3 + 4 months)</td><td>Jun-7 2024 (1.3 + 4 months)</td><td>Aug-28 2023 (1.2 published)</td><td>Jun-7 2024 (1.3 + 4 months)</td><td>Dec-28 2023 (1.2 + 4 months, or 1.3)</td></tr>
@@ -7010,7 +7458,7 @@ whereis clamscan
 <h3 id="critical-patches-after-a-breaking-change"><a class="header" href="#critical-patches-after-a-breaking-change">Critical Patches After a Breaking Change</a></h3>
 <p>On rare occasion we have made breaking changes to the way that users or other software interact with ClamAV or libclamav. The 0.101.0 release was one such example where we made a breaking change to the libclamav programming API. When this happens, we will provide extra time for users to upgrade to a newer feature release before we discontinue support for the older feature release.</p>
 <p>The amount of extra time before we discontinue support will vary depending on the severity of the breaking change and the level of difficulty to upgrade.</p>
-<h3 id="examples"><a class="header" href="#examples">Examples</a></h3>
+<h3 id="examples-1"><a class="header" href="#examples-1">Examples</a></h3>
 <h4 id="security-patches-less-than-four-4-months-after-a-feature-release"><a class="header" href="#security-patches-less-than-four-4-months-after-a-feature-release">Security Patches Less than four (4) Months After a Feature Release</a></h4>
 <p>If the non-disclosure / release date for a security patch falls within four (4) months since the previous feature release was published, we will craft a security patch version for the future feature release, the current feature release, the previous feature release, and any LTS feature releases.</p>
 <blockquote>
@@ -7019,11 +7467,10 @@ whereis clamscan
 <p>In this situation, we would prepare a security patch version for:</p>
 <ul>
 <li>the 1.6 feature release (e.g., 1.6.1),</li>
-<li>the 1.5 feature release (e.g., 1.5.2),</li>
-<li>the 1.4 LTS feature release (e.g., 1.4.4),</li>
-<li>and the 1.0 LTS feature release (e.g., 1.0.10).</li>
+<li>the 1.5 feature release (e.g., 1.5.3),</li>
+<li>and the 1.4 LTS feature release (e.g., 1.4.5).</li>
 </ul>
-<p>Once the critical patch versions have been published, the same or equivalent fixes will be merged into the <code>main</code> branch for inclusion into the next feature release (0.106.0).</p>
+<p>Once the critical patch versions have been published, the same or equivalent fixes will be merged into the <code>main</code> branch for inclusion into the next feature release (1.7.0).</p>
 </blockquote>
 <h4 id="security-patches-more-than-four-4-months-after-a-feature-release-has-been-available"><a class="header" href="#security-patches-more-than-four-4-months-after-a-feature-release-has-been-available">Security Patches More than four (4) Months After a Feature Release Has Been Available</a></h4>
 <p>If the non-disclosure / release date for a security patch falls after four (4) months since the previous feature release was published, we will only craft a security patch version for the future feature release, the current feature release, and any LTS feature releases.</p>
@@ -7032,8 +7479,7 @@ whereis clamscan
 <p>This would exceed our 4-month policy, so we would publish the fix:</p>
 <ul>
 <li>in 1.6 (eg. 1.6.1),</li>
-<li>the 1.4 LTS feature release (e.g., 1.4.4),</li>
-<li>and the 1.0 LTS feature release (e.g., 1.0.10).</li>
+<li>and the 1.4 LTS feature release (e.g., 1.4.5).</li>
 </ul>
 <p>… but would not publish a patch version for the 1.5 feature release.</p>
 </blockquote>
@@ -7761,8 +8207,14 @@ hide/view parts of the structure:</p>
 </thead>
 <tbody>
 <tr><td>n/a</td><td>1.6.0</td><td>240</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>tbd</td></tr>
+<tr><td>Jun-2026</td><td>1.5.3</td><td>233</td><td>13:00:01</td><td>12.1.0</td><td>4:00:00</td><td>4.0.0</td><td>Critical bug fixes</td></tr>
+<tr><td>Jun-2026</td><td>1.4.5</td><td>215</td><td>12:03:00</td><td>12.0.3</td><td>3:02:00</td><td>3.0.2</td><td>Critical bug fixes</td></tr>
+<tr><td>Mar-2026</td><td>1.5.2</td><td>232</td><td>13:00:01</td><td>12.1.0</td><td>4:00:00</td><td>4.0.0</td><td>Critical bug fixes</td></tr>
+<tr><td>Mar-2026</td><td>1.4.4</td><td>214</td><td>12:03:00</td><td>12.0.3</td><td>3:02:00</td><td>3.0.2</td><td>Critical bug fixes</td></tr>
 <tr><td>Oct-2025</td><td>1.5.1</td><td>231</td><td>13:00:01</td><td>12.1.0</td><td>4:00:00</td><td>4.0.0</td><td>Critical bug fixes</td></tr>
 <tr><td>Oct-2025</td><td>1.5.0</td><td>230</td><td>13:00:01</td><td>12.1.0</td><td>4:00:00</td><td>4.0.0</td><td>New scan callbacks, <code>cl_scan*_ex()</code> APIs, <code>.cvd.sign</code> files, FIPS-limits, <code>CL_TYPE_AI_MODEL</code>, PDF &amp; HTML URI’s in metadata JSON, detect encrypted OLE2</td></tr>
+<tr><td>Jun-2025</td><td>1.4.3</td><td>213</td><td>12:03:00</td><td>12.0.3</td><td>3:02:00</td><td>3.0.2</td><td>Critical bug fixes</td></tr>
+<tr><td>Jun-2025</td><td>1.0.9</td><td>169</td><td>11:00:00</td><td>11.0.0</td><td>2:02:00</td><td>2.0.2</td><td>Critical bug fixes</td></tr>
 <tr><td>Jan-2025</td><td>1.4.2</td><td>212</td><td>12:03:00</td><td>12.0.3</td><td>3:02:00</td><td>3.0.2</td><td>Critical bug fixes</td></tr>
 <tr><td>Jan-2025</td><td>1.0.8</td><td>168</td><td>11:00:00</td><td>11.0.0</td><td>2:02:00</td><td>2.0.2</td><td>Critical bug fixes</td></tr>
 <tr><td>Sep-2024</td><td>1.4.1</td><td>211</td><td>12:03:00</td><td>12.0.3</td><td>3:02:00</td><td>3.0.2</td><td>Critical bug fixes</td></tr>
@@ -7900,13 +8352,15 @@ hide/view parts of the structure:</p>
 
         <script src="elasticlunr-ef4e11c1.min.js"></script>
         <script src="mark-09e88c2c.min.js"></script>
-        <script src="searcher-c2a407aa.js"></script>
+        <script src="searcher-09f2665d.js"></script>
 
         <script src="clipboard-1626706a.min.js"></script>
         <script src="highlight-abc7f01d.js"></script>
         <script src="book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-ccf746f1.js"></script>
 
         <script>
         window.addEventListener('load', function() {

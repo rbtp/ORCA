@@ -24,7 +24,7 @@ sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 from core.database_manager import db
 from routes import mitre_routes, ioc, admin, profile_routes, coverage_routes, network_routes, behavioral_routes
 import vr_remote
-from agent_routes import router as agent_router
+from agent_routes import router as agent_router, dispatch_and_wait
 from config import cfg
 from report_routes import router as report_router
 
@@ -109,7 +109,6 @@ VR_EXE_WINDOWS = cfg.VR_EXE_WINDOWS  # pushed to / executed on remote Windows ta
 DATA_ROOT = cfg.DATA_ROOT
 SYFT_EXE  = cfg.SYFT_EXE
 GRYPE_EXE = cfg.GRYPE_EXE
-AIM_CLI   = cfg.AIM_CLI
 
 
 # --- MODELS ---
@@ -141,6 +140,7 @@ class VulnScanRequest(BaseModel):
 
 class MountRequest(BaseModel):
     asset_id:     Union[str, int]
+    agent_id:     str
     image_path:   str
     drive_letter: Optional[str] = None
     provider:     Optional[str] = "auto"
@@ -559,18 +559,21 @@ async def get_vuln_results(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-def _parse_aim_output(output: str) -> dict:
-    """Parse aim_cli stdout into structured dict."""
-    result = {"device_number": None, "physical_drive": None, "drive_letter": None}
-    for line in output.splitlines():
-        line = line.strip()
-        if line.startswith("Device number"):
-            result["device_number"] = line.split()[-1]
-        elif line.startswith("Device is"):
-            result["physical_drive"] = line.split()[-1]
-        elif "Drive letter" in line or (len(line) == 2 and line[1] == ":"):
-            result["drive_letter"] = line.replace("Drive letter:", "").replace(":", "").strip()
-    return result
+def _extract_job_result(lines: list) -> dict:
+    """dispatch_and_wait() returns the raw NDJSON lines an agent streamed via
+    _stream_line() -- pull out the terminal event's data. Mount/dismount jobs
+    already do their aim_cli output parsing agent-side (orca_agent.py's own
+    _parse_aim_output), so this just unwraps what it already structured."""
+    for line in lines:
+        try:
+            evt = json.loads(line)
+        except Exception:
+            continue
+        if evt.get("type") == "error":
+            raise HTTPException(status_code=500, detail=str(evt.get("data")))
+        if evt.get("type") == "done":
+            return evt.get("data") or {}
+    raise HTTPException(status_code=500, detail="Agent job completed with no result")
 
 
 def _ensure_mount_table():
@@ -579,6 +582,7 @@ def _ensure_mount_table():
             CREATE TABLE IF NOT EXISTS mount_sessions (
                 id              SERIAL PRIMARY KEY,
                 asset_id        INTEGER NOT NULL,
+                agent_id        VARCHAR(64),
                 image_path      TEXT NOT NULL,
                 device_number   VARCHAR(20),
                 drive_letter    VARCHAR(5),
@@ -589,6 +593,10 @@ def _ensure_mount_table():
                 dismounted_at   TIMESTAMP
             )
         """))
+        # Table may already exist from before agent_id was added (this whole
+        # function only ever CREATE TABLE IF NOT EXISTS, so an existing table
+        # wouldn't otherwise pick up new columns).
+        conn.execute(text("ALTER TABLE mount_sessions ADD COLUMN IF NOT EXISTS agent_id VARCHAR(64)"))
         conn.commit()
 
 
@@ -597,7 +605,14 @@ async def mount_image(
     request: MountRequest,
     current_user: dict = Depends(get_current_user)
 ):
-    """Mount a disk image via aim_cli and record the session."""
+    """Mount a disk image via an ORCA agent's aim_cli and record the session.
+
+    Dispatched to an agent rather than run locally -- Arsenal Image Mounter
+    is Windows-only with no Linux equivalent, so this container can never
+    run it directly. The agent can be the same Windows host Docker runs on
+    (for evidence reachable from there, e.g. a UNC path) or any other
+    Windows machine with custody of the image; either way it's just another
+    registered agent from this endpoint's point of view."""
     _ensure_mount_table()
     asset_id = int(request.asset_id)
 
@@ -610,35 +625,31 @@ async def mount_image(
             ".qcow": "LibQcow", ".qcow2": "LibQcow",
         }.get(ext, "None")
 
-    cmd = [AIM_CLI, "--mount"]
-    if request.readonly:
-        cmd.append("--readonly")
-    cmd += [f"--filename={request.image_path}", f"--provider={provider}"]
-
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=os.path.dirname(AIM_CLI),
-        )
-        stdout, _ = await proc.communicate()
-        output = stdout.decode(errors="replace")
+        lines = await dispatch_and_wait(request.agent_id, "mount", {
+            "image_path": request.image_path,
+            "provider": provider,
+            "readonly": request.readonly,
+        })
+        result = _extract_job_result(lines)
 
-        if proc.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"AIM_MOUNT_FAILED: {output}")
-
-        parsed = _parse_aim_output(output)
+        parsed = {
+            "device_number":  result.get("device_number"),
+            "physical_drive": result.get("physical_drive"),
+            "drive_letter":   result.get("drive_letter"),
+        }
+        output = result.get("output", "")
         drive_letter = parsed["drive_letter"] or request.drive_letter
 
         with db.engine.connect() as conn:
             row = conn.execute(text("""
                 INSERT INTO mount_sessions
-                    (asset_id, image_path, device_number, drive_letter, physical_drive, provider, status)
-                VALUES (:asset_id, :image_path, :device_number, :drive_letter, :physical_drive, :provider, 'MOUNTED')
+                    (asset_id, agent_id, image_path, device_number, drive_letter, physical_drive, provider, status)
+                VALUES (:asset_id, :agent_id, :image_path, :device_number, :drive_letter, :physical_drive, :provider, 'MOUNTED')
                 RETURNING id
             """), {
                 "asset_id":       asset_id,
+                "agent_id":       request.agent_id,
                 "image_path":     request.image_path,
                 "device_number":  parsed["device_number"],
                 "drive_letter":   drive_letter,
@@ -664,6 +675,8 @@ async def mount_image(
 
     except HTTPException:
         raise
+    except TimeoutError as e:
+        raise HTTPException(status_code=504, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -674,7 +687,10 @@ async def dismount_image(
     mount_id: int,
     current_user: dict = Depends(get_current_user)
 ):
-    """Dismount a mounted image by mount session ID."""
+    """Dismount a mounted image by mount session ID, via the same ORCA agent
+    that mounted it -- device_number is only meaningful on that specific
+    Windows host, so it's read from the stored session rather than trusted
+    from the caller."""
     _ensure_mount_table()
 
     # Atomically claim the mount session by flipping it to a transient
@@ -686,33 +702,34 @@ async def dismount_image(
         row = conn.execute(text("""
             UPDATE mount_sessions SET status = 'DISMOUNTING'
             WHERE id = :mount_id AND asset_id = :asset_id AND status = 'MOUNTED'
-            RETURNING device_number
+            RETURNING device_number, agent_id
         """), {"mount_id": mount_id, "asset_id": asset_id}).fetchone()
         conn.commit()
 
     if not row:
         raise HTTPException(status_code=404, detail="Mount session not found or already dismounted")
 
-    device_number = row[0]
-    cmd = [AIM_CLI, f"--dismount={device_number}", "--force"]
+    device_number, agent_id = row
+    if not agent_id:
+        # Session predates agent_id being tracked (mounted before this
+        # feature existed) -- there's no way to know which host to dispatch
+        # to, and the underlying image is long gone anyway. Let the operator
+        # clear the stale row rather than silently no-op a "successful" dismount.
+        with db.engine.connect() as conn:
+            conn.execute(text("""
+                UPDATE mount_sessions SET status = 'MOUNTED' WHERE id = :mount_id
+            """), {"mount_id": mount_id})
+            conn.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="This mount session has no recorded agent (mounted before agent-based mounting existed) "
+                   "and can't be dismounted through this endpoint.",
+        )
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=os.path.dirname(AIM_CLI),
-        )
-        stdout, _ = await proc.communicate()
-        output = stdout.decode(errors="replace")
-
-        if proc.returncode != 0:
-            with db.engine.connect() as conn:
-                conn.execute(text("""
-                    UPDATE mount_sessions SET status = 'MOUNTED' WHERE id = :mount_id
-                """), {"mount_id": mount_id})
-                conn.commit()
-            raise HTTPException(status_code=500, detail=f"AIM_DISMOUNT_FAILED: {output}")
+        lines = await dispatch_and_wait(agent_id, "dismount", {"device_number": device_number})
+        result = _extract_job_result(lines)
+        output = result.get("output", "")
 
         with db.engine.connect() as conn:
             conn.execute(text("""
@@ -725,7 +742,19 @@ async def dismount_image(
         return {"status": "DISMOUNTED", "output": output}
 
     except HTTPException:
+        with db.engine.connect() as conn:
+            conn.execute(text("""
+                UPDATE mount_sessions SET status = 'MOUNTED' WHERE id = :mount_id AND status = 'DISMOUNTING'
+            """), {"mount_id": mount_id})
+            conn.commit()
         raise
+    except TimeoutError as e:
+        with db.engine.connect() as conn:
+            conn.execute(text("""
+                UPDATE mount_sessions SET status = 'MOUNTED' WHERE id = :mount_id AND status = 'DISMOUNTING'
+            """), {"mount_id": mount_id})
+            conn.commit()
+        raise HTTPException(status_code=504, detail=str(e))
     except Exception as e:
         with db.engine.connect() as conn:
             conn.execute(text("""
@@ -744,7 +773,7 @@ async def get_mounts(
     _ensure_mount_table()
     with db.engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT id, image_path, device_number, drive_letter, physical_drive,
+            SELECT id, agent_id, image_path, device_number, drive_letter, physical_drive,
                    provider, status, mounted_at, dismounted_at
             FROM mount_sessions WHERE asset_id = :id
             ORDER BY mounted_at DESC

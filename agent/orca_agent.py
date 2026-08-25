@@ -31,6 +31,7 @@ class OrcaAgent:
             "clamav": "clamscan.exe",
             "grype": "grype.exe",
             "syft": "syft.exe",
+            "aim": os.path.join("arsenal", "aim_cli.exe"),
         }
         for cap, binary in bins.items():
             if os.path.exists(os.path.join(self.bin_dir, binary)):
@@ -92,6 +93,10 @@ class OrcaAgent:
                 self._run_clamav(job_id, params)
             elif jtype == "grype":
                 self._run_grype(job_id, params)
+            elif jtype == "mount":
+                self._run_mount(job_id, params)
+            elif jtype == "dismount":
+                self._run_dismount(job_id, params)
             elif jtype == "memory":
                 self._run_memory(job_id, params)
             elif jtype == "vql_test":
@@ -191,6 +196,68 @@ class OrcaAgent:
             "done",
             {"scanned_files": scanned, "infected_files": infected, "threats": threats},
         )
+
+    @staticmethod
+    def _parse_aim_output(output):
+        """Parse aim_cli stdout into structured dict. Mirrors main.py's
+        _parse_aim_output -- kept in sync manually since this runs on the
+        remote/local Windows side, not in the backend container."""
+        result = {"device_number": None, "physical_drive": None, "drive_letter": None}
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("Device number"):
+                result["device_number"] = line.split()[-1]
+            elif line.startswith("Device is"):
+                result["physical_drive"] = line.split()[-1]
+            elif "Drive letter" in line or (len(line) == 2 and line[1] == ":"):
+                result["drive_letter"] = line.replace("Drive letter:", "").replace(":", "").strip()
+        return result
+
+    def _run_mount(self, job_id, params):
+        exe = os.path.join(self.bin_dir, "arsenal", "aim_cli.exe")
+        if not os.path.exists(exe):
+            raise RuntimeError(f"aim_cli.exe not found at {exe}")
+
+        cmd = [exe, "--mount"]
+        if params.get("readonly", True):
+            cmd.append("--readonly")
+        cmd += [f"--filename={params['image_path']}", f"--provider={params.get('provider', 'auto')}"]
+
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            cwd=os.path.join(self.bin_dir, "arsenal"),
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+        self._stream_line(job_id, "log", {"message": output})
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"AIM_MOUNT_FAILED: {output[:500]}")
+
+        parsed = self._parse_aim_output(output)
+        self._stream_line(job_id, "done", {
+            "device_number": parsed["device_number"],
+            "physical_drive": parsed["physical_drive"],
+            "drive_letter": parsed["drive_letter"],
+            "output": output,
+        })
+
+    def _run_dismount(self, job_id, params):
+        exe = os.path.join(self.bin_dir, "arsenal", "aim_cli.exe")
+        if not os.path.exists(exe):
+            raise RuntimeError(f"aim_cli.exe not found at {exe}")
+
+        cmd = [exe, f"--dismount={params['device_number']}", "--force"]
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            cwd=os.path.join(self.bin_dir, "arsenal"),
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+        self._stream_line(job_id, "log", {"message": output})
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"AIM_DISMOUNT_FAILED: {output[:500]}")
+
+        self._stream_line(job_id, "done", {"output": output})
 
     def _run_grype(self, job_id, params):
         syft_exe = os.path.join(self.bin_dir, "syft.exe")
@@ -303,6 +370,18 @@ class OrcaAgent:
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def _download_bin(self, name, dest):
+        url = f"{self.server}/api/agent/download/bin/{name}"
+        r = requests.get(url, headers=self.headers, verify=False, stream=True, timeout=300)
+        if r.status_code == 404:
+            print(f"[ORCA Agent] {name} not on server — skipping", flush=True)
+            return False
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+        return True
+
     def _bootstrap_binaries(self):
         needed = ["velociraptor.exe", "clamscan.exe", "grype.exe", "syft.exe"]
         os.makedirs(self.bin_dir, exist_ok=True)
@@ -310,20 +389,31 @@ class OrcaAgent:
             dest = os.path.join(self.bin_dir, name)
             if os.path.exists(dest):
                 continue
-            url = f"{self.server}/api/agent/download/bin/{name}"
             print(f"[ORCA Agent] Downloading {name}...", flush=True)
             try:
-                r = requests.get(url, headers=self.headers, verify=False, stream=True, timeout=300)
-                if r.status_code == 404:
-                    print(f"[ORCA Agent] {name} not on server — skipping", flush=True)
-                    continue
-                r.raise_for_status()
-                with open(dest, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        f.write(chunk)
-                print(f"[ORCA Agent] {name} ready", flush=True)
+                if self._download_bin(name, dest):
+                    print(f"[ORCA Agent] {name} ready", flush=True)
             except Exception as e:
                 print(f"[ORCA Agent] Warning: could not download {name}: {e}", flush=True)
+
+        # Arsenal Image Mounter isn't a single file -- aim_cli.exe needs its
+        # whole directory of dependent DLLs, so it's served pre-zipped and
+        # extracted here instead of written straight to disk like the above.
+        aim_dest = os.path.join(self.bin_dir, "arsenal", "aim_cli.exe")
+        if not os.path.exists(aim_dest):
+            zip_path = os.path.join(self.bin_dir, "arsenal.zip")
+            print("[ORCA Agent] Downloading arsenal.zip...", flush=True)
+            try:
+                if self._download_bin("arsenal.zip", zip_path):
+                    import zipfile
+                    extract_dir = os.path.join(self.bin_dir, "arsenal")
+                    os.makedirs(extract_dir, exist_ok=True)
+                    with zipfile.ZipFile(zip_path) as zf:
+                        zf.extractall(extract_dir)
+                    os.remove(zip_path)
+                    print("[ORCA Agent] arsenal (Arsenal Image Mounter) ready", flush=True)
+            except Exception as e:
+                print(f"[ORCA Agent] Warning: could not set up arsenal: {e}", flush=True)
 
     def run(self):
         self._bootstrap_binaries()

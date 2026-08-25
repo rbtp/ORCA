@@ -36,10 +36,10 @@
             const path_to_root = "../";
             const default_light_theme = "clamav";
             const default_dark_theme = "clamav";
-            window.path_to_searchindex_js = "../searchindex-1b5ba28b.js";
+            window.path_to_searchindex_js = "../searchindex-f120d447.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-cbaddea7.js"></script>
+        <script src="../toc-0c194aa2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -210,6 +210,10 @@ DatabaseMirror database.clamav.net
 <p>Please note that some not RFC compliant DNS servers (namely the one shipped with the <em>Alcatel</em> (now <em>Thomson</em>) <strong>SpeedTouch 510 modem</strong>) can’t resolve <code>TXT</code> record. If that’s the case, please recompile ClamAV with the CMake option: <code>-D ENABLE_FRESHCLAM_DNS_FIX=ON</code></p>
 <hr>
 <p>For other questions regarding issues with the signature databases, see our <a href="faq-cvd.html">Virus Database FAQ</a>.</p>
+<h2 id="why-does-clamav-require-cmake-317-or-newer"><a class="header" href="#why-does-clamav-require-cmake-317-or-newer">Why does ClamAV require CMake 3.17 or newer?</a></h2>
+<p>ClamAV requires CMake 3.17 or newer so that CMake uses the modern behavior for linking private dependencies of static libraries. CMake 3.17 introduced policy CMP0099, which preserves link directories from private static library dependencies.</p>
+<p>Without that behavior, some static dependency packages can export private dependencies as bare linker flags, such as <code>-lssh2</code>, <code>-lcrypto</code>, or <code>-lnghttp2</code>, while carrying the library search directory separately. Older CMake policy behavior may drop that search directory from the final link command, causing errors like <code>cannot find -lssh2</code> even when the static library is installed.</p>
+<p>If your operating system provides an older CMake package, install a newer CMake from your package manager, from Python’s <code>pip</code> or <code>pipx</code>, or directly from the <a href="https://cmake.org/download/">CMake website</a>.</p>
 <h2 id="clamav-becomes-unresponsive"><a class="header" href="#clamav-becomes-unresponsive">ClamAV becomes unresponsive</a></h2>
 <p>ClamAV requires a lot of memory in order to function properly. It is particularly common in environments like Docker / Kubernetes for a container to lack the required memory needed for the <code>clamd</code> process to reload the databases after the daily signature update. This may cause the process to crash or become unresponsive. You can find <a href="../manual/Installing/Docker.html#memory-ram-requirements">more information here</a>.</p>
 <h2 id="clamav-stops-responding-after-about-24-hours"><a class="header" href="#clamav-stops-responding-after-about-24-hours">ClamAV stops responding after about 24 hours</a></h2>
@@ -284,13 +288,15 @@ make: *** [Makefile:166: all] Error 2
 
         <script src="../elasticlunr-ef4e11c1.min.js"></script>
         <script src="../mark-09e88c2c.min.js"></script>
-        <script src="../searcher-c2a407aa.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
 
         <script src="../clipboard-1626706a.min.js"></script>
         <script src="../highlight-abc7f01d.js"></script>
         <script src="../book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="../mermaid-eefea253.min.js"></script>
+        <script src="../mermaid-init-ccf746f1.js"></script>
 
 
 

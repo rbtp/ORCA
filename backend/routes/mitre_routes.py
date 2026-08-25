@@ -2254,12 +2254,15 @@ async def load_clam_results(asset_id: int, user: dict = Depends(get_current_user
 
 @router.post("/scan/clam/update")
 async def update_clam_defs(payload: ClamUpdateRequest, user: dict = Depends(get_current_user)):
-    freshclam_exe = os.path.join(cfg.CLAM_BASE, "freshclam.exe")
+    freshclam_exe = cfg.CLAM_FRESHCLAM_EXE
     if not os.path.exists(freshclam_exe):
-        raise HTTPException(status_code=404, detail="freshclam not found — check ORCA_CLAM_BASE configuration")
+        raise HTTPException(status_code=404, detail="freshclam not found — check ORCA_CLAM_FRESHCLAM_EXE configuration")
+    cmd = [freshclam_exe, f"--datadir={cfg.CLAM_DB_DIR}", "--stdout"]
+    if cfg.CLAM_FRESHCLAM_CONF:
+        cmd.append(f"--config-file={cfg.CLAM_FRESHCLAM_CONF}")
     try:
         result = subprocess.run(
-            [freshclam_exe, f"--datadir={cfg.CLAM_BASE}", "--stdout"],
+            cmd,
             capture_output=True, text=True, timeout=300
         )
         output = (result.stdout + result.stderr).strip()
@@ -2282,11 +2285,11 @@ async def update_clam_defs(payload: ClamUpdateRequest, user: dict = Depends(get_
 
 @router.post("/scan/clam")
 async def run_clamscan_streaming(payload: ClamScanRequest, user: dict = Depends(get_current_user)):
-    exe_path = os.path.join(cfg.CLAM_BASE, "clamscan.exe")
+    exe_path = cfg.CLAM_EXE
     if not os.path.exists(exe_path):
-        raise HTTPException(status_code=404, detail="clamscan not found — check ORCA_CLAM_BASE configuration")
+        raise HTTPException(status_code=404, detail="clamscan not found — check ORCA_CLAM_EXE configuration")
 
-    db_args = _get_clam_db_args(cfg.CLAM_BASE)
+    db_args = _get_clam_db_args(cfg.CLAM_DB_DIR)
     cmd = [exe_path] + db_args + ["--stdout"]
     if payload.recursive:
         cmd.append("-r")

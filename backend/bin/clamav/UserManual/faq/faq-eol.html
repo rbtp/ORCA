@@ -36,10 +36,10 @@
             const path_to_root = "../";
             const default_light_theme = "clamav";
             const default_dark_theme = "clamav";
-            window.path_to_searchindex_js = "../searchindex-1b5ba28b.js";
+            window.path_to_searchindex_js = "../searchindex-f120d447.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-cbaddea7.js"></script>
+        <script src="../toc-0c194aa2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -244,8 +244,8 @@
 <tr><th>Feature release</th><th>First Published</th><th>Latest patch version</th><th>Expected End of Life (EOL)</th><th>Signature load testing until</th><th>Signature FP testing until</th><th>DB downloads allowed until</th><th>Patch versions continue until</th></tr>
 </thead>
 <tbody>
-<tr><td>1.5</td><td>Oct-7 2025</td><td>1.5.1</td><td>1.7 + 4 months</td><td>1.7 + 4 months</td><td>1.6 published</td><td>1.7 + 4 months</td><td>1.6 + 4 months, or 1.7</td></tr>
-<tr><td><strong>1.4  LTS</strong></td><td><strong>Aug-15 2024</strong></td><td><strong>1.4.3</strong></td><td><strong>Aug-15 2027</strong> (3 years)</td><td><strong>Aug-15 2027</strong>  (4 years)</td><td>Oct-7 2025 (1.5 published)</td><td><strong>Aug-15 2028</strong>  (4 years)</td><td><strong>Aug-15 2027</strong>  (3 years)</td></tr>
+<tr><td>1.5</td><td>Oct-7 2025</td><td>1.5.3</td><td>1.7 + 4 months</td><td>1.7 + 4 months</td><td>1.6 published</td><td>1.7 + 4 months</td><td>1.6 + 4 months, or 1.7</td></tr>
+<tr><td><strong>1.4  LTS</strong></td><td><strong>Aug-15 2024</strong></td><td><strong>1.4.5</strong></td><td><strong>Aug-15 2027</strong> (3 years)</td><td><strong>Aug-15 2027</strong>  (4 years)</td><td>Oct-7 2025 (1.5 published)</td><td><strong>Aug-15 2028</strong>  (4 years)</td><td><strong>Aug-15 2027</strong>  (3 years)</td></tr>
 <tr><td>1.3</td><td>Feb-7 2024</td><td>1.3.2</td><td>Feb-7 2026 (1.5 + 4 months)</td><td>Feb-7 2026 (1.5 + 4 months)</td><td>Aug-15 2024 (1.4 published)</td><td>Feb-7 2026 (1.5 + 4 months)</td><td>Dec-15 2024 (1.4 + 4 months, or 1.5)</td></tr>
 <tr><td>1.2</td><td>Aug-28 2023</td><td>1.2.3</td><td>Dec-15 2024 (1.4 + 4 months)</td><td>Dec-15 2024 (1.4 + 4 months)</td><td>Feb-7 2024 (1.3 published)</td><td>Dec-15 2024 (1.4 + 4 months)</td><td>Jun-7 2024 (1.3 + 4 months, or 1.4)</td></tr>
 <tr><td>1.1</td><td>May-1 2023</td><td>1.1.3</td><td>Jun-7 2024 (1.3 + 4 months)</td><td>Jun-7 2024 (1.3 + 4 months)</td><td>Aug-28 2023 (1.2 published)</td><td>Jun-7 2024 (1.3 + 4 months)</td><td>Dec-28 2023 (1.2 + 4 months, or 1.3)</td></tr>
@@ -276,11 +276,10 @@
 <p>In this situation, we would prepare a security patch version for:</p>
 <ul>
 <li>the 1.6 feature release (e.g., 1.6.1),</li>
-<li>the 1.5 feature release (e.g., 1.5.2),</li>
-<li>the 1.4 LTS feature release (e.g., 1.4.4),</li>
-<li>and the 1.0 LTS feature release (e.g., 1.0.10).</li>
+<li>the 1.5 feature release (e.g., 1.5.3),</li>
+<li>and the 1.4 LTS feature release (e.g., 1.4.5).</li>
 </ul>
-<p>Once the critical patch versions have been published, the same or equivalent fixes will be merged into the <code>main</code> branch for inclusion into the next feature release (0.106.0).</p>
+<p>Once the critical patch versions have been published, the same or equivalent fixes will be merged into the <code>main</code> branch for inclusion into the next feature release (1.7.0).</p>
 </blockquote>
 <h4 id="security-patches-more-than-four-4-months-after-a-feature-release-has-been-available"><a class="header" href="#security-patches-more-than-four-4-months-after-a-feature-release-has-been-available">Security Patches More than four (4) Months After a Feature Release Has Been Available</a></h4>
 <p>If the non-disclosure / release date for a security patch falls after four (4) months since the previous feature release was published, we will only craft a security patch version for the future feature release, the current feature release, and any LTS feature releases.</p>
@@ -289,8 +288,7 @@
 <p>This would exceed our 4-month policy, so we would publish the fix:</p>
 <ul>
 <li>in 1.6 (eg. 1.6.1),</li>
-<li>the 1.4 LTS feature release (e.g., 1.4.4),</li>
-<li>and the 1.0 LTS feature release (e.g., 1.0.10).</li>
+<li>and the 1.4 LTS feature release (e.g., 1.4.5).</li>
 </ul>
 <p>… but would not publish a patch version for the 1.5 feature release.</p>
 </blockquote>
@@ -347,13 +345,15 @@
 
         <script src="../elasticlunr-ef4e11c1.min.js"></script>
         <script src="../mark-09e88c2c.min.js"></script>
-        <script src="../searcher-c2a407aa.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
 
         <script src="../clipboard-1626706a.min.js"></script>
         <script src="../highlight-abc7f01d.js"></script>
         <script src="../book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="../mermaid-eefea253.min.js"></script>
+        <script src="../mermaid-init-ccf746f1.js"></script>
 
 
 
