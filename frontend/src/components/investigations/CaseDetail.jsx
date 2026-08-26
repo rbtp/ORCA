@@ -1114,7 +1114,7 @@ export default function CaseDetail({
             else setDeployCreds(p => ({ ...p, transport: v }));
           }}
           disabled={deployRunning || triageRunning} style={{ ...InputStyle, fontSize: 10, padding: '6px 8px' }}
-          title="How the collection is triggered on the target. SMB/SCHTASK needs only port 445; WinRM needs port 5985 enabled on the target but avoids the dropped-file + service-creation pattern some AV/EDR flags.">
+          title="How the collection is triggered on the target. Both push the package over SMB (port 445) first. SMB/SCHTASK then triggers via a throwaway Windows service; WinRM instead needs port 5985 enabled on the target but avoids creating that service, which is the pattern some AV/EDR flags.">
           <option value="SMB_TASK">SMB / SCHTASK</option>
           <option value="WINRM">WINRM</option>
         </select>

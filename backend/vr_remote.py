@@ -462,23 +462,18 @@ async def _run_remote_command_smb_task(ip, username, password, domain, command, 
         return -1, "", f"SMB_TASK_ERROR: {e}"
 
 
-async def _run_remote_command_smb_push(ip, username, password, domain, local_zip_path, remote_dir=None, timeout=300):
+def _smb_stage_package(ip, username, password, domain, local_zip_path, remote_dir):
     """
-    Deliver an ORCA collection package (cert + zip + a small local launcher
-    script) directly to the target over the same SMB session used for
-    triggering, then run it entirely locally on the target -- instead of the
-    old flow where the target reached back out over HTTPS to download the
-    bootstrap script and then the package.
+    Pushes the cert, package ZIP, and local launcher script to the target
+    over SMB; returns the absolute Windows path they landed at. Shared by
+    both push-delivery trigger mechanisms below (SMB_TASK's SCM RPC trigger
+    and WinRM's direct invocation) -- staging itself is identical either
+    way, only how the pushed launcher gets *run* differs.
 
-    This removes the two most heavily-signatured indicators in that old
-    flow: the "fetch and execute" download-cradle shape (nothing is ever
-    IEX'd or DownloadFile'd — the package is just... already there), and the
-    dynamically-compiled ICertificatePolicy cert-validation bypass (the cert
-    is trusted properly via Import-Certificate before the collection script
-    ever runs, so it doesn't need its own bypass — see package_builder.py's
-    cert_trusted parameter). The trigger mechanism itself is unchanged: same
-    throwaway-service SCM RPC as _run_remote_command_smb_task, since that
-    part isn't what generated these specific findings.
+    Synchronous/blocking -- callers run this via run_in_executor. Raises on
+    any failure (SMB errors propagate directly), so "did the package
+    actually get there" is a real, immediate answer, not something inferred
+    from a timeout the way the launch step still has to be.
 
     `remote_dir`: same meaning as elsewhere (validated absolute Windows path,
     e.g. C:\\ORCA_Staging) — defaults to C:\\Windows\\Temp when not given,
@@ -515,19 +510,48 @@ async def _run_remote_command_smb_push(ip, username, password, domain, local_zip
     if cfg.SSL_CERTFILE and os.path.exists(cfg.SSL_CERTFILE):
         cert_bytes = Path(cfg.SSL_CERTFILE).read_bytes()
 
-    bat_name = f"orca_{uuid.uuid4().hex[:8]}.bat"
-    trigger_command = f'powershell -ExecutionPolicy Bypass -File "{stage_abs}\\orca_launch.ps1"'
-    bat_content = f"@echo off\r\nstart \"\" /b {trigger_command}\r\ndel \"%~f0\"\r\n".encode("utf-8")
-    bat_remote = f"Temp\\{bat_name}"
+    smb = SMBConnection(ip, ip)
+    smb.login(username, password, domain or "")
+    smb.createDirectory(share, stage_rel)
+    smb.putFile(share, f"{stage_rel}\\orca_pkg.zip", _io.BytesIO(zip_bytes).read)
+    if cert_bytes:
+        smb.putFile(share, f"{stage_rel}\\orca_cert.cer", _io.BytesIO(cert_bytes).read)
+    smb.putFile(share, f"{stage_rel}\\orca_launch.ps1", _io.BytesIO(launcher_content).read)
+    smb.logoff()
 
+    return stage_abs
+
+
+async def _run_remote_command_smb_push(ip, username, password, domain, local_zip_path, remote_dir=None, timeout=300):
+    """
+    Deliver an ORCA collection package over SMB (see _smb_stage_package),
+    then trigger it via the same throwaway-service SCM RPC as
+    _run_remote_command_smb_task -- instead of the old flow where the
+    target reached back out over HTTPS to download the bootstrap script and
+    then the package.
+
+    This removes the two most heavily-signatured indicators in that old
+    flow: the "fetch and execute" download-cradle shape (nothing is ever
+    IEX'd or DownloadFile'd — the package is just... already there), and the
+    dynamically-compiled ICertificatePolicy cert-validation bypass (the cert
+    is trusted properly via Import-Certificate before the collection script
+    ever runs, so it doesn't need its own bypass — see package_builder.py's
+    cert_trusted parameter). The trigger mechanism itself is unchanged here
+    (see _run_remote_command_winrm_push below for the WinRM-triggered
+    variant, which also drops the SCM registration).
+    """
     def _push_and_trigger():
+        stage_abs = _smb_stage_package(ip, username, password, domain, local_zip_path, remote_dir)
+
+        from impacket.smbconnection import SMBConnection
+        import io as _io
+        bat_name = f"orca_{uuid.uuid4().hex[:8]}.bat"
+        trigger_command = f'powershell -ExecutionPolicy Bypass -File "{stage_abs}\\orca_launch.ps1"'
+        bat_content = f"@echo off\r\nstart \"\" /b {trigger_command}\r\ndel \"%~f0\"\r\n".encode("utf-8")
+        bat_remote = f"Temp\\{bat_name}"
+
         smb = SMBConnection(ip, ip)
         smb.login(username, password, domain or "")
-        smb.createDirectory(share, stage_rel)
-        smb.putFile(share, f"{stage_rel}\\orca_pkg.zip", _io.BytesIO(zip_bytes).read)
-        if cert_bytes:
-            smb.putFile(share, f"{stage_rel}\\orca_cert.cer", _io.BytesIO(cert_bytes).read)
-        smb.putFile(share, f"{stage_rel}\\orca_launch.ps1", _io.BytesIO(launcher_content).read)
         smb.putFile("ADMIN$", bat_remote, _io.BytesIO(bat_content).read)
         smb.logoff()
         _scmr_run_bat(ip, username, password, domain, bat_name)
@@ -542,9 +566,61 @@ async def _run_remote_command_smb_push(ip, username, password, domain, local_zip
         return -1, "", f"SMB_PUSH_ERROR: {e}"
 
 
-async def _run_remote_command_winrm(ip, username, password, domain, command, timeout=60):
+def _interpret_winrm_launch_result(raw_out, raw_err, status_code, early_wait):
     """
-    Trigger a Windows command line on a remote host over WinRM, fire-and-forget.
+    Shared interpretation of the ORCA_STILL_RUNNING / ORCA_EXIT_CODE /
+    ORCA_STDOUT_B64 / ORCA_STDERR_B64 markers both WinRM launch scripts
+    below emit (_run_remote_command_winrm's and
+    _run_remote_command_winrm_push's). Returns (returncode, stdout, stderr).
+    """
+    import base64 as _b64
+    still_running, exit_code, launch_stdout, launch_stderr = None, None, "", ""
+    for line in raw_out.splitlines():
+        if line.startswith("ORCA_STILL_RUNNING|"):
+            still_running = line.split("|", 1)[1].strip().lower() == "true"
+        elif line.startswith("ORCA_EXIT_CODE|"):
+            exit_code = line.split("|", 1)[1].strip()
+        elif line.startswith("ORCA_STDOUT_B64|"):
+            try:
+                launch_stdout = _b64.b64decode(line.split("|", 1)[1].strip()).decode(errors="replace")
+            except Exception:
+                pass
+        elif line.startswith("ORCA_STDERR_B64|"):
+            try:
+                launch_stderr = _b64.b64decode(line.split("|", 1)[1].strip()).decode(errors="replace")
+            except Exception:
+                pass
+
+    if still_running is None:
+        # Marker lines never arrived -- the launcher script itself didn't
+        # run to completion (e.g. died before Start-Sleep returned), so
+        # fall back to whatever raw WinRM gave us rather than claiming a
+        # launch status we don't actually have.
+        return status_code, raw_out, raw_err
+
+    if still_running:
+        note = (
+            f"Still running {early_wait}s after launch (expected — collection takes longer). "
+            f"Output so far: {launch_stdout[:500] or '(none yet)'}"
+        )
+        return 0, note, launch_stderr[:500]
+
+    # Process already exited within early_wait -- that's the failure signal
+    # itself. exit_code 0 with real stdout is a legitimately fast success
+    # (rare but possible for a trivial payload); anything else is treated
+    # as a failed launch so the real error text surfaces instead of a false
+    # "Agent launched" success.
+    if exit_code == "0":
+        return 0, launch_stdout[:1000], launch_stderr[:500]
+    return -1, launch_stdout[:500], (
+        f"WINRM_LAUNCH_FAILED: process exited (code {exit_code}) within {early_wait}s — "
+        f"{launch_stderr[:500] or launch_stdout[:500] or 'no output captured'}"
+    )
+
+
+async def _run_remote_command_winrm(ip, username, password, domain, command, timeout=60, early_wait=10):
+    """
+    Trigger a Windows command line on a remote host over WinRM.
 
     Requires WinRM (port 5985) enabled on the target — not always available
     (e.g. on environments not under our administrative control), which is
@@ -553,17 +629,24 @@ async def _run_remote_command_winrm(ip, username, password, domain, command, tim
 
     `command` (e.g. package_builder.py's bootstrap oneliner) runs the entire
     collection chain synchronously once started, which can take far longer
-    than any reasonable WinRM call should block for. The old psexec trigger
-    used `-d` ("don't wait") so its own runtime was independent of collection
-    duration. To preserve that, `command` is launched on the target via
-    `Start-Process` (no `-Wait`), which returns as soon as the child process
-    exists — this WinRM call only waits for *that launch*, not for collection
-    to finish. The command is embedded in a PowerShell here-string so no
-    quote-escaping is needed regardless of what `command` itself contains.
+    than any reasonable WinRM call should block for -- so it's launched via
+    `Start-Process` (no `-Wait`) rather than run directly through run_ps.
+    `Start-Process` alone returns the instant the child process *exists*,
+    with zero visibility into whether it then actually does anything -- a
+    launch that starts fine and dies two seconds later (bad quoting, a
+    blocked outbound connection, a cert error) reported identical "success"
+    to a launch that ran the whole collection cleanly.
 
-    Returns (returncode, stdout, stderr), matching the shape of the old
-    psexec subprocess helper so callers don't need to change their error
-    handling.
+    The child's stdout/stderr are redirected to temp files, and after
+    `early_wait` seconds (short -- long enough to catch a process that dies
+    immediately, well short of how long the actual collection runs) this
+    reads back whatever's accumulated. Still fire-and-forget for the
+    collection itself (still running past early_wait keeps running in the
+    background) -- this just no longer lies about having verified nothing.
+    Note this command still fetches the package over HTTPS (see
+    _run_remote_command_winrm_push for the push-delivery alternative,
+    where early_wait actually means something since there's no unbounded
+    download for it to be covering).
     """
     import winrm
     loop = asyncio.get_event_loop()
@@ -572,10 +655,32 @@ async def _run_remote_command_winrm(ip, username, password, domain, command, tim
     if "'@" in command:
         return -1, "", "WINRM_ERROR: command contains an unescapable here-string terminator"
 
+    tag = uuid.uuid4().hex[:8]
     launcher = (
         f"$__cmd = @'\n{command}\n'@\n"
-        "Start-Process -FilePath cmd.exe -ArgumentList @('/c', $__cmd) -WindowStyle Hidden\n"
-        "Write-Output LAUNCHED"
+        f"$outFile = [IO.Path]::Combine($env:TEMP, 'orca_wr_out_{tag}.log')\n"
+        f"$errFile = [IO.Path]::Combine($env:TEMP, 'orca_wr_err_{tag}.log')\n"
+        "$proc = Start-Process -FilePath cmd.exe -ArgumentList @('/c', $__cmd) -WindowStyle Hidden "
+        "-PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile\n"
+        # Known Start-Process -PassThru quirk: .ExitCode silently comes back
+        # empty even when HasExited is true unless .Handle is touched first
+        # (forces .NET to associate/cache the process handle) -- confirmed
+        # by testing both ways; without this every launch looked identical
+        # regardless of whether it actually succeeded.
+        "$proc.Handle | Out-Null\n"
+        f"Start-Sleep -Seconds {early_wait}\n"
+        "$proc.Refresh()\n"
+        "$stillRunning = -not $proc.HasExited\n"
+        "$exitCode = -1\n"
+        "if (-not $stillRunning) { try { $exitCode = $proc.ExitCode } catch { $exitCode = -999 } }\n"
+        "$outText = if (Test-Path $outFile) { Get-Content $outFile -Raw -ErrorAction SilentlyContinue } else { '' }\n"
+        "$errText = if (Test-Path $errFile) { Get-Content $errFile -Raw -ErrorAction SilentlyContinue } else { '' }\n"
+        "if (-not $outText) { $outText = '' }\n"
+        "if (-not $errText) { $errText = '' }\n"
+        "Write-Output \"ORCA_STILL_RUNNING|$stillRunning\"\n"
+        "Write-Output \"ORCA_EXIT_CODE|$exitCode\"\n"
+        "Write-Output \"ORCA_STDOUT_B64|$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($outText)))\"\n"
+        "Write-Output \"ORCA_STDERR_B64|$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($errText)))\""
     )
 
     try:
@@ -591,15 +696,97 @@ async def _run_remote_command_winrm(ip, username, password, domain, command, tim
         )
         result = await asyncio.wait_for(
             loop.run_in_executor(None, lambda: session.run_ps(launcher)),
-            timeout=timeout,
+            timeout=max(timeout, early_wait + 15),
         )
-        stdout = result.std_out.decode(errors="replace") if isinstance(result.std_out, bytes) else str(result.std_out or "")
-        stderr = result.std_err.decode(errors="replace") if isinstance(result.std_err, bytes) else str(result.std_err or "")
-        return result.status_code, stdout, stderr
+        raw_out = result.std_out.decode(errors="replace") if isinstance(result.std_out, bytes) else str(result.std_out or "")
+        raw_err = result.std_err.decode(errors="replace") if isinstance(result.std_err, bytes) else str(result.std_err or "")
+        return _interpret_winrm_launch_result(raw_out, raw_err, result.status_code, early_wait)
     except asyncio.TimeoutError:
         return -1, "", f"WINRM_TIMEOUT: no response within {timeout}s"
     except Exception as e:
         return -1, "", f"WINRM_ERROR: {e}"
+
+
+async def _run_remote_command_winrm_push(ip, username, password, domain, local_zip_path, remote_dir=None, timeout=300, early_wait=10):
+    """
+    Push-delivery over SMB (see _smb_stage_package / _run_remote_command_smb_push),
+    triggered via WinRM instead of the throwaway-service SCM RPC -- avoids
+    both the "suspicious service registration" finding that started this
+    whole rework *and* the fragile multi-hop HTTP download chain the
+    download-based WinRM path above depends on, since delivery no longer
+    goes over HTTP at all.
+
+    Needs BOTH port 445 (to stage the files -- an ordinary authenticated
+    file copy, not the SCM RPC mechanism that got flagged) *and* port 5985
+    (to trigger execution) -- a real prerequisite change from "WinRM only
+    needs 5985," worth knowing before switching a deploy over to this.
+
+    Staging happens first and is synchronous: it either succeeds or raises,
+    so "did the package actually get there" is a real answer, not a guess.
+    What's left to diagnose after that -- whether the local launcher
+    actually ran -- is genuinely fast (local disk only, no network), so the
+    same early_wait capture-and-report approach as the plain WinRM path is
+    far more meaningful here than it is covering an unbounded download.
+    """
+    import winrm
+    loop = asyncio.get_event_loop()
+    auth_user = f"{domain}\\{username}" if domain else username
+
+    try:
+        stage_abs = await loop.run_in_executor(
+            None, lambda: _smb_stage_package(ip, username, password, domain, local_zip_path, remote_dir)
+        )
+    except Exception as e:
+        return -1, "", f"SMB_PUSH_ERROR: {e}"
+
+    launch_path = f"{stage_abs}\\orca_launch.ps1"
+    tag = uuid.uuid4().hex[:8]
+    # No here-string smuggling needed here (unlike the download-based path
+    # above) -- there's no complex, quote-heavy command to embed anymore,
+    # just a known, fixed local file path to launch.
+    launcher = (
+        f"$outFile = [IO.Path]::Combine($env:TEMP, 'orca_wr_out_{tag}.log')\n"
+        f"$errFile = [IO.Path]::Combine($env:TEMP, 'orca_wr_err_{tag}.log')\n"
+        f"$proc = Start-Process -FilePath powershell.exe -ArgumentList @('-ExecutionPolicy', 'Bypass', '-File', '{launch_path}') "
+        "-WindowStyle Hidden -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile\n"
+        "$proc.Handle | Out-Null\n"
+        f"Start-Sleep -Seconds {early_wait}\n"
+        "$proc.Refresh()\n"
+        "$stillRunning = -not $proc.HasExited\n"
+        "$exitCode = -1\n"
+        "if (-not $stillRunning) { try { $exitCode = $proc.ExitCode } catch { $exitCode = -999 } }\n"
+        "$outText = if (Test-Path $outFile) { Get-Content $outFile -Raw -ErrorAction SilentlyContinue } else { '' }\n"
+        "$errText = if (Test-Path $errFile) { Get-Content $errFile -Raw -ErrorAction SilentlyContinue } else { '' }\n"
+        "if (-not $outText) { $outText = '' }\n"
+        "if (-not $errText) { $errText = '' }\n"
+        "Write-Output \"ORCA_STILL_RUNNING|$stillRunning\"\n"
+        "Write-Output \"ORCA_EXIT_CODE|$exitCode\"\n"
+        "Write-Output \"ORCA_STDOUT_B64|$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($outText)))\"\n"
+        "Write-Output \"ORCA_STDERR_B64|$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($errText)))\""
+    )
+
+    try:
+        session = await loop.run_in_executor(
+            None,
+            lambda: winrm.Session(
+                f"http://{ip}:5985/wsman",
+                auth=(auth_user, password),
+                transport="ntlm",
+                operation_timeout_sec=min(timeout, 1800),
+                read_timeout_sec=min(timeout, 1800) + 10,
+            ),
+        )
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: session.run_ps(launcher)),
+            timeout=max(timeout, early_wait + 15),
+        )
+        raw_out = result.std_out.decode(errors="replace") if isinstance(result.std_out, bytes) else str(result.std_out or "")
+        raw_err = result.std_err.decode(errors="replace") if isinstance(result.std_err, bytes) else str(result.std_err or "")
+        return _interpret_winrm_launch_result(raw_out, raw_err, result.status_code, early_wait)
+    except asyncio.TimeoutError:
+        return -1, "", f"WINRM_TIMEOUT: no response within {timeout}s (package was already staged successfully)"
+    except Exception as e:
+        return -1, "", f"WINRM_ERROR: {e} (package was already staged successfully)"
 
 
 async def run_remote_command(ip, username, password, domain, command, timeout=60, transport="SMB_TASK"):
@@ -626,20 +813,22 @@ async def run_remote_command(ip, username, password, domain, command, timeout=60
 async def push_and_trigger_package(ip, username, password, domain, local_zip_path,
                                     remote_dir=None, timeout=300, transport="SMB_TASK"):
     """
-    Public entry point for SMB-push package delivery (see
-    _run_remote_command_smb_push) -- deploy_routes.py's alternative to
-    run_remote_command() + package_builder.py's HTTP-download bootstrap
-    chain, for callers that want the package delivered without the target
-    ever making an outbound HTTP(S) request to fetch it.
+    Public entry point for push package delivery -- deploy_routes.py's
+    alternative to run_remote_command() + package_builder.py's HTTP-download
+    bootstrap chain, for callers that want the package delivered without the
+    target ever making an outbound HTTP(S) request to fetch it.
 
-    Only implemented for SMB_TASK currently; WinRM has no file-copy plumbing
-    built here and still goes through the download-based flow via
-    run_remote_command().
+    - "SMB_TASK": staged over SMB, triggered via the throwaway-service SCM RPC.
+    - "WINRM": staged over SMB (still needs port 445 for that part — see
+      _run_remote_command_winrm_push), triggered via WinRM instead — no SCM
+      service registration.
     """
     t = (transport or "SMB_TASK").upper()
-    if t != "SMB_TASK":
-        return -1, "", f"SMB_PUSH_UNSUPPORTED_TRANSPORT: {transport}"
-    return await _run_remote_command_smb_push(ip, username, password, domain, local_zip_path, remote_dir, timeout)
+    if t == "WINRM":
+        return await _run_remote_command_winrm_push(ip, username, password, domain, local_zip_path, remote_dir, timeout)
+    if t == "SMB_TASK":
+        return await _run_remote_command_smb_push(ip, username, password, domain, local_zip_path, remote_dir, timeout)
+    return -1, "", f"SMB_PUSH_UNSUPPORTED_TRANSPORT: {transport}"
 
 
 async def _dispatch(transport, ip, username, password, domain, vr_exe, target_files, local_output_dir, asset_id, cleanup, queue):

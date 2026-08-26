@@ -124,13 +124,14 @@ async def _deploy_single(
         await emit('ERROR', f'{hostname}: No IP address configured', 'NO_IP')
         return
 
-    # SMB_TASK pushes the whole package over the same SMB session used to
-    # trigger it (see vr_remote.push_and_trigger_package) instead of having
-    # the target reach back out over HTTPS to download it -- avoids the
-    # download-cradle + cert-validation-bypass pattern that flow has. WinRM
-    # doesn't have that plumbing built yet, so it still uses the old
-    # HTTP-download bootstrap chain unchanged.
-    use_smb_push = transport.upper() == 'SMB_TASK'
+    # Both transports push the whole package over SMB (see
+    # vr_remote.push_and_trigger_package) instead of having the target
+    # reach back out over HTTPS to download it -- avoids the download-cradle
+    # + cert-validation-bypass pattern that flow has. SMB_TASK triggers via
+    # the throwaway-service SCM RPC (unchanged); WinRM triggers the pushed
+    # launcher directly, with no service registration at all -- still needs
+    # port 445 for the push itself, just not for execution.
+    use_push_delivery = transport.upper() in ('SMB_TASK', 'WINRM')
 
     await emit('DEPLOYING', f'{hostname}: Building collection package...')
     try:
@@ -139,7 +140,7 @@ async def _deploy_single(
         pkg = await loop.run_in_executor(
             _build_executor,
             lambda: build_package(asset_id=asset_id, user_id=user_id, orca_url=orca_url,
-                                   remote_dir=remote_dir, cert_trusted=use_smb_push)
+                                   remote_dir=remote_dir, cert_trusted=use_push_delivery)
         )
         oneliner = pkg.get('oneliner', '')
         zip_path = pkg.get('zip_path', '')
@@ -150,7 +151,7 @@ async def _deploy_single(
         await emit('ERROR', f'{hostname}: Package build failed', str(e))
         return
 
-    if use_smb_push:
+    if use_push_delivery:
         if not zip_path:
             await emit('ERROR', f'{hostname}: Package built but no package path returned', 'NO_ZIP_PATH')
             return
@@ -163,7 +164,7 @@ async def _deploy_single(
     await asyncio.sleep(0.2)
     await emit('AUTHENTICATING', f'{hostname}: Authenticating as {username}...')
 
-    if use_smb_push:
+    if use_push_delivery:
         returncode, stdout, stderr = await vr_remote.push_and_trigger_package(
             ip, username, password, domain, zip_path,
             remote_dir=validate_remote_dir(remote_dir), transport=transport,
@@ -335,7 +336,7 @@ async def deploy_triage(req: TriageRequest, current_user=Depends(get_current_use
                 return
 
             hostname = asset.get('hostname', str(asset_id))
-            use_smb_push = req.trigger_transport.upper() == 'SMB_TASK'
+            use_push_delivery = req.trigger_transport.upper() in ('SMB_TASK', 'WINRM')
             await emit('STAGING', f'{hostname}: Building triage package...')
             try:
                 loop = asyncio.get_event_loop()
@@ -348,7 +349,7 @@ async def deploy_triage(req: TriageRequest, current_user=Depends(get_current_use
                         orca_url=orca_url,
                         categories=req.categories,
                         remote_dir=req.remote_dir,
-                        cert_trusted=use_smb_push,
+                        cert_trusted=use_push_delivery,
                     )
                 )
                 oneliner = pkg.get('oneliner', '')
@@ -359,7 +360,7 @@ async def deploy_triage(req: TriageRequest, current_user=Depends(get_current_use
 
             trigger_label = 'WinRM' if req.trigger_transport.upper() == 'WINRM' else 'SMB/Task Scheduler'
             await emit('CONNECTING', f'{hostname} ({ip}): Deploying via {trigger_label}...')
-            if use_smb_push:
+            if use_push_delivery:
                 returncode, stdout, stderr = await vr_remote.push_and_trigger_package(
                     ip, req.username, req.password, req.domain, zip_path,
                     remote_dir=validate_remote_dir(req.remote_dir), transport=req.trigger_transport,
