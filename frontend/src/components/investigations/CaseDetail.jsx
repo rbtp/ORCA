@@ -1059,6 +1059,55 @@ export default function CaseDetail({
                               );
                             })()}
 
+                            {(() => {
+                              // The aggregate bar above collapses everything to 3 numbers --
+                              // this surfaces the per-technique detail the backend already
+                              // returns (heartbeat status + timestamp in evidence_summary)
+                              // but the UI previously threw away, so a hung technique is
+                              // visible as "stalled" instead of indistinguishable from "just
+                              // pending, hasn't started yet."
+                              const techs = pkgProgress[aId]?.techniques || [];
+                              if (techs.length === 0) return null;
+                              const now = Date.now();
+                              const STALL_MS = 120000;
+                              const STATUS_ORDER = { STALLED: 0, RUNNING: 1, PENDING: 2, NO_ARTIFACTS: 3, COMPLETE: 4 };
+                              const STATUS_COLOR = { STALLED: '#ff4444', RUNNING: '#ffaa00', PENDING: '#555', NO_ARTIFACTS: '#888', COMPLETE: '#00ff41' };
+                              const fmtAge = (ms) => {
+                                if (ms === null) return '';
+                                const s = Math.floor(ms / 1000);
+                                if (s < 60) return `${s}s ago`;
+                                const m = Math.floor(s / 60);
+                                if (m < 60) return `${m}m ago`;
+                                return `${Math.floor(m / 60)}h ago`;
+                              };
+                              const rows = techs.map(t => {
+                                let hb = null;
+                                try { hb = t.evidence_summary ? JSON.parse(t.evidence_summary) : null; } catch { /* not JSON yet -- treat as no heartbeat */ }
+                                const tsMs = hb?.ts ? new Date(hb.ts + 'Z').getTime() : null;
+                                const ageMs = tsMs !== null ? now - tsMs : null;
+                                let status;
+                                if (t.evidence_imported) status = 'COMPLETE';
+                                else if (t.verdict === 'NO_ARTIFACTS') status = 'NO_ARTIFACTS';
+                                else if (hb?.status && hb.status.includes('RUNNING')) status = 'RUNNING';
+                                else status = 'PENDING';
+                                if (status === 'RUNNING' && ageMs !== null && ageMs > STALL_MS) status = 'STALLED';
+                                return { t_code: t.t_code, status, ageMs, detail: hb?.detail || '' };
+                              }).sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status]);
+
+                              return (
+                                <div style={{ marginTop: 10, maxHeight: 220, overflowY: 'auto', border: '1px solid #161616' }}>
+                                  {rows.map(r => (
+                                    <div key={r.t_code} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', borderBottom: '1px solid #101010', fontSize: 9 }}>
+                                      <span style={{ color: STATUS_COLOR[r.status], fontWeight: 'bold', minWidth: 68 }}>{r.status}</span>
+                                      <span style={{ color: '#ccc', minWidth: 90 }}>{r.t_code}</span>
+                                      <span style={{ color: '#777', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.detail}</span>
+                                      <span style={{ color: r.status === 'STALLED' ? '#ff4444' : '#666', flexShrink: 0 }}>{fmtAge(r.ageMs)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              );
+                            })()}
+
                             {!pkgData[aId] && !pkgGenerating[aId] && !wasDeployed && (
                               <div style={{ color: '#777', fontSize: 9, lineHeight: 1.8 }}>
                                 Generates a self-contained collection package.<br />

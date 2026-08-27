@@ -246,7 +246,8 @@ def get_triage_techniques(categories: list) -> list[dict]:
 
 
 def build_triage_package(asset_id: int, user_id: int, orca_url: str, categories: list,
-                          remote_dir: Optional[str] = None, cert_trusted: bool = False) -> dict:
+                          remote_dir: Optional[str] = None, cert_trusted: bool = False,
+                          max_workers: int = 3) -> dict:
     asset = get_asset_info(asset_id)
     if not asset:
         raise ValueError(f"Asset {asset_id} not found")
@@ -304,6 +305,7 @@ def build_triage_package(asset_id: int, user_id: int, orca_url: str, categories:
             .replace("{{PACKAGE_TOKEN}}", token)
             .replace("{{CASE_NAME}}", asset["case_name"])
             .replace("{{CERT_BYPASS_BLOCK}}", _cert_bypass_block(cert_trusted))
+            .replace("{{MAX_WORKERS}}", str(max(1, int(max_workers))))
         )
         (pkg_dir / "run_orca_triage.ps1").write_text(ps1_filled, encoding="utf-8")
 
@@ -469,10 +471,17 @@ try {{
 # ── Package builder ───────────────────────────────────────────────────────────
 
 def build_package(asset_id: int, user_id: int, orca_url: str, remote_dir: Optional[str] = None,
-                   cert_trusted: bool = False) -> dict:
+                   cert_trusted: bool = False, max_workers: int = 3) -> dict:
     """
     Build the collection ZIP for asset_id.
     Returns { download_url, bootstrap_url, oneliner, token, technique_count, expires_at }
+
+    max_workers: number of techniques run_orca_collection.ps1 processes in
+    parallel on the target (each in its own child powershell.exe). 1 keeps
+    the original strictly-sequential behavior; anything higher is a real
+    speed/stealth trade-off -- more concurrent forensic-tool process
+    creations on the target is a more conspicuous footprint to EDR than one
+    at a time, so this defaults modest rather than maximal.
     """
     asset = get_asset_info(asset_id)
     if not asset:
@@ -544,6 +553,7 @@ def build_package(asset_id: int, user_id: int, orca_url: str, remote_dir: Option
             .replace("{{PACKAGE_TOKEN}}", token)
             .replace("{{CASE_NAME}}", asset["case_name"])
             .replace("{{CERT_BYPASS_BLOCK}}", _cert_bypass_block(cert_trusted))
+            .replace("{{MAX_WORKERS}}", str(max(1, int(max_workers))))
         )
         (pkg_dir / "run_orca_collection.ps1").write_text(ps1_filled, encoding="utf-8")
 

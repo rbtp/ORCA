@@ -2,6 +2,12 @@
 # ORCA Remote Collection Agent
 # Generated per-asset - do not redistribute this script.
 # Self-deletes on completion.
+param(
+    # Set only when this script has recursively re-invoked itself as a
+    # parallel worker (see the MaxWorkers branch below) -- a bare top-level
+    # run never passes this, so default behavior is untouched.
+    [string]$WorkerBatchFile = ""
+)
 
 $ErrorActionPreference = "Continue"
 
@@ -9,11 +15,12 @@ $ErrorActionPreference = "Continue"
 [System.Net.ServicePointManager]::SecurityProtocol  = [System.Net.SecurityProtocolType]::Tls12
 
 # Config (injected at package build time)
-$ORCA_URL  = "{{ORCA_URL}}"
-$ASSET_ID  = "{{ASSET_ID}}"
-$TOKEN     = "{{PACKAGE_TOKEN}}"
-$CASE_NAME = "{{CASE_NAME}}"
-$HOSTNAME_ = $env:COMPUTERNAME
+$ORCA_URL    = "{{ORCA_URL}}"
+$ASSET_ID    = "{{ASSET_ID}}"
+$TOKEN       = "{{PACKAGE_TOKEN}}"
+$CASE_NAME   = "{{CASE_NAME}}"
+$MaxWorkers  = {{MAX_WORKERS}}
+$HOSTNAME_   = $env:COMPUTERNAME
 
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VRExe      = Join-Path $ScriptDir "velociraptor.exe"
@@ -21,11 +28,18 @@ $TechDir    = Join-Path $ScriptDir "techniques"
 $LogFile    = Join-Path $ScriptDir "orca_run.log"
 $IngestBase = "$ORCA_URL/api/ingest/remote/$ASSET_ID"
 
+# A spawned worker skips writing $LogFile directly to avoid several
+# processes hitting the same file concurrently -- Start-Process already
+# redirects this worker's Write-Host output to its own file, which the
+# orchestrator appends into the shared log (safely, after the worker has
+# already exited) once it collects results below.
+$script:IsWorker = [bool]$WorkerBatchFile
+
 function Write-Log {
     param([string]$Msg, [string]$Level = "INFO")
     $ts   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $line = "[$ts][$Level] $Msg"
-    Add-Content -Path $LogFile -Value $line
+    if (-not $script:IsWorker) { Add-Content -Path $LogFile -Value $line }
     Write-Host $line
 }
 
@@ -166,20 +180,52 @@ function Run-Technique {
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-Write-Log "ORCA collection agent starting - case: $CASE_NAME, asset: $ASSET_ID"
-Write-Log "Host: $HOSTNAME_"
-
 if (-not (Test-Path $VRExe)) {
     Write-Log "velociraptor.exe not found at $VRExe - aborting" "ERROR"
     exit 1
 }
 
-$techniques = Get-ChildItem -Path $TechDir -Filter "*.json" -ErrorAction SilentlyContinue
-if (-not $techniques) {
+$allTechFiles = Get-ChildItem -Path $TechDir -Filter "*.json" -ErrorAction SilentlyContinue
+if (-not $allTechFiles) {
     Write-Log "No technique files found in $TechDir - aborting" "ERROR"
     exit 1
 }
 
+# ── Worker mode: process just this batch, report back, exit -- the
+# orchestrator invocation below owns start/complete notification and
+# self-delete, so a worker never reaches past here. ──────────────────────────
+if ($WorkerBatchFile) {
+    $batchNames = Get-Content $WorkerBatchFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -ne "" }
+    $techniques = $allTechFiles | Where-Object { $batchNames -contains $_.Name }
+    Write-Log "Worker started - processing $($techniques.Count) techniques"
+
+    $workerCompleted = 0
+    foreach ($techFile in $techniques) {
+        try {
+            $meta     = Get-Content $techFile.FullName | ConvertFrom-Json
+            $vqlFile  = $null
+            $yamlFile = $null
+            if ($meta.vql_file)  { $vqlFile  = Join-Path $TechDir $meta.vql_file }
+            if ($meta.yaml_file) { $yamlFile = Join-Path $TechDir $meta.yaml_file }
+            Run-Technique -TCode $meta.t_code -VqlFile $vqlFile -YamlFile $yamlFile
+            $workerCompleted++
+        } catch {
+            Write-Log "Unhandled error on $($techFile.Name): $_" "ERROR"
+        }
+    }
+    Write-Log "Worker finished - $workerCompleted/$($techniques.Count) processed"
+    # Parsed back out of this process's redirected stdout by the orchestrator
+    # -- deliberately not relying on shared state across the process boundary.
+    Write-Output "ORCA_WORKER_DONE|$workerCompleted|$($techniques.Count)"
+    exit 0
+}
+
+# ── Orchestrator (normal top-level run) ───────────────────────────────────────
+
+Write-Log "ORCA collection agent starting - case: $CASE_NAME, asset: $ASSET_ID"
+Write-Log "Host: $HOSTNAME_"
+
+$techniques = $allTechFiles
 Write-Log "Found $($techniques.Count) techniques to run"
 
 try {
@@ -192,18 +238,62 @@ try {
 }
 
 $completed = 0
-foreach ($techFile in $techniques) {
-    try {
-        $meta     = Get-Content $techFile.FullName | ConvertFrom-Json
-        $tCode    = $meta.t_code
-        $vqlFile  = $null
-        $yamlFile = $null
-        if ($meta.vql_file)  { $vqlFile  = Join-Path $TechDir $meta.vql_file }
-        if ($meta.yaml_file) { $yamlFile = Join-Path $TechDir $meta.yaml_file }
-        Run-Technique -TCode $tCode -VqlFile $vqlFile -YamlFile $yamlFile
-        $completed++
-    } catch {
-        Write-Log "Unhandled error on $($techFile.Name): $_" "ERROR"
+
+if ($MaxWorkers -gt 1 -and $techniques.Count -gt 1) {
+    # Parallel path: split into up to $MaxWorkers batches, spawn one child
+    # powershell.exe per batch re-invoking this same script with
+    # -WorkerBatchFile (same Start-Process + redirected-output + Handle-touch
+    # pattern already used for the WinRM-push launcher elsewhere in this
+    # deploy chain). Each worker's own completed count is parsed back out of
+    # its captured stdout rather than shared across the process boundary.
+    $workerCount = [Math]::Min($MaxWorkers, $techniques.Count)
+    Write-Log "Running in parallel across $workerCount workers"
+    $batches = for ($i = 0; $i -lt $workerCount; $i++) { , [System.Collections.ArrayList]::new() }
+    for ($i = 0; $i -lt $techniques.Count; $i++) { [void]$batches[$i % $workerCount].Add($techniques[$i]) }
+
+    $workers = @()
+    for ($i = 0; $i -lt $batches.Count; $i++) {
+        if ($batches[$i].Count -eq 0) { continue }
+        $batchFile = Join-Path $env:TEMP "orca_batch_${i}_$(Get-Random).txt"
+        $batches[$i] | ForEach-Object { $_.Name } | Set-Content -Path $batchFile -Encoding UTF8
+        $outFile = Join-Path $env:TEMP "orca_worker_out_${i}_$(Get-Random).log"
+        $errFile = Join-Path $env:TEMP "orca_worker_err_${i}_$(Get-Random).log"
+        $proc = Start-Process -FilePath "powershell.exe" `
+            -ArgumentList @('-ExecutionPolicy', 'Bypass', '-File', $MyInvocation.MyCommand.Path, '-WorkerBatchFile', $batchFile) `
+            -WindowStyle Hidden -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $proc.Handle | Out-Null
+        $workers += [PSCustomObject]@{ Proc = $proc; BatchFile = $batchFile; OutFile = $outFile; ErrFile = $errFile }
+    }
+
+    $workers.Proc | Wait-Process -ErrorAction SilentlyContinue
+
+    foreach ($w in $workers) {
+        $w.Proc.Refresh()
+        $out = if (Test-Path $w.OutFile) { Get-Content $w.OutFile -Raw -ErrorAction SilentlyContinue } else { '' }
+        $err = if (Test-Path $w.ErrFile) { Get-Content $w.ErrFile -Raw -ErrorAction SilentlyContinue } else { '' }
+        if ($out) { Add-Content -Path $LogFile -Value $out }
+        if ($err) { Write-Log "Worker stderr: $err" "WARN" }
+        if ($out -match 'ORCA_WORKER_DONE\|(\d+)\|(\d+)') {
+            $completed += [int]$Matches[1]
+        } else {
+            Write-Log "Worker produced no completion marker (exit code $($w.Proc.ExitCode))" "WARN"
+        }
+        Remove-Item $w.BatchFile, $w.OutFile, $w.ErrFile -Force -ErrorAction SilentlyContinue
+    }
+} else {
+    foreach ($techFile in $techniques) {
+        try {
+            $meta     = Get-Content $techFile.FullName | ConvertFrom-Json
+            $tCode    = $meta.t_code
+            $vqlFile  = $null
+            $yamlFile = $null
+            if ($meta.vql_file)  { $vqlFile  = Join-Path $TechDir $meta.vql_file }
+            if ($meta.yaml_file) { $yamlFile = Join-Path $TechDir $meta.yaml_file }
+            Run-Technique -TCode $tCode -VqlFile $vqlFile -YamlFile $yamlFile
+            $completed++
+        } catch {
+            Write-Log "Unhandled error on $($techFile.Name): $_" "ERROR"
+        }
     }
 }
 
