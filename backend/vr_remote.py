@@ -8,6 +8,7 @@ import re
 import json
 import time
 import uuid
+import shlex
 import asyncio
 import logging
 import tempfile
@@ -141,12 +142,19 @@ async def _collect_ssh(ip, username, password, vr_exe, target_files, local_outpu
         await asyncio.get_event_loop().run_in_executor(None, lambda: ssh.connect(ip, username=username, password=password, timeout=15))
         sftp = await asyncio.get_event_loop().run_in_executor(None, ssh.open_sftp)
         await q(_log("SSH: connected"))
-        ssh.exec_command(f"mkdir -p {REMOTE_TEMP_POSIX}")  # nosec B601 — REMOTE_TEMP_POSIX is a module constant; no user input
+        # shlex.quote() on every path below is defense-in-depth, not a fix for a
+        # currently-reachable bug: t_code here always comes from run_triage_collection's
+        # hardcoded constant list, never from ref_artifact_library (where the Artifact
+        # Library Editor's custom-technique feature lets an admin type an arbitrary
+        # code). But this function's t_code -> shell-command path was built assuming
+        # that always holds, with no enforcement of it -- quoting removes the
+        # assumption entirely rather than relying on every future caller remembering it.
+        ssh.exec_command(f"mkdir -p {shlex.quote(REMOTE_TEMP_POSIX)}")  # nosec B601 — shlex.quote()'d
         await asyncio.sleep(0.5)
         remote_vr = f"{REMOTE_TEMP_POSIX}/velociraptor"
         await q(_log("SSH: pushing velociraptor binary..."))
         await asyncio.get_event_loop().run_in_executor(None, lambda: sftp.put(vr_exe, remote_vr))
-        ssh.exec_command(f"chmod +x {remote_vr}")  # nosec B601 — path built from module constant only
+        ssh.exec_command(f"chmod +x {shlex.quote(remote_vr)}")  # nosec B601 — shlex.quote()'d
         for item in target_files: await q(_tech(item["t_code"], "QUEUED"))
         results = []
         for item in target_files:
@@ -155,7 +163,8 @@ async def _collect_ssh(ip, username, password, vr_exe, target_files, local_outpu
             remote_out = f"{REMOTE_TEMP_POSIX}/orca_{t_code}.jsonl"
             await asyncio.get_event_loop().run_in_executor(None, lambda: sftp.put(item["local_vql"], remote_vql))
             await q(_tech(t_code, "RUNNING"))
-            _, stdout, _ = ssh.exec_command(f'{remote_vr} query -f "{remote_vql}" --format jsonl --output "{remote_out}"')  # nosec B601 — all path components derived from REMOTE_TEMP_POSIX constant
+            cmd = f"{shlex.quote(remote_vr)} query -f {shlex.quote(remote_vql)} --format jsonl --output {shlex.quote(remote_out)}"
+            _, stdout, _ = ssh.exec_command(cmd)  # nosec B601 — every component shlex.quote()'d above
             await asyncio.get_event_loop().run_in_executor(None, stdout.channel.recv_exit_status)
             local_out = os.path.join(local_output_dir, f"orca_{t_code}.jsonl")
             try:
@@ -168,7 +177,8 @@ async def _collect_ssh(ip, username, password, vr_exe, target_files, local_outpu
                     remote_fb = f"{REMOTE_TEMP_POSIX}/fallback_{t_code}.vql"
                     remote_fb_out = f"{REMOTE_TEMP_POSIX}/orca_fallback_{t_code}.jsonl"
                     await asyncio.get_event_loop().run_in_executor(None, lambda: sftp.put(item["local_fallback"], remote_fb))
-                    _, stdout_fb, _ = ssh.exec_command(f'{remote_vr} query -f "{remote_fb}" --format jsonl --output "{remote_fb_out}"')
+                    cmd_fb = f"{shlex.quote(remote_vr)} query -f {shlex.quote(remote_fb)} --format jsonl --output {shlex.quote(remote_fb_out)}"
+                    _, stdout_fb, _ = ssh.exec_command(cmd_fb)  # nosec B601 — every component shlex.quote()'d above
                     await asyncio.get_event_loop().run_in_executor(None, stdout_fb.channel.recv_exit_status)
                     local_fb_out = os.path.join(local_output_dir, f"orca_fallback_{t_code}.jsonl")
                     try:
@@ -183,7 +193,7 @@ async def _collect_ssh(ip, username, password, vr_exe, target_files, local_outpu
         for t_code, orca_name, local_out, is_fallback in results:
             if os.path.exists(local_out) and os.path.getsize(local_out) > 0:
                 await asyncio.get_event_loop().run_in_executor(None, lambda: evidence_normalizer.normalize_and_ingest(local_out, asset_id, t_code, orca_name))
-        if cleanup: ssh.exec_command(f"rm -rf {REMOTE_TEMP_POSIX}")
+        if cleanup: ssh.exec_command(f"rm -rf {shlex.quote(REMOTE_TEMP_POSIX)}")  # nosec B601 — shlex.quote()'d
         await q(_done())
     except Exception as e:
         logger.error("SSH collection failed for %s: %s", ip, e)
