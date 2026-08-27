@@ -84,13 +84,39 @@ export function useCollaboration() {
           });
           return next;
         });
+        // A claim always transitions UNCLAIMED -> IN_PROGRESS server-side --
+        // submitted/kickback already mirror their transitions here, this one
+        // and technique_closed below were the two gaps that left
+        // techniqueStatuses (and anything derived from it) stale after a
+        // claim or a final determination until a manual reload.
+        setTechniqueStatuses(prev => {
+          const next = new Map(prev);
+          const k = key(msg.asset_id, msg.t_code);
+          const existing = next.get(k) || {};
+          next.set(k, { ...existing, technique_status: 'IN_PROGRESS' });
+          return next;
+        });
         break;
 
       case 'technique_released':
+        setTechniqueLocks(prev => {
+          const next = new Map(prev);
+          next.delete(key(msg.asset_id, msg.t_code));
+          return next;
+        });
+        break;
+
       case 'technique_closed':
         setTechniqueLocks(prev => {
           const next = new Map(prev);
           next.delete(key(msg.asset_id, msg.t_code));
+          return next;
+        });
+        setTechniqueStatuses(prev => {
+          const next = new Map(prev);
+          const k = key(msg.asset_id, msg.t_code);
+          const existing = next.get(k) || {};
+          next.set(k, { ...existing, technique_status: 'CLOSED' });
           return next;
         });
         break;

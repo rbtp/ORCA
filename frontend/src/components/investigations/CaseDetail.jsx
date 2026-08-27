@@ -236,6 +236,13 @@ export default function CaseDetail({
 
   useEffect(() => { loadCompletion(); }, [caseName]);
 
+  // The counts above are otherwise a one-time snapshot from initial case
+  // load -- collab.techniqueStatuses changes on every claim/submit/
+  // kickback/close anywhere in the case (live SSE, not just this analyst's
+  // own actions), so re-pull the aggregate whenever it does instead of
+  // requiring a manual page reload to see the overview catch up.
+  useEffect(() => { loadCompletion(); }, [collab.techniqueStatuses]);
+
   useEffect(() => {
     fetch(`${import.meta.env.VITE_API_URL}/api/agent/list`, { credentials: 'include', headers: getAuthHeaders() })
       .then(r => r.ok ? r.json() : [])
