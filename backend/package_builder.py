@@ -390,8 +390,10 @@ try {{
         Where-Object {{ $_.FullName -ne $PSCommandPath }} | Select-Object -First 1
     if (-not $ps1) {{ throw "No ORCA collection script found in pushed package" }}
     & powershell.exe -ExecutionPolicy Bypass -File $ps1.FullName
+    if ($LASTEXITCODE -ne 0) {{ throw "Collection script exited with code $LASTEXITCODE" }}
 }} catch {{
     Write-Host "[ORCA ERROR] $_"
+    exit 1
 }} finally {{
     Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue
 }}
@@ -454,6 +456,7 @@ try {{
     if (-not $ps1) {{ throw "No ORCA collection script found in package" }}
     Write-Host "[ORCA] Starting collection..."
     & powershell.exe -ExecutionPolicy Bypass -File $ps1.FullName
+    if ($LASTEXITCODE -ne 0) {{ throw "Collection script exited with code $LASTEXITCODE" }}
 }} catch {{
     Write-Host "[ORCA ERROR] $_"
     if (Test-Path $ZipPath) {{ Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue }}

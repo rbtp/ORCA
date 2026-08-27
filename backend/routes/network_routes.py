@@ -1,10 +1,11 @@
 import os
+import re
 import sys
 import socket
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from auth_utils import get_current_user, require_admin
 
@@ -12,6 +13,22 @@ router = APIRouter(prefix="/api/network", tags=["network"])
 
 CERT_PATH = os.environ.get("TLS_CERT_PATH", "/app/certs/orca.crt")
 KEY_PATH  = os.environ.get("TLS_KEY_PATH",  "/app/certs/orca.key")
+
+
+def _external_host_from_env():
+    """
+    ORCA_SERVER_URL is the address remote collection targets actually
+    connect back to (often the host's LAN IP), which can differ from
+    whatever _get_server_identity()'s outbound-routing trick detects from
+    inside the container (its own Docker-bridge IP). A cert whose SAN
+    doesn't cover this address fails real TLS validation on every target.
+    """
+    url = os.environ.get("ORCA_SERVER_URL", "").strip()
+    if not url:
+        return None
+    host = re.sub(r"^[a-zA-Z]+://", "", url)
+    host = re.sub(r"[:/].*$", "", host)
+    return host or None
 
 
 def _get_server_identity():
@@ -99,8 +116,20 @@ async def regenerate_cert(current_user: dict = Depends(require_admin)):
 
     ip, hostname = _get_server_identity()
     san = f"IP:{ip},DNS:{hostname},DNS:orca-backend,DNS:localhost"
+    external_host = _external_host_from_env()
+    if external_host:
+        if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", external_host):
+            san += f",IP:{external_host}"
+        else:
+            san += f",DNS:{external_host}"
     cert_dir = os.path.dirname(CERT_PATH)
     os.makedirs(cert_dir, exist_ok=True)
+
+    # Backdate notBefore by a day -- confirmed live 2026-08-26 that a host
+    # clock running fast at generation time (later corrected by a time sync)
+    # produces a cert whose own start-of-validity is hours in the future,
+    # rejected by every client as "not yet valid" until real time catches up.
+    not_before = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d%H%M%SZ")
 
     result = subprocess.run([
         "openssl", "req", "-x509",
@@ -109,6 +138,7 @@ async def regenerate_cert(current_user: dict = Depends(require_admin)):
         "-days", "365", "-nodes",
         "-subj", "/CN=orca",
         "-addext", f"subjectAltName={san}",
+        "-not_before", not_before,
     ], capture_output=True, text=True)
 
     if result.returncode != 0:
