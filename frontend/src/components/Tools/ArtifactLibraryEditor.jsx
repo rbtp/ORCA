@@ -14,8 +14,11 @@ const ArtifactLibraryEditor = () => {
   const [activePayloadTab, setActivePayloadTab] = useState('RAW');
   const [statusMsg, setStatusMsg] = useState(null);
   const [isNewMapping, setIsNewMapping] = useState(false);
-  
+  const [createMode, setCreateMode] = useState(false);
+  const [customTCode, setCustomTCode] = useState('');
+
   const [formData, setFormData] = useState({
+    name: '',
     live_analysis: '',
     dead_disk_analysis: '',
     collection_strategy: '',
@@ -46,7 +49,12 @@ const ArtifactLibraryEditor = () => {
   }, []);
 
   const handleNextToEdit = async () => {
-    if (!selectedTCode) return;
+    const code = createMode ? customTCode.trim().toUpperCase() : selectedTCode;
+    if (!code) return;
+    if (createMode && !/^[A-Za-z0-9._-]+$/.test(code)) {
+      setStatusMsg({ type: 'error', text: 'INVALID_CODE — letters, numbers, dots, underscores, hyphens only' });
+      return;
+    }
     setLoading(true);
     try {
       // Always fetch rather than asking the user to correctly self-report
@@ -57,11 +65,16 @@ const ArtifactLibraryEditor = () => {
       // be the actual bug: picking "add" for a T-code that already had
       // real content skipped this fetch, so COMMIT_CHANGES submitted a
       // blank form and silently wiped the existing shared library entry.
-      const res = await axios.get(`${API_BASE}/library/${selectedTCode}`, getAuthHeader());
+      // Also doubles as a collision check when typing a brand-new custom
+      // code in create mode.
+      const res = await axios.get(`${API_BASE}/library/${code}`, getAuthHeader());
       const hasContent = !!(res.data.live_analysis || res.data.dead_disk_analysis ||
         res.data.collection_strategy || res.data.custom_vql || res.data.surgical_yaml);
       setIsNewMapping(!hasContent);
+      const existingEntry = tCodes.find(t => t.t_code === code);
+      setSelectedTCode(code);
       setFormData({
+        name: res.data.technique_name || (existingEntry && existingEntry.technique_name) || '',
         live_analysis: res.data.live_analysis || '',
         dead_disk_analysis: res.data.dead_disk_analysis || '',
         collection_strategy: res.data.collection_strategy || '',
@@ -89,6 +102,15 @@ const ArtifactLibraryEditor = () => {
       await axios.post(`${API_BASE}/library/${selectedTCode}/update`, submissionData, getAuthHeader());
       setStatusMsg({ type: 'success', text: 'GLOBAL_LIBRARY_SYNCHRONIZED' });
       setStep(1);
+      setCreateMode(false);
+      setCustomTCode('');
+      // Refresh so a freshly-created custom technique shows up in the
+      // selector immediately, not just after a manual page reload.
+      try {
+        const res = await axios.get(`${API_BASE}/techniques`, getAuthHeader());
+        const data = Array.isArray(res.data) ? res.data : (res.data.techniques || []);
+        setTCodes(data);
+      } catch (err) { /* non-fatal -- list just stays stale until next reload */ }
     } catch (err) {
       setStatusMsg({ type: 'error', text: 'COMMIT_FAILED' });
     }
@@ -181,22 +203,65 @@ const ArtifactLibraryEditor = () => {
         <h2 style={{ fontSize: '24px', fontWeight: '900', color: '#00ff41', marginBottom: '30px' }}>ARTIFACT_LIBRARY_EDITOR</h2>
         <StatusBanner />
         <div style={{ maxWidth: '600px', border: '1px solid #111', padding: '30px', background: '#080808' }}>
-          <div style={{ marginBottom: '30px' }}>
-            <label style={{ display: 'block', fontSize: '10px', color: '#aaa', marginBottom: '10px' }}>TECHNIQUE_SELECTION</label>
-            <select 
-              style={{ width: '100%', padding: '12px', background: '#000', border: '1px solid #222', color: '#eee', fontFamily: 'monospace' }}
-              value={selectedTCode} 
-              onChange={(e) => setSelectedTCode(e.target.value)}
+          <div style={{ display: 'flex', gap: 2, marginBottom: '25px' }}>
+            <button
+              onClick={() => setCreateMode(false)}
+              style={{
+                flex: 1, padding: '10px', fontSize: '10px', fontFamily: 'monospace', cursor: 'pointer', fontWeight: 'bold',
+                background: !createMode ? 'rgba(0,255,65,0.08)' : '#000',
+                color: !createMode ? '#00ff41' : '#555',
+                border: `1px solid ${!createMode ? '#00ff41' : '#222'}`,
+              }}
             >
-              <option value="">-- SELECT_T_CODE --</option>
-              {tCodes.map(t => (
-                <option key={t.t_code} value={t.t_code}>{t.t_code} | {t.name || t.technique_name}</option>
-              ))}
-            </select>
+              SELECT_EXISTING
+            </button>
+            <button
+              onClick={() => setCreateMode(true)}
+              style={{
+                flex: 1, padding: '10px', fontSize: '10px', fontFamily: 'monospace', cursor: 'pointer', fontWeight: 'bold',
+                background: createMode ? 'rgba(255,170,0,0.08)' : '#000',
+                color: createMode ? '#ffaa00' : '#555',
+                border: `1px solid ${createMode ? '#ffaa00' : '#222'}`,
+              }}
+            >
+              + CREATE_NEW
+            </button>
           </div>
-          <button 
-            onClick={handleNextToEdit} 
-            disabled={!selectedTCode || loading}
+
+          {createMode ? (
+            <div style={{ marginBottom: '30px' }}>
+              <label style={{ display: 'block', fontSize: '10px', color: '#aaa', marginBottom: '10px' }}>
+                CUSTOM_TECHNIQUE_CODE — doesn't need to be a real ATT&amp;CK T-code
+              </label>
+              <input
+                style={{ width: '100%', padding: '12px', background: '#000', border: '1px solid #222', color: '#eee', fontFamily: 'monospace', boxSizing: 'border-box' }}
+                value={customTCode}
+                onChange={(e) => setCustomTCode(e.target.value)}
+                placeholder="e.g. CUSTOM.SuspiciousDriverLoad"
+              />
+              <div style={{ fontSize: '9px', color: '#666', marginTop: '8px' }}>
+                Only collectible via a custom investigation profile's technique list — not the automatic MITRE attribution flow.
+              </div>
+            </div>
+          ) : (
+            <div style={{ marginBottom: '30px' }}>
+              <label style={{ display: 'block', fontSize: '10px', color: '#aaa', marginBottom: '10px' }}>TECHNIQUE_SELECTION</label>
+              <select
+                style={{ width: '100%', padding: '12px', background: '#000', border: '1px solid #222', color: '#eee', fontFamily: 'monospace' }}
+                value={selectedTCode}
+                onChange={(e) => setSelectedTCode(e.target.value)}
+              >
+                <option value="">-- SELECT_T_CODE --</option>
+                {tCodes.map(t => (
+                  <option key={t.t_code} value={t.t_code}>{t.t_code} | {t.name || t.technique_name}{t.is_custom ? ' [CUSTOM]' : ''}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <button
+            onClick={handleNextToEdit}
+            disabled={(createMode ? !customTCode.trim() : !selectedTCode) || loading}
             style={{ width: '100%', padding: '15px', background: 'transparent', border: '1px solid #00ff41', color: '#00ff41', cursor: 'pointer', fontFamily: 'monospace', fontWeight: 'bold' }}
           >
             {loading ? "FETCHING_DATA..." : "ACCESS_LOGIC_CORE"}
@@ -211,7 +276,7 @@ const ArtifactLibraryEditor = () => {
       <StatusBanner />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '40px', borderBottom: '1px solid #111', paddingBottom: '20px' }}>
         <div>
-          <h2 style={{ fontSize: '24px', fontWeight: '900', color: '#00ff41', margin: 0 }}>LOGIC_CONFIG: {selectedTCode}</h2>
+          <h2 style={{ fontSize: '24px', fontWeight: '900', color: '#00ff41', margin: 0 }}>LOGIC_CONFIG: {selectedTCode}{formData.name ? ` — ${formData.name}` : ''}</h2>
           <div style={{ fontSize: '10px', color: '#aaa', marginTop: '5px', display: 'flex', alignItems: 'center', gap: 10 }}>
             GLOBAL_LIBRARY_UPLINK_ACTIVE
             <span style={{
@@ -230,6 +295,7 @@ const ArtifactLibraryEditor = () => {
       </div>
 
       <div style={{ maxWidth: '1000px' }}>
+        <TerminalInput label="Technique Name" value={formData.name} onChange={(v) => setFormData({...formData, name: v})} />
         <TerminalInput label="Live Analysis Logic" value={formData.live_analysis} onChange={(v) => setFormData({...formData, live_analysis: v})} />
         <TerminalInput label="Dead Disk Strategy" value={formData.dead_disk_analysis} onChange={(v) => setFormData({...formData, dead_disk_analysis: v})} />
         <TerminalInput label="Collection Parameters" value={formData.collection_strategy} onChange={(v) => setFormData({...formData, collection_strategy: v})} />

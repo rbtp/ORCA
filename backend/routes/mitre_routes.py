@@ -511,11 +511,22 @@ def to_dict(row):
 def get_all_techniques(current_user: dict = Depends(get_current_user)):
     session = db.get_session()
     try:
+        # Custom (non-ATT&CK) techniques created via the Artifact Library
+        # Editor live only in ref_artifact_library, never mitre_techniques --
+        # the NOT EXISTS half surfaces those too so they're selectable again
+        # after creation, without listing every real technique's library row
+        # a second time.
         results = session.execute(text("""
-            SELECT t_code, name AS technique_name
+            SELECT t_code, name AS technique_name, FALSE AS is_custom
             FROM public.mitre_techniques
             WHERE NOT COALESCE(is_deprecated, FALSE)
               AND NOT COALESCE(is_revoked, FALSE)
+            UNION ALL
+            SELECT ral.t_code, COALESCE(ral.name, ral.t_code) AS technique_name, TRUE AS is_custom
+            FROM public.ref_artifact_library ral
+            WHERE NOT EXISTS (
+                SELECT 1 FROM public.mitre_techniques mt WHERE mt.t_code = ral.t_code
+            )
             ORDER BY t_code ASC
         """)).mappings().all()
         return [dict(r) for r in results]
@@ -1380,13 +1391,13 @@ async def update_artifact_library(t_code: str, data: dict = Body(...), current_u
         # t_code_key), so ON CONFLICT works directly off it.
         session.execute(text("""
             INSERT INTO public.ref_artifact_library
-                (t_code, live_analysis, dead_disk_analysis, collection_strategy, custom_vql, surgical_yaml, updated_at)
-            VALUES (:t, :live, :dead, :coll, :vql, :yaml, NOW())
+                (t_code, name, live_analysis, dead_disk_analysis, collection_strategy, custom_vql, surgical_yaml, updated_at)
+            VALUES (:t, :name, :live, :dead, :coll, :vql, :yaml, NOW())
             ON CONFLICT (t_code) DO UPDATE SET
-                live_analysis=:live, dead_disk_analysis=:dead,
+                name=:name, live_analysis=:live, dead_disk_analysis=:dead,
                 collection_strategy=:coll, custom_vql=:vql, surgical_yaml=:yaml,
                 updated_at=NOW()
-        """), {"live": data.get("live_analysis"), "dead": data.get("dead_disk_analysis"),
+        """), {"name": data.get("name"), "live": data.get("live_analysis"), "dead": data.get("dead_disk_analysis"),
                "coll": data.get("collection_strategy"), "vql": data.get("custom_vql"),
                "yaml": data.get("surgical_yaml"), "t": t_code})
         session.commit()
