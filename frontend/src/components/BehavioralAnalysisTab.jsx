@@ -155,6 +155,135 @@ function ArtifactPickerModal({ assetId, onSelect, onClose }) {
   );
 }
 
+// ─── File browser modal (MFT-backed, hash-enriched) ────────────────────────────
+// Informational only -- MFT gives metadata (path/size/timestamps/hash), never
+// the file's actual bytes, so nothing here feeds into RUN ANALYSIS directly.
+// Pulling a specific file's real content for full CAPA/FLOSS/Speakeasy analysis
+// is the separate, rarer follow-up case, not this browser's job.
+function fmtBytes(n) {
+  if (n == null) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function FileBrowserModal({ assetId, onClose }) {
+  const [pathStack, setPathStack] = useState(['']); // '' = drive root
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const currentPath = pathStack[pathStack.length - 1];
+
+  useEffect(() => {
+    setLoading(true);
+    setSelected(null);
+    const params = new URLSearchParams({ view: 'tree', path_prefix: currentPath, page_size: '1000', include_dirs: 'true' });
+    fetch(`${API}/api/mitre/evidence/${assetId}/mft/query?${params}`, { headers: getAuth(), credentials: 'include' })
+      .then(r => r.ok ? r.json() : { results: [] })
+      .then(data => { setEntries(data.results || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [assetId, currentPath]);
+
+  const enterFolder = (name) => setPathStack(prev => [...prev, (currentPath ? currentPath + '\\' : '') + name]);
+  const goToCrumb = (idx) => setPathStack(prev => prev.slice(0, idx + 1));
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ background: '#080808', border: `1px solid ${C.border}`, width: 820, maxHeight: '75vh', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '8px 14px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ color: C.green, fontSize: 11, fontFamily: 'monospace', fontWeight: 'bold', letterSpacing: 1 }}>FILE BROWSER — MFT</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: C.red, cursor: 'pointer', fontFamily: 'monospace', fontWeight: 'bold' }}>[ X ]</button>
+        </div>
+
+        <div style={{ padding: '6px 14px', borderBottom: `1px solid ${C.border}`, fontFamily: 'monospace', fontSize: 10, color: C.greyDim, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {pathStack.map((p, i) => (
+            <span key={i} style={{ display: 'flex', alignItems: 'center' }}>
+              <span onClick={() => goToCrumb(i)} style={{ cursor: 'pointer', color: i === pathStack.length - 1 ? C.white : C.grey }}>
+                {i === 0 ? 'C:' : p.split('\\').pop()}
+              </span>
+              {i < pathStack.length - 1 && <span style={{ margin: '0 4px' }}>/</span>}
+            </span>
+          ))}
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {loading && <div style={{ padding: 20, color: C.greyDim, fontFamily: 'monospace', fontSize: 11 }}>Loading...</div>}
+          {!loading && entries.length === 0 && (
+            <div style={{ padding: 20, color: C.greyDim, fontFamily: 'monospace', fontSize: 11 }}>
+              Empty, or no MFT evidence collected for this asset yet.
+            </div>
+          )}
+          {entries.map((e, i) => (
+            <div key={i}
+              onClick={() => e.d ? enterFolder(e.n) : setSelected(e)}
+              style={{
+                padding: '6px 14px', borderBottom: '1px solid #0a0a0a', cursor: 'pointer',
+                fontFamily: 'monospace', fontSize: 11, display: 'flex', gap: 10, alignItems: 'center',
+                background: selected === e ? C.bgHover : 'transparent',
+              }}
+              onMouseEnter={ev => { if (selected !== e) ev.currentTarget.style.background = C.bgHover; }}
+              onMouseLeave={ev => { if (selected !== e) ev.currentTarget.style.background = 'transparent'; }}>
+              <span style={{ width: 16, flexShrink: 0 }}>{e.d ? '\u{1F4C1}' : '\u{1F4C4}'}</span>
+              <span style={{ color: e.u === 0 ? C.red : C.white, flex: 1, wordBreak: 'break-all' }}>
+                {e.n}{e.u === 0 ? ' (deleted)' : ''}
+              </span>
+              {!e.d && <span style={{ color: C.greyDim, minWidth: 70, textAlign: 'right', flexShrink: 0 }}>{fmtBytes(e.sz)}</span>}
+              {e.h && (
+                <span style={{
+                  color: e.hs === 'path' ? C.amber : C.greyDim, fontSize: 9, flexShrink: 0,
+                  border: `1px solid ${e.hs === 'path' ? C.amber : C.border}`, padding: '1px 5px',
+                }} title={e.hs === 'path' ? 'Hash matched by exact path' : 'Hash matched by filename only (Amcache does not record full paths) -- unconfirmed for this specific file'}>
+                  {e.hs === 'path' ? 'HASHED' : 'HASH~'}
+                </span>
+              )}
+              {e.vt?.status === 'found' && e.vt.malicious > 0 && (
+                <span style={{ color: C.red, fontSize: 9, flexShrink: 0, border: `1px solid ${C.red}`, padding: '1px 5px', fontWeight: 'bold' }}
+                  title="VirusTotal: flagged by one or more engines">
+                  ⚠ VT {e.vt.malicious}/{e.vt.total}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {selected && (
+          <div style={{ borderTop: `1px solid ${C.border}`, padding: '10px 14px', fontFamily: 'monospace', fontSize: 10, color: C.grey, background: '#050505' }}>
+            <div style={{ color: C.white, marginBottom: 4, wordBreak: 'break-all' }}>{selected.p}</div>
+            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: selected.h ? 4 : 0 }}>
+              <span>Size: {fmtBytes(selected.sz)}</span>
+              <span>Modified: {(selected.m || '').slice(0, 19).replace('T', ' ') || 'unknown'}</span>
+              {selected.ads === 1 && <span style={{ color: C.amber }}>Has ADS</span>}
+              {selected.si_lt_fn === 1 && <span style={{ color: C.red }}>Possible timestomp</span>}
+            </div>
+            {selected.h ? (
+              <div>
+                <div>
+                  <span style={{ color: C.greyDim }}>{selected.hs === 'path' ? 'SHA256 (exact path match)' : 'SHA1 (Amcache, filename match only)'}:</span>{' '}
+                  <span style={{ color: C.amber, wordBreak: 'break-all' }}>{selected.h}</span>
+                </div>
+                <div style={{ marginTop: 4 }}>
+                  <span style={{ color: C.greyDim }}>VirusTotal:</span>{' '}
+                  {!selected.vt && <span style={{ color: C.greyDim }}>not looked up yet</span>}
+                  {selected.vt?.status === 'not_found' && <span style={{ color: C.greyDim }}>unknown to VT (never seen)</span>}
+                  {selected.vt?.status === 'found' && selected.vt.malicious > 0 && (
+                    <span style={{ color: C.red, fontWeight: 'bold' }}>{selected.vt.malicious}/{selected.vt.total} engines flagged malicious</span>
+                  )}
+                  {selected.vt?.status === 'found' && selected.vt.malicious === 0 && (
+                    <span style={{ color: C.green }}>clean — 0/{selected.vt.total} engines flagged</span>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: C.greyDim }}>No hash on file — not seen in Amcache and not in a common malware-drop location.</div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── History picker dropdown ───────────────────────────────────────────────────
 function HistoryDropdown({ assetId, onSelect, onClose }) {
   const [jobs, setJobs] = useState([]);
@@ -199,6 +328,7 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
   const [displayName, setDisplayName]         = useState('');
   const [analystInitials, setAnalystInitials] = useState('');
   const [showArtifactPicker, setShowArtifactPicker] = useState(false);
+  const [showFileBrowser, setShowFileBrowser]       = useState(false);
   const [showHistory, setShowHistory]         = useState(false);
   const [isDragging, setIsDragging]           = useState(false);
 
@@ -558,6 +688,11 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
               style={{ background: 'none', border: `1px solid ${C.border}`, color: C.grey, cursor: 'pointer', fontFamily: 'monospace', fontSize: 10, padding: '5px 12px', whiteSpace: 'nowrap' }}>
               Browse Collected
             </button>
+            <button onClick={() => setShowFileBrowser(true)}
+              title="Browse the full MFT-derived file listing for this asset, with hashes where known (Amcache / common malware locations). Informational only -- does not submit a file for analysis."
+              style={{ background: 'none', border: `1px solid ${C.border}`, color: C.grey, cursor: 'pointer', fontFamily: 'monospace', fontSize: 10, padding: '5px 12px', whiteSpace: 'nowrap' }}>
+              Browse Files (MFT)
+            </button>
             <button onClick={() => fileInputRef.current?.click()}
               style={{ background: 'none', border: `1px solid ${C.border}`, color: C.grey, cursor: 'pointer', fontFamily: 'monospace', fontSize: 10, padding: '5px 12px', whiteSpace: 'nowrap' }}>
               Upload File
@@ -788,6 +923,9 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
           }}
           onClose={() => setShowArtifactPicker(false)}
         />
+      )}
+      {showFileBrowser && (
+        <FileBrowserModal assetId={assetId} onClose={() => setShowFileBrowser(false)} />
       )}
     </div>
   );

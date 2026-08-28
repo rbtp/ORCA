@@ -148,6 +148,29 @@ def revoke_token(token: str):
 
 # ── Technique query ───────────────────────────────────────────────────────────
 
+# MFT and Amcache aren't real MITRE techniques (see _CATEGORY_TO_TCODES below --
+# they're utility codes that live only in ref_artifact_library), so neither the
+# geopolitical attribution chain nor a custom investigation profile ever
+# surfaces them on their own. Forced into every standard collection instead:
+# MFT gives a full on-disk file listing at effectively the cost of one $MFT
+# read, and Amcache gives a SHA1 for everything that's ever executed, straight
+# out of the registry -- both give an analyst baseline situational awareness
+# before they've looked at anything, at near-zero marginal collection cost.
+_ALWAYS_INCLUDED_TCODES = ["MFT", "AMCACHE", "SUSPICIOUS_LOCATIONS_HASH"]
+
+
+def _always_included_techniques(conn, exclude_codes: set) -> list[dict]:
+    codes = [c for c in _ALWAYS_INCLUDED_TCODES if c not in exclude_codes]
+    if not codes:
+        return []
+    rows = conn.execute(text("""
+        SELECT t_code, COALESCE(name, t_code) AS technique_name, custom_vql, surgical_yaml
+        FROM ref_artifact_library
+        WHERE t_code = ANY(:codes) AND (custom_vql IS NOT NULL OR surgical_yaml IS NOT NULL)
+    """), {"codes": codes}).mappings().fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_asset_techniques(asset_id: int) -> list[dict]:
     with db.engine.connect() as conn:
         # Resolve case focus to detect custom investigation profiles
@@ -167,19 +190,21 @@ def get_asset_techniques(asset_id: int) -> list[dict]:
                 SELECT tcodes FROM investigation_profiles WHERE name = :name
             """), {"name": profile_name}).mappings().fetchone()
             t_codes = list(profile_row["tcodes"]) if profile_row else []
-            if not t_codes:
-                return []
-            rows = conn.execute(text("""
-                SELECT t_code,
-                       COALESCE(name, t_code) AS technique_name,
-                       custom_vql,
-                       surgical_yaml
-                FROM ref_artifact_library
-                WHERE t_code = ANY(:codes)
-                  AND (custom_vql IS NOT NULL OR surgical_yaml IS NOT NULL)
-                ORDER BY t_code
-            """), {"codes": t_codes}).mappings().fetchall()
-            return [dict(r) for r in rows]
+            rows = []
+            if t_codes:
+                rows = conn.execute(text("""
+                    SELECT t_code,
+                           COALESCE(name, t_code) AS technique_name,
+                           custom_vql,
+                           surgical_yaml
+                    FROM ref_artifact_library
+                    WHERE t_code = ANY(:codes)
+                      AND (custom_vql IS NOT NULL OR surgical_yaml IS NOT NULL)
+                    ORDER BY t_code
+                """), {"codes": t_codes}).mappings().fetchall()
+            result = [dict(r) for r in rows]
+            result.extend(_always_included_techniques(conn, {r["t_code"] for r in rows}))
+            return result
 
         # Standard path — MITRE geopolitical attribution chain
         rows = conn.execute(text("""
@@ -203,7 +228,9 @@ def get_asset_techniques(asset_id: int) -> list[dict]:
             WHERE a.id = :asset_id
             ORDER BY mt.t_code
         """), {"asset_id": asset_id}).mappings().fetchall()
-    return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+        result.extend(_always_included_techniques(conn, {r["t_code"] for r in rows}))
+    return result
 
 # Maps UI display names → t_codes that should be collected
 _CATEGORY_TO_TCODES = {

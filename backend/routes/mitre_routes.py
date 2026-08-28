@@ -1251,6 +1251,53 @@ async def query_mft(
             SELECT raw_data FROM evidence WHERE asset_id = :aid AND t_code = 'MFT' LIMIT 1
         """), {"aid": asset_id}).fetchone()
 
+        # Hash enrichment: SUSPICIOUS_LOCATIONS_HASH carries a full path (exact
+        # match against mft_entries.full_path); AMCACHE only ever gives us a
+        # bare filename (confirmed against real evidence -- its Name field is
+        # e.g. "EDDv310.exe", never a path), so that match is by filename only
+        # and gets flagged "name_only" rather than presented as if it were
+        # confirmed against this exact file at this exact path -- multiple
+        # unrelated files can share a filename (installers named setup.exe,
+        # svchost.exe copies, etc.), so treating a filename hit as equivalent
+        # to a path hit would misattribute a hash to the wrong file.
+        hash_rows = conn.execute(text("""
+            SELECT t_code, raw_data FROM evidence
+            WHERE asset_id = :aid AND t_code IN ('SUSPICIOUS_LOCATIONS_HASH', 'AMCACHE')
+        """), {"aid": asset_id}).fetchall()
+
+        path_hashes: dict = {}
+        name_hashes: dict = {}
+        for hr in hash_rows:
+            try:
+                doc = json.loads(hr.raw_data) if isinstance(hr.raw_data, str) else hr.raw_data
+            except Exception:
+                continue
+            if not doc:
+                continue
+            if hr.t_code == 'SUSPICIOUS_LOCATIONS_HASH':
+                fp = doc.get('FullPath')
+                sha256 = doc.get('SHA256')
+                if fp and sha256:
+                    path_hashes[fp.lower()] = sha256
+            elif hr.t_code == 'AMCACHE':
+                nm = doc.get('Name')
+                sha1 = doc.get('SHA1')
+                if nm and sha1:
+                    name_hashes.setdefault(nm.lower(), sha1)
+
+        # VT verdicts: only fetch rows for hashes this asset's evidence actually
+        # references (vt_lookups is global across every asset/case, so pulling
+        # the whole table here would scale with every OTHER investigation too).
+        referenced_hashes = list({h.lower() for h in path_hashes.values()} | {h.lower() for h in name_hashes.values()})
+        vt_verdicts: dict = {}
+        if referenced_hashes:
+            vt_rows = conn.execute(text("""
+                SELECT hash, status, malicious_count, total_engines FROM vt_lookups
+                WHERE hash = ANY(:hashes)
+            """), {"hashes": referenced_hashes}).fetchall()
+            for vr in vt_rows:
+                vt_verdicts[vr.hash] = {"status": vr.status, "malicious": vr.malicious_count, "total": vr.total_engines}
+
     file_count = 0
     meta_count = 0
     if sentinel:
@@ -1259,6 +1306,15 @@ async def query_mft(
         meta_count = doc.get("meta_count", 0)
 
     def _fmt_row(r):
+        h, hs, vt = None, None, None
+        full_path = r["full_path"] or ""
+        file_name = r["file_name"] or ""
+        if full_path.lower() in path_hashes:
+            h, hs = path_hashes[full_path.lower()], "path"
+        elif file_name.lower() in name_hashes:
+            h, hs = name_hashes[file_name.lower()], "name_only"
+        if h:
+            vt = vt_verdicts.get(h.lower())
         return {
             "e":   r["entry_num"],
             "pe":  r["parent_num"],
@@ -1278,6 +1334,9 @@ async def query_mft(
             "c3":  r["fn_created"].isoformat()  if r["fn_created"]  else None,
             "m3":  r["fn_modified"].isoformat() if r["fn_modified"] else None,
             "a3":  r["fn_accessed"].isoformat() if r["fn_accessed"] else None,
+            "h":   h,
+            "hs":  hs,
+            "vt":  vt,
         }
 
     return {

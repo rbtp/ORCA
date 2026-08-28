@@ -18,6 +18,7 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-https://localhost}
       - CASES_DIR=${CASES_DIR:-}
       - ORCA_DATA_ROOT=/app/evidence
+      - VT_API_KEY=${VT_API_KEY:-}
     volumes:
       - orca-certs:/app/certs          # shared TLS certs (writable — backend generates on first boot)
       - ./backend/bin:/app/bin:ro

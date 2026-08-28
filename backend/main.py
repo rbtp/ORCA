@@ -1,9 +1,18 @@
 import os
 import sys
 import json
+import logging
 import subprocess
 import asyncio
 from datetime import datetime
+
+# Confirmed live 2026-08-28: nothing in the app previously called
+# logging.basicConfig(), so every module-level logger.info()/.warning() call
+# across the whole backend was silently dropped in production (root logger
+# defaults to WARNING) -- .info() calls disappeared entirely, only .warning()+
+# ever reached the container's stdout. uvicorn's own request-access logging
+# was unaffected since it configures its own loggers independently.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
 from fastapi import FastAPI, HTTPException, BackgroundTasks, status, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -102,6 +111,15 @@ async def _auto_bootstrap_first_admin():
     # bootstrap_admin.auto_bootstrap_if_empty's own error handling.
     from bootstrap_admin import auto_bootstrap_if_empty
     await asyncio.get_event_loop().run_in_executor(None, auto_bootstrap_if_empty, db.engine)
+
+
+@app.on_event("startup")
+async def _start_vt_worker():
+    # Fire-and-forget background task, not awaited -- runs for the lifetime of
+    # the process. No-ops immediately (logs once, returns) if VT_API_KEY isn't
+    # configured, so this is always safe to start. See vt_worker.py.
+    import vt_worker
+    asyncio.create_task(vt_worker.run_forever())
 
 
 VR_EXE_LOCAL   = cfg.VR_EXE_LOCAL    # executed in-container (run_technique.py against locally mounted evidence)
