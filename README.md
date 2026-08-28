@@ -22,12 +22,18 @@
 - Full ATT&CK knowledge base (groups, techniques, sub-techniques, tactics, campaigns) loaded from STIX data
 - Geopolitical threat attribution — country → threat groups → ATT&CK techniques chain resolved automatically
 - Browsable MITRE dossier view with per-group technique hierarchy
+- **Custom technique creation** — the Artifact Library Editor can define a technique that isn't a real ATT&CK T-code (its own identifier, name, and live/dead/VQL/YAML collection logic); custom techniques aren't picked up by the automatic geopolitical attribution chain, but are selectable in Investigation Profiles and the Detection Coverage tool the same as any cataloged technique
 - Per-technique verdict workflow: `MALICIOUS`, `NON-MALICIOUS`, `Evidence Found`, `NO_ARTIFACTS`, `Undetermined`
-- Per-technique status lifecycle: `UNCLAIMED` → `IN_PROGRESS` → `PENDING_REVIEW` → `CLOSED`
+- Per-technique status lifecycle: `UNCLAIMED` → `IN_PROGRESS` → `PENDING_REVIEW` → `CLOSED`, live-updated for every analyst viewing the case (not just the one making the change)
+- Evidence starring/favoriting per technique, with a starred-only filter independent of the keyword search
+- A caution-triangle indicator marks evidence that came from the broad/fallback collection path rather than a surgical query, so analysts can weigh it accordingly
 - Analyst notes and BLUF notes at both case and technique level
 
 ### Artifact Collection
-- **Remote deployment** — builds a self-contained ZIP package (Velociraptor binary + PowerShell bootstrap + per-technique VQL/YAML) and triggers it on the remote Windows target via SMB+Task Scheduler (port 445 only; no WinRM required by default)
+- **Remote deployment** — builds a self-contained ZIP package (Velociraptor binary + PowerShell launcher + per-technique VQL/YAML) and pushes it to the remote Windows target directly over SMB (port 445), then triggers execution locally on the target — no HTTP download step and no certificate-bypass class needed once push delivery is in use, removing the download-cradle signature some AV/EDR products flag
+- **SMB/Task Scheduler or WinRM trigger** — after the package is staged, execution is triggered either via a throwaway Windows service (SMB/Task Scheduler, the default) or directly over WinRM (port 5985) for environments where avoiding service-registration is preferred; a WinRM trigger reports back real captured exit code and output instead of assuming success once the process launches
+- **Parallel collection workers** — the collection and triage scripts split techniques/artifacts across up to `$MaxWorkers` concurrent child processes on the target (default 3) instead of running strictly sequentially, cutting wall-clock time on larger technique sets
+- **Live per-technique monitoring** — the deploy panel shows each technique's current status (running / pending / complete / no-artifacts), time since its last heartbeat, and flags a technique as stalled if it's been running 2+ minutes with no update, instead of only an aggregate progress bar
 - **Triage collection** — targeted artifact pull across 12 categories: Event Logs, Prefetch, MFT, Registry, Browser Artifacts, LNK/Jump Lists, Scheduled Tasks, WMI Persistence, SRUM, Amcache, Recycle Bin, USB Artifacts
 - **Manual package** — one-click generation of a downloadable bootstrap command for air-gapped or manual deployment
 - **Three-path collection fallback** per technique: surgical YAML → custom VQL → generic fallback VQL
@@ -60,7 +66,8 @@
 ### Disk Image Mounting
 - Mount E01, VMDK, VHD, VHDX, QCOW2 and other formats via Arsenal Image Mounter CLI
 - Read-only mount with automatic provider detection by file extension
-- Mount session tracking per asset; graceful dismount
+- **Agent-based remote mounting** — an online `orca_agent.py` instance with mount capability can be selected as the mount target, so the image is mounted on that analyst/endpoint machine rather than requiring the image to be reachable from the ORCA server itself
+- Mount session tracking per asset; graceful dismount (dismount always targets the agent that performed the mount, not a client-supplied one)
 
 ### Detection Coverage
 - Per-country and per-investigation-profile coverage heat map
@@ -74,6 +81,7 @@
 
 ### IOC Management
 - Store discovered IOCs (IP, domain, hash, etc.) against a case
+- Edit existing IOC Reliquary entries in place, including an optional label field for analyst-facing context
 - Cross-reference IOC values against all evidence via SSE-streamed correlation scan — results stream in as each IOC is checked; scan continues in the background if you navigate away and results are restored when you return
 - Per-IOC hit table: case, hostname, T-code, artifact alias
 - Promote evidence directly to the IOC library from any technique row
@@ -98,11 +106,14 @@
 - Persistent Python agent (`orca_agent.py`) deployed to endpoints via remote SMB trigger or manual install
 - Agent registers with the server, polls for jobs (long-poll), streams results back via SSE
 - Deploy agent remotely from the ORCA UI: downloads binaries, creates a scheduled task, and waits for registration
+- Job types include disk image mount/dismount (backs Disk Image Mounting's agent-based mode above), with capabilities self-reported so only agents that support a given job type are offered as targets for it
 - Dashboard widget shows online/offline agent count
 
 ### TLS & Network Configuration
-- Self-signed ECDSA P-256 certificate auto-generated on first container boot into a shared Docker volume
-- Admin-only certificate regeneration from the Options → Network page
+- Self-signed ECDSA P-256 certificate auto-generated on first container boot into a shared Docker volume, with `ORCA_SERVER_URL`'s host folded into the certificate's SAN (not just the container's internal Docker IP) so it validates correctly for the address remote targets actually connect back to
+- Certificate `notBefore` is backdated by a day at generation time, absorbing host clock drift/corrections that would otherwise make a freshly-generated certificate appear "not yet valid" until real time caught up
+- Boot-time check auto-regenerates the certificate if the existing one doesn't cover the currently-configured `ORCA_SERVER_URL`, not just on first boot ever
+- Admin-only certificate regeneration from the Options → Network page (uses the same `ORCA_SERVER_URL`-aware SAN logic as the boot-time path)
 - Certificate info: expiry, SANs, key type, days remaining
 - Backend restarts automatically after cert regeneration; nginx detects cert change and reloads
 
@@ -186,7 +197,7 @@ docker exec orca-postgres pg_dump -U postgres -d orca_db --schema-only --no-owne
 - **Ports available**: 80, 443 (frontend), 8000 (backend)
 - **Hardware**: 4 GB RAM minimum; 8 GB recommended (LibreOffice and memory analysis are heavyweight)
 - **Storage**: 20 GB+ for evidence volumes and container images
-- Target Windows endpoints must have **SMB port 445** reachable and local administrator credentials available for remote collection
+- Target Windows endpoints must have **SMB port 445** reachable and local administrator credentials available for remote collection; **WinRM port 5985** is only needed if you choose WinRM as the trigger transport instead of the SMB/Task Scheduler default — package staging still goes over SMB either way
 
 ---
 
