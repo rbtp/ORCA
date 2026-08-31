@@ -16,6 +16,9 @@ const ArtifactLibraryEditor = () => {
   const [isNewMapping, setIsNewMapping] = useState(false);
   const [createMode, setCreateMode] = useState(false);
   const [customTCode, setCustomTCode] = useState('');
+  const [isDeletable, setIsDeletable] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const [formData, setFormData] = useState({
     name: '',
@@ -72,6 +75,8 @@ const ArtifactLibraryEditor = () => {
         res.data.collection_strategy || res.data.custom_vql || res.data.surgical_yaml);
       setIsNewMapping(!hasContent);
       const existingEntry = tCodes.find(t => t.t_code === code);
+      setIsDeletable(!hasContent ? false : !!(existingEntry && existingEntry.is_deletable));
+      setConfirmingDelete(false);
       setSelectedTCode(code);
       setFormData({
         name: res.data.technique_name || (existingEntry && existingEntry.technique_name) || '',
@@ -113,6 +118,32 @@ const ArtifactLibraryEditor = () => {
       } catch (err) { /* non-fatal -- list just stays stale until next reload */ }
     } catch (err) {
       setStatusMsg({ type: 'error', text: 'COMMIT_FAILED' });
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+    setDeleting(true);
+    try {
+      await axios.delete(`${API_BASE}/library/${selectedTCode}`, getAuthHeader());
+      setStatusMsg({ type: 'success', text: `TECHNIQUE_DELETED: ${selectedTCode}` });
+      setStep(1);
+      setSelectedTCode('');
+      setConfirmingDelete(false);
+      try {
+        const res = await axios.get(`${API_BASE}/techniques`, getAuthHeader());
+        const data = Array.isArray(res.data) ? res.data : (res.data.techniques || []);
+        setTCodes(data);
+      } catch (err) { /* non-fatal -- list just stays stale until next reload */ }
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      setStatusMsg({ type: 'error', text: detail ? `DELETE_FAILED: ${detail}` : 'DELETE_FAILED' });
+      setConfirmingDelete(false);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -290,6 +321,21 @@ const ArtifactLibraryEditor = () => {
         </div>
         <div style={{ display: 'flex', gap: '15px' }}>
           <button onClick={() => setStep(1)} style={{ background: 'none', border: '1px solid #222', color: '#bbb', padding: '8px 20px', cursor: 'pointer', fontFamily: 'monospace' }}>ABORT</button>
+          {isDeletable && (
+            <button
+              onClick={handleDelete}
+              onMouseLeave={() => setConfirmingDelete(false)}
+              disabled={deleting}
+              style={{
+                background: confirmingDelete ? '#ff4141' : 'none',
+                border: `1px solid ${confirmingDelete ? '#ff4141' : '#552222'}`,
+                color: confirmingDelete ? '#000' : '#ff4141',
+                padding: '8px 20px', cursor: deleting ? 'not-allowed' : 'pointer',
+                fontFamily: 'monospace', fontWeight: confirmingDelete ? 'bold' : 'normal',
+              }}>
+              {deleting ? 'DELETING...' : confirmingDelete ? 'CONFIRM DELETE?' : 'DELETE_TECHNIQUE'}
+            </button>
+          )}
           <button onClick={handleSave} style={{ background: '#00ff41', border: 'none', color: '#000', padding: '8px 25px', cursor: 'pointer', fontFamily: 'monospace', fontWeight: 'bold' }}>COMMIT_CHANGES</button>
         </div>
       </div>

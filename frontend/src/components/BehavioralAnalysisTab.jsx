@@ -168,16 +168,40 @@ function fmtBytes(n) {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
-function FileBrowserModal({ assetId, onClose }) {
+function getDefaultTransport() {
+  const v = localStorage.getItem('orca_default_transport');
+  return (v === 'WINRM' || v === 'SMB_TASK') ? v : 'SMB_TASK';
+}
+
+// pending -> staged -> triggered -> received | failed | timeout
+const _PULL_TERMINAL = ['received', 'failed', 'timeout'];
+const _PULL_POLL_MS = 2500;
+const _PULL_MAX_POLLS = 72; // ~3 minutes
+
+function FileBrowserModal({ assetId, onClose, onFileReady }) {
   const [pathStack, setPathStack] = useState(['']); // '' = drive root
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
   const currentPath = pathStack[pathStack.length - 1];
 
+  // Pull-file sub-flow state
+  const [pullOpen, setPullOpen] = useState(false);
+  const [pullCreds, setPullCreds] = useState({ username: '', password: '', transport: getDefaultTransport() });
+  const [pullShowPass, setPullShowPass] = useState(false);
+  const [pullPhase, setPullPhase] = useState('idle'); // idle | starting | polling | done | error
+  const [pullJob, setPullJob] = useState(null);
+  const [pullError, setPullError] = useState('');
+  const pullPollRef = useRef(null);
+  const pullPollCountRef = useRef(0);
+
   useEffect(() => {
     setLoading(true);
     setSelected(null);
+    setPullOpen(false);
+    setPullPhase('idle');
+    setPullError('');
+    if (pullPollRef.current) { clearInterval(pullPollRef.current); pullPollRef.current = null; }
     const params = new URLSearchParams({ view: 'tree', path_prefix: currentPath, page_size: '1000', include_dirs: 'true' });
     fetch(`${API}/api/mitre/evidence/${assetId}/mft/query?${params}`, { headers: getAuth(), credentials: 'include' })
       .then(r => r.ok ? r.json() : { results: [] })
@@ -185,8 +209,79 @@ function FileBrowserModal({ assetId, onClose }) {
       .catch(() => setLoading(false));
   }, [assetId, currentPath]);
 
+  // Stop polling on unmount
+  useEffect(() => () => { if (pullPollRef.current) clearInterval(pullPollRef.current); }, []);
+
   const enterFolder = (name) => setPathStack(prev => [...prev, (currentPath ? currentPath + '\\' : '') + name]);
   const goToCrumb = (idx) => setPathStack(prev => prev.slice(0, idx + 1));
+
+  const selectFile = (e) => {
+    setSelected(e);
+    setPullOpen(false);
+    setPullPhase('idle');
+    setPullError('');
+    setPullJob(null);
+    if (pullPollRef.current) { clearInterval(pullPollRef.current); pullPollRef.current = null; }
+  };
+
+  const pollPullJob = (jobId) => {
+    pullPollCountRef.current = 0;
+    pullPollRef.current = setInterval(async () => {
+      pullPollCountRef.current += 1;
+      try {
+        const r = await fetch(`${API}/api/behavioral/fetch-file/${jobId}`, { headers: getAuth(), credentials: 'include' });
+        if (!r.ok) throw new Error('poll failed');
+        const data = await r.json();
+        setPullJob(data);
+        if (_PULL_TERMINAL.includes(data.status)) {
+          clearInterval(pullPollRef.current);
+          pullPollRef.current = null;
+          setPullPhase(data.status === 'received' ? 'done' : 'error');
+          if (data.status !== 'received') setPullError(data.error || 'Fetch failed');
+        } else if (pullPollCountRef.current >= _PULL_MAX_POLLS) {
+          clearInterval(pullPollRef.current);
+          pullPollRef.current = null;
+          setPullPhase('error');
+          setPullError('Timed out waiting on target — the agent may still be running. Check back later or retry.');
+        }
+      } catch {
+        // transient — keep polling until max count
+        if (pullPollCountRef.current >= _PULL_MAX_POLLS) {
+          clearInterval(pullPollRef.current);
+          pullPollRef.current = null;
+          setPullPhase('error');
+          setPullError('Lost contact with server while polling.');
+        }
+      }
+    }, _PULL_POLL_MS);
+  };
+
+  const submitPull = async () => {
+    if (!selected || !pullCreds.username || !pullCreds.password) return;
+    setPullPhase('starting');
+    setPullError('');
+    try {
+      const r = await fetch(`${API}/api/behavioral/asset/${assetId}/fetch-file`, {
+        method: 'POST',
+        headers: getAuth(),
+        credentials: 'include',
+        body: JSON.stringify({
+          file_path: selected.p,
+          username: pullCreds.username,
+          password: pullCreds.password,
+          transport: pullCreds.transport,
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || `Fetch trigger failed (${r.status})`);
+      setPullJob({ job_id: data.job_id, status: 'triggered' });
+      setPullPhase('polling');
+      pollPullJob(data.job_id);
+    } catch (e) {
+      setPullPhase('error');
+      setPullError(e.message || 'Fetch trigger failed');
+    }
+  };
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -216,7 +311,7 @@ function FileBrowserModal({ assetId, onClose }) {
           )}
           {entries.map((e, i) => (
             <div key={i}
-              onClick={() => e.d ? enterFolder(e.n) : setSelected(e)}
+              onClick={() => e.d ? enterFolder(e.n) : selectFile(e)}
               style={{
                 padding: '6px 14px', borderBottom: '1px solid #0a0a0a', cursor: 'pointer',
                 fontFamily: 'monospace', fontSize: 11, display: 'flex', gap: 10, alignItems: 'center',
@@ -277,6 +372,85 @@ function FileBrowserModal({ assetId, onClose }) {
             ) : (
               <div style={{ color: C.greyDim }}>No hash on file — not seen in Amcache and not in a common malware-drop location.</div>
             )}
+
+            {/* ── Pull-file sub-flow ─────────────────────────────────────────── */}
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+              {pullPhase === 'idle' && !pullOpen && (
+                <button onClick={() => setPullOpen(true)}
+                  style={{ background: 'none', border: `1px solid ${C.green}`, color: C.green, fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', padding: '6px 14px', cursor: 'pointer', letterSpacing: 1 }}>
+                  PULL FILE
+                </button>
+              )}
+
+              {pullOpen && pullPhase === 'idle' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ color: C.greyDim, fontSize: 9 }}>
+                    Pushes a one-off agent to fetch this exact file's bytes from the target, then self-deletes.
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input value={pullCreds.username} onChange={e => setPullCreds(p => ({ ...p, username: e.target.value }))}
+                      placeholder="DOMAIN\svcaccount  or  .\localadmin"
+                      style={{ flex: 1, background: '#0a0a0a', border: `1px solid ${C.border}`, color: C.white, fontFamily: 'monospace', fontSize: 10, padding: '6px 8px' }} />
+                    <select value={pullCreds.transport} onChange={e => setPullCreds(p => ({ ...p, transport: e.target.value }))}
+                      style={{ background: '#0a0a0a', border: `1px solid ${C.border}`, color: C.white, fontFamily: 'monospace', fontSize: 10, padding: '6px 4px' }}>
+                      <option value="SMB_TASK">SMB / SCHTASK</option>
+                      <option value="WINRM">WinRM</option>
+                    </select>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input type={pullShowPass ? 'text' : 'password'} value={pullCreds.password} onChange={e => setPullCreds(p => ({ ...p, password: e.target.value }))}
+                      placeholder="••••••••"
+                      style={{ flex: 1, background: '#0a0a0a', border: `1px solid ${C.border}`, color: C.white, fontFamily: 'monospace', fontSize: 10, padding: '6px 8px' }} />
+                    <button onClick={() => setPullShowPass(s => !s)}
+                      style={{ background: 'none', border: `1px solid ${C.border}`, color: C.greyDim, fontFamily: 'monospace', fontSize: 9, padding: '0 8px', cursor: 'pointer' }}>
+                      {pullShowPass ? 'HIDE' : 'SHOW'}
+                    </button>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button onClick={submitPull} disabled={!pullCreds.username || !pullCreds.password}
+                      style={{
+                        background: C.green, border: 'none', color: '#000', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold',
+                        padding: '6px 14px', cursor: (!pullCreds.username || !pullCreds.password) ? 'not-allowed' : 'pointer',
+                        opacity: (!pullCreds.username || !pullCreds.password) ? 0.4 : 1, letterSpacing: 1,
+                      }}>
+                      FETCH
+                    </button>
+                    <button onClick={() => setPullOpen(false)}
+                      style={{ background: 'none', border: `1px solid ${C.border}`, color: C.greyDim, fontFamily: 'monospace', fontSize: 10, padding: '6px 14px', cursor: 'pointer' }}>
+                      CANCEL
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {(pullPhase === 'starting' || pullPhase === 'polling') && (
+                <div style={{ color: C.amber, fontSize: 10 }}>
+                  {pullPhase === 'starting' ? 'Building package and triggering agent...' : `Waiting on target agent... (${pullJob?.status || 'triggered'})`}
+                </div>
+              )}
+
+              {pullPhase === 'done' && pullJob && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ color: C.green }}>
+                    ✓ Pulled {fmtBytes(pullJob.file_size)} — SHA256: <span style={{ color: C.amber, wordBreak: 'break-all' }}>{pullJob.sha256}</span>
+                  </div>
+                  <button onClick={() => onFileReady && onFileReady(pullJob.local_path, selected.n)}
+                    style={{ background: C.green, border: 'none', color: '#000', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', padding: '6px 14px', cursor: 'pointer', letterSpacing: 1, alignSelf: 'flex-start' }}>
+                    → SEND TO ANALYSIS
+                  </button>
+                </div>
+              )}
+
+              {pullPhase === 'error' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ color: C.red, wordBreak: 'break-word' }}>✗ {pullError}</div>
+                  <button onClick={() => { setPullPhase('idle'); setPullOpen(true); }}
+                    style={{ background: 'none', border: `1px solid ${C.red}`, color: C.red, fontFamily: 'monospace', fontSize: 10, padding: '6px 14px', cursor: 'pointer', alignSelf: 'flex-start' }}>
+                    RETRY
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -925,7 +1099,16 @@ const BehavioralAnalysisTab = ({ assetId, onSummaryUpdate }) => {
         />
       )}
       {showFileBrowser && (
-        <FileBrowserModal assetId={assetId} onClose={() => setShowFileBrowser(false)} />
+        <FileBrowserModal
+          assetId={assetId}
+          onClose={() => setShowFileBrowser(false)}
+          onFileReady={(localPath, name) => {
+            setSelectedPath(localPath);
+            setSelectedFile(null);
+            setDisplayName(name);
+            setShowFileBrowser(false);
+          }}
+        />
       )}
     </div>
   );

@@ -12,6 +12,8 @@ Handles:
   DELETE /api/packages/{token}                  — manual revoke a token
 """
 
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -419,6 +421,85 @@ async def revoke_package(token: str, current_user=Depends(get_current_user)):
 
     if not row:
         raise HTTPException(status_code=404, detail="Token not found")
+
+
+# ── Single-file fetch ingest ──────────────────────────────────────────────────
+# Receives the report POSTed back by run_orca_file_fetch.ps1 (see
+# $ReportUrl in that script). A separate, single-use token per job_id --
+# not package_tokens -- since this has nothing to do with a technique
+# collection and must not be able to touch/close out a real evidence token.
+
+class FileFetchReport(BaseModel):
+    status: str  # "received" | "failed"
+    content_b64: str = ""
+    error: str = ""
+    size: int = 0
+
+
+@router.post("/api/ingest/file-fetch/{job_id}")
+async def ingest_file_fetch(
+    job_id: str,
+    payload: FileFetchReport,
+    x_orca_token: str = Header(..., alias="X-ORCA-Token"),
+):
+    with db.engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT job_id, asset_id, token, file_path, status
+            FROM file_fetch_jobs
+            WHERE job_id = :job_id
+        """), {"job_id": job_id}).mappings().first()
+
+    if not row or str(row["token"]) != x_orca_token:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    if row["status"] in ("received", "failed", "timeout"):
+        # Already terminal — refuse to let a replayed report overwrite it.
+        return {"status": "ok", "message": "Job already finalized"}
+
+    if payload.status == "failed":
+        with db.engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE file_fetch_jobs
+                SET status = 'failed', error = :error, completed_at = NOW()
+                WHERE job_id = :job_id
+            """), {"error": payload.error[:500], "job_id": job_id})
+        logger.info("File-fetch failed: job=%s asset=%s error=%s", job_id[:8], row["asset_id"], payload.error[:200])
+        return {"status": "ok"}
+
+    if payload.status != "received":
+        raise HTTPException(status_code=400, detail=f"Unknown status: {payload.status}")
+
+    try:
+        raw = base64.b64decode(payload.content_b64)
+    except Exception as e:
+        with db.engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE file_fetch_jobs
+                SET status = 'failed', error = :error, completed_at = NOW()
+                WHERE job_id = :job_id
+            """), {"error": f"Bad base64 payload: {e}", "job_id": job_id})
+        raise HTTPException(status_code=400, detail="Malformed content_b64")
+
+    dest_dir = Path(cfg.DATA_ROOT) / "file_fetches" / job_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / os.path.basename(row["file_path"].replace("\\", "/"))
+    dest_path.write_bytes(raw)
+
+    sha256 = hashlib.sha256(raw).hexdigest()
+
+    with db.engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE file_fetch_jobs
+            SET status = 'received', local_path = :local_path,
+                file_size = :file_size, sha256 = :sha256, completed_at = NOW()
+            WHERE job_id = :job_id
+        """), {
+            "local_path": str(dest_path), "file_size": len(raw),
+            "sha256": sha256, "job_id": job_id,
+        })
+
+    logger.info("File-fetch received: job=%s asset=%s size=%d sha256=%s",
+                job_id[:8], row["asset_id"], len(raw), sha256[:16])
+    return {"status": "ok"}
 
     logger.info("Package token manually revoked: %s by user %d", token[:8], current_user["id"])
     return {"status": "revoked", "token": token}

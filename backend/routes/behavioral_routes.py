@@ -2,10 +2,14 @@ import os, re, uuid, json, hashlib, asyncio, time, shutil, glob, sys
 from typing import Optional, Tuple
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import text
 from core.database_manager import db
-from auth_utils import get_current_user
+from auth_utils import get_current_user, user_can_access_case
 from config import cfg
+from package_builder import build_file_fetch_package, validate_remote_dir
+from deploy_routes import _get_orca_base_url
+import vr_remote
 
 router = APIRouter(prefix="/api/behavioral", tags=["behavioral"])
 
@@ -85,6 +89,38 @@ _KNOWN_TLDS = {
     'au','nz','fj','il','sa','ae','qa','kw','bh','om','jo','lb','ca',
 }
 
+# Software namespace/package roots that are structurally identical to a
+# domain (dot-separated labels ending in a real TLD -- .io/.net/.org/.com/
+# .store are all both legitimate TLDs *and* common namespace terminators)
+# but are near-universally compiled-in namespace references, not network
+# indicators. Confirmed false positives live: "itext.io" (iText PDF
+# library's actual iText.IO .NET namespace), "system.io" (.NET BCL),
+# "org.bouncycastle.x509.store" (Java crypto library, reverse-domain package
+# naming). Matched as (first_label, second_label) pairs rather than a bare
+# prefix so a genuinely malicious domain that happens to use "system"/"org"/
+# "com" as its own first label (e.g. "system.evil-c2.ru") isn't silently
+# dropped -- it would also need to match a known second label to be excluded.
+_KNOWN_NAMESPACE_PAIRS = {
+    ('system', 'io'), ('system', 'net'), ('system', 'text'), ('system', 'data'),
+    ('system', 'web'), ('system', 'xml'), ('system', 'linq'), ('system', 'security'),
+    ('system', 'threading'), ('system', 'diagnostics'), ('system', 'reflection'),
+    ('system', 'runtime'), ('system', 'collections'), ('system', 'configuration'),
+    ('system', 'drawing'), ('system', 'componentmodel'), ('system', 'globalization'),
+    ('system', 'resources'), ('system', 'windows'), ('system', 'media'),
+    ('system', 'servicemodel'), ('system', 'management'),
+    ('microsoft', 'win32'), ('microsoft', 'csharp'), ('microsoft', 'extensions'),
+    ('microsoft', 'aspnetcore'), ('microsoft', 'entityframeworkcore'),
+    ('newtonsoft', 'json'),
+    ('itext', 'io'), ('itext', 'kernel'), ('itext', 'layout'),
+    ('itext', 'forms'), ('itext', 'signatures'), ('itext', 'commons'),
+    ('org', 'bouncycastle'), ('org', 'apache'), ('org', 'springframework'),
+    ('org', 'hibernate'), ('org', 'junit'), ('org', 'slf4j'), ('org', 'w3c'),
+    ('org', 'json'), ('org', 'xml'), ('org', 'ietf'),
+    ('com', 'google'), ('com', 'sun'), ('com', 'fasterxml'), ('com', 'squareup'),
+    ('net', 'sf'),
+}
+
+
 def check_ioc(s: str) -> Optional[Tuple[str, str]]:
     """Return (ioc_type, matched_substring) for the first IOC pattern found in s, else None.
 
@@ -100,8 +136,12 @@ def check_ioc(s: str) -> Optional[Tuple[str, str]]:
         m = pat.search(s)
         if not m:
             continue
-        if ioc_type == 'DOMAIN' and m.group(0).rsplit('.', 1)[-1].lower() not in _KNOWN_TLDS:
-            continue
+        if ioc_type == 'DOMAIN':
+            labels = m.group(0).lower().split('.')
+            if labels[-1] not in _KNOWN_TLDS:
+                continue
+            if len(labels) >= 2 and (labels[0], labels[1]) in _KNOWN_NAMESPACE_PAIRS:
+                continue
         return ioc_type, m.group(0)
     return None
 
@@ -406,6 +446,122 @@ async def get_artifact_files(asset_id: int, current_user: dict = Depends(get_cur
             ORDER BY source_file
         """), {"aid": asset_id}).fetchall()
     return [{"source_file": r[0], "t_code": r[1]} for r in rows]
+
+
+# ── Live single-file pull (MFT browser "PULL FILE") ───────────────────────────
+# Reuses the same push-delivery staging/trigger machinery as a full collection
+# (package_builder.build_file_fetch_package + vr_remote.push_and_trigger_package)
+# for a one-off "grab exactly this file" job, so an analyst mid-investigation
+# doesn't need a second full evidence collection just to look at one binary
+# they spotted in the MFT/Amcache-populated file browser.
+
+class FetchFileRequest(BaseModel):
+    file_path: str
+    username: str
+    password: str
+    domain: Optional[str] = None
+    transport: str = "SMB_TASK"
+    remote_dir: Optional[str] = None
+
+
+def _get_asset_for_fetch(asset_id: int) -> Optional[dict]:
+    with db.engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT id, hostname, ip, case_name FROM assets WHERE id = :id"
+        ), {"id": asset_id}).mappings().first()
+    return dict(row) if row else None
+
+
+@router.post("/asset/{asset_id}/fetch-file")
+async def fetch_file(asset_id: int, req: FetchFileRequest, current_user: dict = Depends(get_current_user)):
+    asset = _get_asset_for_fetch(asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if not user_can_access_case(current_user, asset.get("case_name")):
+        raise HTTPException(status_code=403, detail="Not assigned to this investigation")
+    ip = (asset.get("ip") or "").strip()
+    if not ip:
+        raise HTTPException(status_code=400, detail="No IP address configured for this asset")
+    if not req.username or not req.password:
+        raise HTTPException(status_code=400, detail="Credentials required")
+
+    job_id = str(uuid.uuid4())
+    token = str(uuid.uuid4())
+
+    with db.engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO file_fetch_jobs (job_id, asset_id, token, file_path, status, created_by)
+            VALUES (:job_id, :asset_id, :token, :file_path, 'pending', :created_by)
+        """), {
+            "job_id": job_id, "asset_id": asset_id, "token": token,
+            "file_path": req.file_path, "created_by": current_user.get("id"),
+        })
+
+    orca_url = _get_orca_base_url()
+    try:
+        zip_path = await asyncio.to_thread(
+            build_file_fetch_package, asset_id, orca_url, job_id, token, req.file_path
+        )
+    except ValueError as e:
+        with db.engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE file_fetch_jobs SET status='failed', error=:err WHERE job_id=:job_id"
+            ), {"err": str(e), "job_id": job_id})
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        with db.engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE file_fetch_jobs SET status='failed', error=:err WHERE job_id=:job_id"
+            ), {"err": f"Package build failed: {e}", "job_id": job_id})
+        raise HTTPException(status_code=500, detail=f"Package build failed: {e}")
+
+    with db.engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE file_fetch_jobs SET status='staged' WHERE job_id=:job_id"
+        ), {"job_id": job_id})
+
+    returncode, stdout, stderr = await vr_remote.push_and_trigger_package(
+        ip, req.username, req.password, req.domain, zip_path,
+        remote_dir=validate_remote_dir(req.remote_dir), transport=req.transport,
+    )
+
+    if returncode != 0:
+        err_detail = (stderr or "Remote trigger failed")[:300]
+        with db.engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE file_fetch_jobs SET status='failed', error=:err, completed_at=NOW() WHERE job_id=:job_id"
+            ), {"err": err_detail, "job_id": job_id})
+        raise HTTPException(status_code=502, detail=f"Fetch trigger failed: {err_detail}")
+
+    with db.engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE file_fetch_jobs SET status='triggered' WHERE job_id=:job_id"
+        ), {"job_id": job_id})
+
+    return {"job_id": job_id, "status": "triggered"}
+
+
+@router.get("/fetch-file/{job_id}")
+async def get_fetch_file_status(job_id: str, current_user: dict = Depends(get_current_user)):
+    with db.engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT ffj.job_id, ffj.asset_id, ffj.file_path, ffj.status, ffj.error,
+                   ffj.local_path, ffj.file_size, ffj.sha256, ffj.created_at, ffj.completed_at,
+                   a.case_name
+            FROM file_fetch_jobs ffj
+            JOIN assets a ON a.id = ffj.asset_id
+            WHERE ffj.job_id = :job_id
+        """), {"job_id": job_id}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Fetch job not found")
+    if not user_can_access_case(current_user, row["case_name"]):
+        raise HTTPException(status_code=403, detail="Not assigned to this investigation")
+
+    result = {k: v for k, v in dict(row).items() if k != "case_name"}
+    for k, v in result.items():
+        if hasattr(v, "isoformat"):
+            result[k] = v.isoformat()
+    return result
 
 
 @router.delete("/job/{job_id}")

@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 PACKAGE_TOKEN_TTL_HOURS = 24
 PS1_TEMPLATE_PATH        = Path(__file__).parent / "run_orca_collection.ps1"
 PS1_TRIAGE_TEMPLATE_PATH = Path(__file__).parent / "run_orca_triage.ps1"
+PS1_FILE_FETCH_TEMPLATE_PATH = Path(__file__).parent / "run_orca_file_fetch.ps1"
 
 # An analyst-supplied remote staging directory gets interpolated directly
 # into a generated PowerShell script (see generate_bootstrap_ps1) -- this is
@@ -631,3 +632,59 @@ def build_package(asset_id: int, user_id: int, orca_url: str, remote_dir: Option
         "asset_hostname": asset["hostname"],
         "case_name": asset["case_name"],
     }
+
+# ── Single-file fetch ──────────────────────────────────────────────────────────
+
+def build_file_fetch_package(asset_id: int, orca_url: str, job_id: str, fetch_token: str,
+                              file_path: str, max_bytes: int = 100 * 1024 * 1024) -> str:
+    """
+    Build a one-off ZIP that fetches exactly one known file's bytes from the
+    target and reports them back, then self-deletes. Deliberately not built
+    from get_asset_techniques()/ref_artifact_library like the other package
+    builders -- there's nothing to look up, the file path is chosen at
+    click-time in the MFT file browser, not a stored technique definition.
+
+    Reuses the same push-delivery staging/trigger machinery as collection
+    packages (vr_remote._smb_stage_package / push_and_trigger_package)
+    unchanged: both just need a zip containing a run_orca_*.ps1 launcher,
+    which is exactly what this is. No cert-bypass block needed -- push
+    delivery's launcher already imports the real ORCA cert before this
+    script ever runs.
+
+    Returns the built zip's path.
+    """
+    asset = get_asset_info(asset_id)
+    if not asset:
+        raise ValueError(f"Asset {asset_id} not found")
+
+    vr_src = Path(cfg.VR_EXE_WINDOWS)
+    if not vr_src.exists():
+        raise ValueError(f"velociraptor.exe not found at {cfg.VR_EXE_WINDOWS} — cannot build package")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pkg_dir = Path(tmpdir) / f"orca_fetch_{job_id[:8]}"
+        pkg_dir.mkdir()
+        shutil.copy2(vr_src, pkg_dir / "velociraptor.exe")
+
+        ps1_template = PS1_FILE_FETCH_TEMPLATE_PATH.read_text(encoding="utf-8")
+        ps1_filled = (
+            ps1_template
+            .replace("{{ORCA_URL}}", orca_url)
+            .replace("{{JOB_ID}}", job_id)
+            .replace("{{FETCH_TOKEN}}", fetch_token)
+            .replace("{{FILE_PATH}}", file_path.replace("'", "''"))
+            .replace("{{MAX_BYTES}}", str(int(max_bytes)))
+        )
+        (pkg_dir / "run_orca_file_fetch.ps1").write_text(ps1_filled, encoding="utf-8")
+
+        packages_root = Path(cfg.DATA_ROOT) / "packages"
+        packages_root.mkdir(parents=True, exist_ok=True)
+        zip_path = packages_root / f"orca_fetch_{job_id[:8]}.zip"
+
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for file in pkg_dir.rglob("*"):
+                if file.is_file():
+                    zf.write(file, file.relative_to(pkg_dir))
+
+    logger.info("File-fetch package built: job=%s asset=%s path=%s", job_id[:8], asset_id, file_path)
+    return str(zip_path)

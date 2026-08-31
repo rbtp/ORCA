@@ -37,6 +37,8 @@ export default function CaseDetail({
   const [editingConfig, setEditingConfig]   = useState(null);
   const [configBuffer, setConfigBuffer]     = useState('');
   const [completion, setCompletion]         = useState(null);
+  const [flaggedFiles, setFlaggedFiles]     = useState(null);
+  const [flaggedFilesOpen, setFlaggedFilesOpen] = useState(true);
 
   const [investigatingAssetId, setInvestigatingAssetId] = useState(null);
   const [isEvidenceOpen, setIsEvidenceOpen]             = useState(false);
@@ -242,6 +244,20 @@ export default function CaseDetail({
   // own actions), so re-pull the aggregate whenever it does instead of
   // requiring a manual page reload to see the overview catch up.
   useEffect(() => { loadCompletion(); }, [collab.techniqueStatuses]);
+
+  const loadFlaggedFiles = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/cases/${encodeURIComponent(caseName)}/flagged-files`, { credentials: 'include', headers: getAuthHeaders() });
+      if (res.ok) setFlaggedFiles(await res.json());
+    } catch {}
+  };
+
+  // One-shot on case load -- the VT worker runs on its own background
+  // schedule (minutes to hours between lookups by design, to respect VT's
+  // rate limit), so unlike completion there's no per-action event to hook a
+  // live refresh off; a manual page reload is the reasonable way to pick up
+  // newly-arrived verdicts, not worth polling for.
+  useEffect(() => { loadFlaggedFiles(); }, [caseName]);
 
   useEffect(() => {
     fetch(`${import.meta.env.VITE_API_URL}/api/agent/list`, { credentials: 'include', headers: getAuthHeaders() })
@@ -743,6 +759,34 @@ export default function CaseDetail({
           </div>
         )}
       </div>
+
+      {flaggedFiles?.count > 0 && (
+        <div style={{ marginBottom: '20px', border: '1px solid #ff4141', background: 'rgba(255,65,65,0.04)' }}>
+          <div onClick={() => setFlaggedFilesOpen(p => !p)} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', cursor: 'pointer', userSelect: 'none' }}>
+            <span style={{ color: '#ff4141', fontSize: 10, letterSpacing: 2, fontWeight: 'bold' }}>
+              ⚠ {flaggedFiles.count} FILE{flaggedFiles.count !== 1 ? 'S' : ''} FLAGGED BY VIRUSTOTAL
+            </span>
+            <span style={{ color: '#ff4141', fontSize: 11 }}>{flaggedFilesOpen ? '▲' : '▼'}</span>
+          </div>
+          {flaggedFilesOpen && (
+            <div style={{ borderTop: '1px solid #331010' }}>
+              {flaggedFiles.files.map((f, i) => (
+                <div key={i} style={{ display: 'flex', gap: 14, alignItems: 'center', padding: '7px 16px', borderBottom: i < flaggedFiles.files.length - 1 ? '1px solid #1a0a0a' : 'none', fontSize: 10, fontFamily: 'monospace' }}>
+                  <span style={{ color: '#ff4141', fontWeight: 'bold', minWidth: 68 }}>{f.malicious}/{f.total}</span>
+                  <span style={{ color: '#aaa', minWidth: 120, flexShrink: 0 }}>{f.hostname}</span>
+                  <span style={{ color: '#eee', flex: 1, wordBreak: 'break-all' }}>{f.file}</span>
+                  <span style={{
+                    color: f.confidence === 'path' ? '#ffaa00' : '#666', fontSize: 9, flexShrink: 0,
+                    border: `1px solid ${f.confidence === 'path' ? '#ffaa00' : '#333'}`, padding: '1px 5px',
+                  }} title={f.confidence === 'path' ? 'Matched by exact path' : 'Matched by filename only (Amcache does not record full paths) -- unconfirmed for this specific file'}>
+                    {f.confidence === 'path' ? 'PATH' : 'NAME~'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: '30px', marginBottom: '30px', borderBottom: '1px solid #222' }}>
         {['OVERVIEW', 'ASSETS', 'NETWORK_MAP'].map(tab => (

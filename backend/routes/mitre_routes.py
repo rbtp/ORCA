@@ -12,6 +12,7 @@ import logging
 from auth_utils import get_current_user, require_admin
 from config import cfg
 import vr_remote
+from package_builder import _ALWAYS_INCLUDED_TCODES
 
 router = APIRouter(prefix="/api/mitre")
 
@@ -517,18 +518,19 @@ def get_all_techniques(current_user: dict = Depends(get_current_user)):
         # after creation, without listing every real technique's library row
         # a second time.
         results = session.execute(text("""
-            SELECT t_code, name AS technique_name, FALSE AS is_custom
+            SELECT t_code, name AS technique_name, FALSE AS is_custom, FALSE AS is_deletable
             FROM public.mitre_techniques
             WHERE NOT COALESCE(is_deprecated, FALSE)
               AND NOT COALESCE(is_revoked, FALSE)
             UNION ALL
-            SELECT ral.t_code, COALESCE(ral.name, ral.t_code) AS technique_name, TRUE AS is_custom
+            SELECT ral.t_code, COALESCE(ral.name, ral.t_code) AS technique_name, TRUE AS is_custom,
+                   NOT (ral.t_code = ANY(:builtin_codes)) AS is_deletable
             FROM public.ref_artifact_library ral
             WHERE NOT EXISTS (
                 SELECT 1 FROM public.mitre_techniques mt WHERE mt.t_code = ral.t_code
             )
             ORDER BY t_code ASC
-        """)).mappings().all()
+        """), {"builtin_codes": _ALWAYS_INCLUDED_TCODES}).mappings().all()
         return [dict(r) for r in results]
     except Exception as _e:
         logging.error(f"[mitre_routes] {_e}")
@@ -1466,6 +1468,42 @@ async def update_artifact_library(t_code: str, data: dict = Body(...), current_u
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
+
+@router.delete("/library/{t_code}")
+async def delete_artifact_library(t_code: str, current_user: dict = Depends(require_admin)):
+    session = db.get_session()
+    try:
+        # Only ever deletes a genuinely custom technique -- MFT/AMCACHE-style
+        # utility codes and anything an admin created via the Artifact
+        # Library Editor's create-new mode. A real ATT&CK T-code's row here
+        # is just its collection logic, not the technique itself (that's
+        # mitre_techniques, untouched by this table), so deleting it would
+        # silently strip a cataloged technique's VQL/YAML rather than remove
+        # something the user actually created -- refused server-side, not
+        # just hidden in the UI, since this endpoint is reachable directly.
+        is_real_technique = session.execute(text("""
+            SELECT 1 FROM public.mitre_techniques WHERE t_code = :t
+        """), {"t": t_code}).first()
+        if is_real_technique:
+            raise HTTPException(status_code=403, detail="Cannot delete a cataloged ATT&CK technique's library entry")
+        if t_code in _ALWAYS_INCLUDED_TCODES:
+            raise HTTPException(status_code=403, detail="Cannot delete a built-in utility technique (MFT/AMCACHE/SUSPICIOUS_LOCATIONS_HASH)")
+
+        result = session.execute(text("""
+            DELETE FROM public.ref_artifact_library WHERE t_code = :t
+        """), {"t": t_code})
+        session.commit()
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Technique not found")
+        return {"status": "DELETED"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
 
 @router.post("/library/test")
 async def test_vql_artifact(request: VQLTestRequest, current_user: dict = Depends(require_admin)):
@@ -2960,6 +2998,53 @@ async def get_case_completion(case_name: str, current_user: dict = Depends(get_c
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
+
+
+@router.get("/cases/{case_name}/flagged-files")
+async def get_case_flagged_files(case_name: str, current_user: dict = Depends(get_current_user)):
+    """VT-flagged files across every asset in this case, in one place --
+    otherwise the only way to discover a hit is opening each asset's
+    Behavioral Analysis file browser individually. Reads straight from
+    AMCACHE/SUSPICIOUS_LOCATIONS_HASH evidence joined against vt_lookups;
+    same path-vs-name-only match-confidence distinction as the file browser
+    (SUSPICIOUS_LOCATIONS_HASH carries a real path, AMCACHE only a filename)."""
+    session = db.get_session()
+    try:
+        rows = session.execute(text("""
+            SELECT a.id AS asset_id, a.hostname, e.t_code, e.raw_data,
+                   vl.malicious_count, vl.total_engines, vl.checked_at
+            FROM public.assets a
+            JOIN public.evidence e ON e.asset_id = a.id
+                AND e.t_code IN ('AMCACHE', 'SUSPICIOUS_LOCATIONS_HASH')
+            JOIN public.vt_lookups vl ON (
+                (e.t_code = 'SUSPICIOUS_LOCATIONS_HASH' AND vl.hash = LOWER(e.raw_data->>'SHA256'))
+                OR (e.t_code = 'AMCACHE' AND vl.hash = LOWER(e.raw_data->>'SHA1'))
+            )
+            WHERE a.case_name = :name AND vl.status = 'found' AND vl.malicious_count > 0
+            ORDER BY vl.malicious_count DESC, a.hostname ASC
+        """), {"name": case_name}).mappings().all()
+
+        results = []
+        for r in rows:
+            doc = r["raw_data"]
+            doc = json.loads(doc) if isinstance(doc, str) else (doc or {})
+            if r["t_code"] == "SUSPICIOUS_LOCATIONS_HASH":
+                display = doc.get("FullPath") or "(unknown path)"
+                confidence = "path"
+            else:
+                display = doc.get("Name") or "(unknown filename)"
+                confidence = "name_only"
+            results.append({
+                "asset_id": r["asset_id"], "hostname": r["hostname"], "file": display,
+                "confidence": confidence, "malicious": r["malicious_count"], "total": r["total_engines"],
+                "checked_at": r["checked_at"].isoformat() if r["checked_at"] else None,
+            })
+        return {"case_name": case_name, "count": len(results), "files": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
 
 @router.patch("/cases/{case_name}/assets/{asset_id}/mode")
 async def set_asset_analysis_mode(
