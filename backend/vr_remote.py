@@ -560,11 +560,25 @@ async def _check_winrm_enabled(ip, username, password, domain, timeout=30):
     Scheduler -- deliberately not WinRM itself, since that's the thing being
     checked and may not be reachable yet. Writes the WinRM service's status
     to a file on the target via a scheduled task, then reads it back over
-    the same kind of SMB session already used to stage packages. Any
-    failure to determine state is treated as "not enabled" (fail closed --
-    worst case this redundantly re-enables something already on; it never
-    silently skips enabling something that's actually off, which would just
-    surface later as the real WinRM trigger failing).
+    the same kind of SMB session already used to stage packages.
+
+    Returns True/False/None -- None specifically means "couldn't determine",
+    not "confirmed disabled". This distinction matters: confirmed live
+    2026-09-02 that a real account can have full rights for a WinRM/WinRS
+    PowerShell-remoting session (a fundamentally different auth/session
+    model) while genuinely lacking rights for this raw SCM/Task-Scheduler
+    RPC call specifically (e.g. LocalAccountTokenFilterPolicy=0 filters the
+    network-logon token used by that class of API for any non-RID-500
+    local account, but doesn't touch WinRM's own session elevation). Product
+    of that: WinRM had been working fine on a target for this exact reason
+    before this check/enable feature existed. Collapsing that into a bare
+    False previously meant the caller would then also attempt to "enable"
+    (which fails identically), and -- the actually harmful part -- the
+    caller had no way to tell "genuinely was off, we turned it on" apart
+    from "have no idea, never touched it", so it would try to "restore" a
+    state it never actually changed, i.e. disable WinRM out from under an
+    environment that depends on it already being on. Callers must treat
+    None as "leave it alone entirely", not as False.
     """
     from impacket.smbconnection import SMBConnection
 
@@ -608,8 +622,8 @@ async def _check_winrm_enabled(ip, username, password, domain, timeout=30):
         status = await loop.run_in_executor(_WINRM_TOGGLE_EXECUTOR, _read)
         return status.lower() == "running"
     except Exception as e:
-        logger.warning("WinRM status check on %s failed, assuming not enabled: %s", ip, e)
-        return False
+        logger.warning("WinRM status check on %s failed -- can't determine state, leaving WinRM untouched: %s", ip, e)
+        return None
 
 
 async def _set_winrm_enabled(ip, username, password, domain, enable, timeout=30):
@@ -1061,22 +1075,44 @@ async def push_and_trigger_package(ip, username, password, domain, local_zip_pat
     or failure. This keeps a target's WinRM exposure limited to the moment
     it's actually needed instead of leaving a new attack surface open after
     the deploy that wasn't there before it.
+
+    This check/enable step needs SCM/Task-Scheduler RPC rights, which is a
+    genuinely different privilege requirement than the WinRM/WinRS session
+    the actual trigger uses -- confirmed live 2026-09-02 that an account can
+    have full rights for one and not the other (e.g.
+    LocalAccountTokenFilterPolicy=0 filters the network-logon token this
+    RPC call needs for any non-RID-500 local account, but doesn't touch
+    WinRM's own session elevation), and the target's registry isn't always
+    something that can be changed. So the tri-state from
+    _check_winrm_enabled matters: True/False only when genuinely
+    determined, None when the check itself couldn't run. None means "leave
+    WinRM alone entirely" -- skip the enable attempt (it would fail
+    identically) and, critically, never attempt the disable afterward
+    either, since we never confirmed we were the one who turned it on. The
+    bug this replaces: collapsing an inconclusive check into a bare False
+    meant the end-of-deploy cleanup would try to "restore" a state it never
+    actually changed -- silently disabling WinRM on a target that depended
+    on it already being on, the one target-visible side effect a check-only
+    failure must never cause.
     """
     t = (transport or "SMB_TASK").upper()
     if t == "WINRM":
-        winrm_was_enabled = True
-        try:
-            winrm_was_enabled = await _check_winrm_enabled(ip, username, password, domain)
-            if not winrm_was_enabled:
-                logger.info("WinRM not enabled on %s -- enabling temporarily for this deploy", ip)
+        we_enabled_it = False
+        winrm_state = await _check_winrm_enabled(ip, username, password, domain)
+        if winrm_state is False:
+            logger.info("WinRM not enabled on %s -- enabling temporarily for this deploy", ip)
+            try:
                 await _set_winrm_enabled(ip, username, password, domain, True)
-        except Exception as e:
-            logger.warning("WinRM enable-check on %s failed, proceeding with trigger anyway: %s", ip, e)
+                we_enabled_it = True
+            except Exception as e:
+                logger.warning("WinRM enable on %s failed, proceeding with trigger anyway: %s", ip, e)
+        elif winrm_state is None:
+            logger.warning("WinRM state on %s could not be determined -- leaving it untouched, proceeding with trigger", ip)
 
         try:
             return await _run_remote_command_winrm_push(ip, username, password, domain, local_zip_path, remote_dir, timeout)
         finally:
-            if not winrm_was_enabled:
+            if we_enabled_it:
                 try:
                     await _set_winrm_enabled(ip, username, password, domain, False)
                     logger.info("WinRM re-disabled on %s (was off before this deploy)", ip)
