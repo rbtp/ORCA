@@ -129,10 +129,19 @@ export default function InvestigationWorkspace({ activeNodes, activeLinks, updat
       const assetData = res.ok ? await res.json() : [];
       setSelectedCase({ ...caseObj, assets: assetData });
       setStatus("CONNECTED_STABLE");
-      // Resume polling for any assets that have active packages
-      assetData.forEach(a => {
-        if (pkgData[String(a.id)]) startProgressPolling(a.id);
-      });
+      // Check every asset's collection progress on the server, not just
+      // ones this browser session happens to already know about --
+      // gating on local pkgData meant an analyst who didn't personally
+      // trigger a deploy (a second analyst opening the same case, or the
+      // same analyst in a fresh tab/after a reload) never saw progress for
+      // a collection that's genuinely still running, even though the data
+      // was sitting right there in artifact_results the whole time.
+      // startProgressPolling does one fetch immediately and self-stops via
+      // fetchPkgProgress's own package_active/pending check, so this is
+      // just one lightweight GET per asset for anything not actually
+      // active -- not an unconditional 5s polling loop against every
+      // asset in the case forever.
+      assetData.forEach(a => startProgressPolling(a.id));
     } catch (err) {
       setSelectedCase({ ...caseObj, assets: [] });
       setStatus("CONNECTED_STABLE");

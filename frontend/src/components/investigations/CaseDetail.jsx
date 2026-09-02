@@ -383,11 +383,12 @@ export default function CaseDetail({
     }
   };
 
-  const [assetForm, setAssetForm] = useState({
+  const ASSET_FORM_DEFAULT = {
     hostname: '', ip: '', subnet: '255.255.255.0', gateway: '', mac: '',
     type: 'Workstation', os: 'Windows', version: '10', formFactor: 'Laptop',
     assetNotes: '', analysisMode: 'UNKNOWN',
-  });
+  };
+  const [assetForm, setAssetForm] = useState(ASSET_FORM_DEFAULT);
 
   const handleRegisterAsset = async () => {
     try {
@@ -408,6 +409,7 @@ export default function CaseDetail({
           }
         }
         setShowAssetModal(false);
+        setAssetForm(ASSET_FORM_DEFAULT);
         if (onRefresh) onRefresh();
       }
     } catch (err) { console.error(err); }
@@ -873,7 +875,7 @@ export default function CaseDetail({
           <div style={{ animation: 'fadeIn 0.4s ease' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '20px' }}>
               <h3 style={{ fontSize: '11px', color: '#888' }}>SYSTEM_INVENTORY</h3>
-              <button onClick={() => setShowAssetModal(true)} style={BtnStyle}>+ REGISTER_NEW_ASSET</button>
+              <button onClick={() => { setAssetForm(ASSET_FORM_DEFAULT); setShowAssetModal(true); }} style={BtnStyle}>+ REGISTER_NEW_ASSET</button>
             </div>
 
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11px' }}>

@@ -18,10 +18,24 @@ from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator
 
+from concurrent.futures import ThreadPoolExecutor
+
 import evidence_normalizer
 from config import cfg
 
 logger = logging.getLogger(__name__)
+
+# Dedicated pool for the WinRM check/enable/disable helpers (_smb_run_and_wait
+# and callers) -- confirmed live 2026-09-02 that sharing the default executor
+# (loop.run_in_executor(None, ...)) means these compete for threads with
+# whatever else the app is doing concurrently. During a real deploy where the
+# same collection's own MFT ingest (a ~1.1GB upload) was saturating the
+# default pool, the post-trigger WinRM-disable call got queued behind it and
+# didn't actually run for ~14 minutes -- functionally correct (state was
+# still restored) but far slower than the few seconds this should take, and
+# indistinguishable from "stuck" while waiting. A small dedicated pool keeps
+# these responsive regardless of what else is in flight.
+_WINRM_TOGGLE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="orca-winrm-toggle")
 
 REMOTE_TEMP       = r"C:\Windows\Temp\orca_vr"
 REMOTE_TEMP_POSIX = "/tmp/orca_vr"  # nosec B108 — path on the REMOTE investigation target, not the local server
@@ -425,6 +439,202 @@ def _scmr_run_bat(ip, username, password, domain, bat_name):
         dce.disconnect()
 
 
+async def _smb_run_and_wait(ip, username, password, domain, command, timeout=60):
+    """
+    Runs `command` via a real scheduled task (tsch RPC) and WAITS for it to
+    finish (polling hSchRpcGetLastRunInfo, same idiom as _collect_smb_task's
+    nested run_task), unlike _run_remote_command_smb_task/_scmr_run_bat
+    (used for the actual collection trigger) which are deliberately
+    fire-and-forget. This one needs a synchronous result -- e.g. "did the
+    WinRM toggle actually finish" -- before the caller proceeds, not just a
+    "launched something" acknowledgment.
+
+    Runs at Task Scheduler Priority 1 (HIGH_PRIORITY_CLASS) -- confirmed
+    live 2026-09-02 that the WinRM enable/disable calls this backs could
+    take several minutes when a large concurrent technique (MFT) was
+    saturating the same target machine, and the original Priority 7 copied
+    from impacket's atexec.py example was the opposite of helpful: per the
+    Task Scheduler schema, 0=Realtime, 1=High, 2-3=AboveNormal,
+    4-6=Normal, 7-8=BelowNormal, 9-10=Idle, so 7 was actively
+    *deprioritizing* this below the MFT worker's default Normal priority,
+    not just failing to prioritize it. 1 (not 0/Realtime, which can
+    destabilize the whole system) gives it CPU scheduling preference over
+    normal-priority work without that risk -- appropriate here since these
+    are brief, lightweight administrative commands, not sustained load.
+    """
+    from impacket.dcerpc.v5 import tsch, transport as dce_transport, rpcrt
+
+    def _xml_escape(data):
+        # Matches impacket's own examples/atexec.py exactly (its
+        # hSchRpcRegisterTask usage is the proven-correct reference this
+        # was rewritten against -- see the element-order note below).
+        replace_table = {"&": "&amp;", '"': "&quot;", "'": "&apos;", ">": "&gt;", "<": "&lt;"}
+        return ''.join(replace_table.get(c, c) for c in data)
+
+    task_name = f"\\orca_wr_{uuid.uuid4().hex[:8]}"
+    # Confirmed live 2026-09-02: an unescaped "&" in `command` (e.g. a
+    # "2>&1" redirection) produces "SCHED_E_UNEXPECTEDNODE - The task XML
+    # contains an unexpected node" from hSchRpcRegisterTask -- but escaping
+    # alone didn't fix it. The real bug was element ORDER: the task schema
+    # requires Triggers, Principals, Settings, Actions in that specific
+    # sequence, and this originally had Principals/Triggers/Actions/Settings
+    # (also used Actions' lowercase "context" attribute instead of the
+    # schema's "Context"). Rewritten to match impacket's own examples/
+    # atexec.py hSchRpcRegisterTask usage verbatim (the proven-correct
+    # reference for this exact RPC call), including its full <Settings>
+    # block and TASK_LOGON_NONE -- trimming those down again is what
+    # produced this bug in the first place.
+    command_xml = _xml_escape(f"/c {command}")
+    xml = f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers/>
+  <Principals>
+    <Principal id="LocalSystem">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT2M</ExecutionTimeLimit>
+    <Priority>1</Priority>
+  </Settings>
+  <Actions Context="LocalSystem">
+    <Exec>
+      <Command>cmd.exe</Command>
+      <Arguments>{command_xml}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+    def _run():
+        string_binding = f"ncacn_np:{ip}[\\pipe\\atsvc]"
+        rpctransport = dce_transport.DCERPCTransportFactory(string_binding)
+        rpctransport.set_credentials(username, password, domain or "", "", "", None)
+        dce = rpctransport.get_dce_rpc()
+        dce.set_credentials(*rpctransport.get_credentials())
+        dce.set_auth_type(rpcrt.RPC_C_AUTHN_WINNT)
+        dce.set_auth_level(rpcrt.RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+        dce.connect()
+        dce.bind(tsch.MSRPC_UUID_TSCHS)
+        try:
+            tsch.hSchRpcRegisterTask(dce, task_name, xml, tsch.TASK_CREATE, tsch.NULL, tsch.TASK_LOGON_NONE)
+            tsch.hSchRpcRun(dce, task_name)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                time.sleep(1)
+                try:
+                    info = tsch.hSchRpcGetLastRunInfo(dce, task_name)
+                    if info["pLastRunInfo"]["hrLastRunResult"] != 0x00041301:
+                        break
+                except Exception:
+                    break
+        finally:
+            try:
+                tsch.hSchRpcDelete(dce, task_name)
+            except Exception:
+                pass
+            dce.disconnect()
+
+    loop = asyncio.get_event_loop()
+    await asyncio.wait_for(loop.run_in_executor(_WINRM_TOGGLE_EXECUTOR, _run), timeout=timeout + 10)
+
+
+async def _check_winrm_enabled(ip, username, password, domain, timeout=30):
+    """
+    Checks whether WinRM is enabled on the target using only SMB + Task
+    Scheduler -- deliberately not WinRM itself, since that's the thing being
+    checked and may not be reachable yet. Writes the WinRM service's status
+    to a file on the target via a scheduled task, then reads it back over
+    the same kind of SMB session already used to stage packages. Any
+    failure to determine state is treated as "not enabled" (fail closed --
+    worst case this redundantly re-enables something already on; it never
+    silently skips enabling something that's actually off, which would just
+    surface later as the real WinRM trigger failing).
+    """
+    from impacket.smbconnection import SMBConnection
+
+    marker = f"orca_winrm_chk_{uuid.uuid4().hex[:8]}.txt"
+    remote_rel = f"Temp\\{marker}"
+    cmd = (
+        'powershell -NoProfile -Command '
+        '"try { (Get-Service WinRM -ErrorAction Stop).Status.ToString() } catch { \'NotFound\' }" '
+        f'> "C:\\Windows\\{remote_rel}" 2>&1'
+    )
+
+    loop = asyncio.get_event_loop()
+    try:
+        await _smb_run_and_wait(ip, username, password, domain, cmd, timeout=timeout)
+
+        def _read():
+            # hSchRpcGetLastRunInfo reporting the task as no longer running
+            # doesn't guarantee cmd.exe's redirected output handle on
+            # `remote_rel` is closed yet -- confirmed live: an immediate
+            # getFile can hit STATUS_SHARING_VIOLATION even after the wait
+            # loop above already returned. A short retry clears it.
+            last_err = None
+            for _ in range(6):
+                buf = io.BytesIO()
+                smb = SMBConnection(ip, ip)
+                smb.login(username, password, domain or "")
+                try:
+                    smb.getFile("ADMIN$", remote_rel, buf.write)
+                    try:
+                        smb.deleteFile("ADMIN$", remote_rel)
+                    except Exception:
+                        pass
+                    smb.logoff()
+                    return buf.getvalue().decode(errors="replace").strip()
+                except Exception as e:
+                    last_err = e
+                    smb.logoff()
+                    time.sleep(1)
+            raise last_err
+
+        status = await loop.run_in_executor(_WINRM_TOGGLE_EXECUTOR, _read)
+        return status.lower() == "running"
+    except Exception as e:
+        logger.warning("WinRM status check on %s failed, assuming not enabled: %s", ip, e)
+        return False
+
+
+async def _set_winrm_enabled(ip, username, password, domain, enable, timeout=30):
+    """
+    Enables or disables WinRM on the target over SMB + Task Scheduler.
+    Enabling runs `winrm quickconfig -quiet` (starts the service, sets it to
+    auto-start, creates the default HTTP listener, opens the firewall
+    rule). Disabling stops the service and sets its startup type back to
+    Disabled -- that alone closes port 5985 regardless of whatever
+    listener/firewall state quickconfig left behind, which is the part that
+    actually matters for genuinely re-establishing "WinRM is not reachable"
+    rather than meticulously reversing every individual side effect
+    quickconfig made.
+    """
+    if enable:
+        cmd = 'powershell -NoProfile -Command "winrm quickconfig -quiet"'
+    else:
+        cmd = (
+            'powershell -NoProfile -Command '
+            '"Stop-Service WinRM -Force -ErrorAction SilentlyContinue; '
+            'Set-Service WinRM -StartupType Disabled -ErrorAction SilentlyContinue"'
+        )
+    await _smb_run_and_wait(ip, username, password, domain, cmd, timeout=timeout)
+
+
 async def _run_remote_command_smb_task(ip, username, password, domain, command, timeout=60):
     """
     Trigger a Windows command line on a remote host via SMB + Task Scheduler
@@ -776,8 +986,15 @@ async def _run_remote_command_winrm_push(ip, username, password, domain, local_z
     )
 
     try:
+        # Dedicated executor, not the shared default pool -- confirmed live
+        # 2026-09-02 that this trigger call getting queued behind a
+        # concurrent technique's ingest traffic (e.g. a large MFT upload
+        # from this same deploy) is exactly what made the WinRM
+        # enable/disable cycle in push_and_trigger_package appear to hang
+        # for minutes: the disable in that function's `finally` can't run
+        # until this call returns.
         session = await loop.run_in_executor(
-            None,
+            _WINRM_TOGGLE_EXECUTOR,
             lambda: winrm.Session(
                 f"http://{ip}:5985/wsman",
                 auth=(auth_user, password),
@@ -787,7 +1004,7 @@ async def _run_remote_command_winrm_push(ip, username, password, domain, local_z
             ),
         )
         result = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: session.run_ps(launcher)),
+            loop.run_in_executor(_WINRM_TOGGLE_EXECUTOR, lambda: session.run_ps(launcher)),
             timeout=max(timeout, early_wait + 15),
         )
         raw_out = result.std_out.decode(errors="replace") if isinstance(result.std_out, bytes) else str(result.std_out or "")
@@ -832,10 +1049,39 @@ async def push_and_trigger_package(ip, username, password, domain, local_zip_pat
     - "WINRM": staged over SMB (still needs port 445 for that part — see
       _run_remote_command_winrm_push), triggered via WinRM instead — no SCM
       service registration.
+
+    For "WINRM" specifically: the trigger only needs WinRM up for the few
+    seconds it takes to open one session and issue the Start-Process launch
+    command (see _run_remote_command_winrm_push) -- the actual collection
+    runs independently afterward, talking to ORCA over HTTPS, not WinRM. So
+    rather than requiring the operator to have pre-enabled WinRM on every
+    target, check its state first (over SMB, not WinRM, since it may not be
+    up yet) and enable it just for that window if it was off, then put it
+    back exactly how it was found once the trigger call returns -- success
+    or failure. This keeps a target's WinRM exposure limited to the moment
+    it's actually needed instead of leaving a new attack surface open after
+    the deploy that wasn't there before it.
     """
     t = (transport or "SMB_TASK").upper()
     if t == "WINRM":
-        return await _run_remote_command_winrm_push(ip, username, password, domain, local_zip_path, remote_dir, timeout)
+        winrm_was_enabled = True
+        try:
+            winrm_was_enabled = await _check_winrm_enabled(ip, username, password, domain)
+            if not winrm_was_enabled:
+                logger.info("WinRM not enabled on %s -- enabling temporarily for this deploy", ip)
+                await _set_winrm_enabled(ip, username, password, domain, True)
+        except Exception as e:
+            logger.warning("WinRM enable-check on %s failed, proceeding with trigger anyway: %s", ip, e)
+
+        try:
+            return await _run_remote_command_winrm_push(ip, username, password, domain, local_zip_path, remote_dir, timeout)
+        finally:
+            if not winrm_was_enabled:
+                try:
+                    await _set_winrm_enabled(ip, username, password, domain, False)
+                    logger.info("WinRM re-disabled on %s (was off before this deploy)", ip)
+                except Exception as e:
+                    logger.warning("Failed to re-disable WinRM on %s after deploy: %s", ip, e)
     if t == "SMB_TASK":
         return await _run_remote_command_smb_push(ip, username, password, domain, local_zip_path, remote_dir, timeout)
     return -1, "", f"SMB_PUSH_UNSUPPORTED_TRANSPORT: {transport}"

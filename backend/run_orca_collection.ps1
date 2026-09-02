@@ -11,6 +11,42 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+# Runs this whole process in Windows' "background processing mode" --
+# lowers CPU, I/O, AND memory scheduling priority together (not just CPU
+# priority, which alone does little against disk-bound work like an MFT
+# read), the same mechanism Windows Search indexing and Defender scans use
+# specifically so a background scan doesn't make the machine feel sluggish
+# to whoever's actually sitting at it. This collection can run on a real,
+# in-use workstation and legitimately hammer CPU/disk for several minutes
+# (a full MFT read alone measured ~5 min of heavy I/O on a live dev
+# machine) -- without this, that's directly competing with the end user's
+# own foreground work the whole time. Every child process this script
+# spawns (velociraptor.exe, and each parallel worker's own re-invocation of
+# this same script) inherits the reduced priority class by default since
+# nothing here overrides it on the CreateProcess call -- each worker also
+# runs this same block independently below (this executes on every
+# invocation, top-level orchestrator or -WorkerBatchFile worker alike), so
+# that inheritance isn't the only thing relied on. Best-effort: failure
+# here is never fatal to the collection, worst case it just runs at
+# ordinary priority.
+try {
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class OrcaPriority {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetPriorityClass(IntPtr hProcess, uint dwPriorityClass);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetCurrentProcess();
+    public const uint PROCESS_MODE_BACKGROUND_BEGIN = 0x00100000;
+}
+"@ -ErrorAction Stop
+    [OrcaPriority]::SetPriorityClass([OrcaPriority]::GetCurrentProcess(), [OrcaPriority]::PROCESS_MODE_BACKGROUND_BEGIN) | Out-Null
+} catch {
+    # Non-fatal -- collection proceeds at normal priority if this fails
+    # (e.g. Add-Type unavailable under constrained language mode).
+}
+
 {{CERT_BYPASS_BLOCK}}
 [System.Net.ServicePointManager]::SecurityProtocol  = [System.Net.SecurityProtocolType]::Tls12
 
@@ -44,23 +80,75 @@ function Write-Log {
 }
 
 function Invoke-IngestPost {
-    param([string]$TCode, [string]$JsonlContent, [string]$Mode)
+    # Takes a FILE PATH, not content, and streams it via raw HttpWebRequest
+    # (AllowWriteStreamBuffering = $false, SendChunked = $true) rather than
+    # Invoke-RestMethod/-WebRequest. History, confirmed live 2026-09-01
+    # against a real ~1.1GB/1.3M-row MFT payload:
+    #   1. Get-Content -Raw silently truncated/emptied the content on a file
+    #      this large -- the technique reported COMPLETE with zero real data
+    #      ever received, no error anywhere.
+    #   2. [System.IO.File]::ReadAllText() throws OutOfMemoryException
+    #      outright -- Windows PowerShell 5.1 runs on .NET Framework, where a
+    #      single String object is capped well under 2GB (UTF-16 roughly
+    #      doubles the UTF-8 byte count, so a 1.07GB file becomes 2GB+ as a
+    #      String). Neither can read a file this size into memory at all,
+    #      regardless of available system RAM.
+    #   3. Invoke-RestMethod -InFile (which is supposed to stream) still
+    #      failed on the real 1.1GB payload -- this is a documented upstream
+    #      Windows PowerShell 5.1 limitation (PowerShell/PowerShell#6199,
+    #      #4129: Invoke-RestMethod/-WebRequest on .NET Framework buffer
+    #      large request bodies internally and can exhaust memory or stall
+    #      on multi-GB transfers), not something fixable by tuning -InFile.
+    # Raw HttpWebRequest with AllowWriteStreamBuffering disabled genuinely
+    # streams the file a buffer at a time via FileStream.CopyTo, sidestepping
+    # all three -- verified live moving the real 1.1GB/1.3M-row MFT payload
+    # end to end (495s, full 1,306,709-row ingest, no fallback needed), and
+    # verified separately that it validates the real imported ORCA cert with
+    # no bypass required, same as the rest of this script.
+    # Retries once on failure (transient network blips are real on transfers
+    # this size) with a generous timeout.
+    param([string]$TCode, [string]$FilePath, [string]$Mode, [int]$MaxAttempts = 2)
     $uri = "$IngestBase/$TCode"
-    $headers = @{
-        "X-ORCA-Token" = $TOKEN
-        "Content-Type" = "application/x-ndjson"
-        "X-Asset-Id"   = $ASSET_ID
-        "X-Case-Name"  = $CASE_NAME
-        "X-Hostname"   = $HOSTNAME_
-        "X-Mode"       = $Mode
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            $req = [System.Net.HttpWebRequest]::Create($uri)
+            $req.Method = "POST"
+            $req.AllowWriteStreamBuffering = $false
+            $req.SendChunked = $true
+            $req.Timeout = 1800000
+            $req.ReadWriteTimeout = 1800000
+            $req.ContentType = "application/x-ndjson"
+            $req.Headers.Add("X-ORCA-Token", $TOKEN)
+            $req.Headers.Add("X-Asset-Id", $ASSET_ID)
+            $req.Headers.Add("X-Case-Name", $CASE_NAME)
+            $req.Headers.Add("X-Hostname", $HOSTNAME_)
+            $req.Headers.Add("X-Mode", $Mode)
+
+            $reqStream = $req.GetRequestStream()
+            try {
+                if ($FilePath -and (Test-Path $FilePath)) {
+                    $fileStream = [System.IO.File]::OpenRead($FilePath)
+                    try { $fileStream.CopyTo($reqStream) } finally { $fileStream.Close() }
+                }
+            } finally {
+                $reqStream.Close()
+            }
+
+            $resp = $req.GetResponse()
+            try {
+                $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+                $body = $reader.ReadToEnd()
+                $reader.Close()
+                return $body | ConvertFrom-Json
+            } finally {
+                $resp.Close()
+            }
+        } catch {
+            Write-Log "POST failed for $TCode (attempt $attempt/$MaxAttempts): $_" "ERROR"
+            if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds 3 }
+        }
     }
-    try {
-        $resp = Invoke-RestMethod -Uri $uri -Method POST -Headers $headers -Body $JsonlContent -TimeoutSec 120
-        return $resp
-    } catch {
-        Write-Log "POST failed for $TCode : $_" "ERROR"
-        return $null
-    }
+    return $null
 }
 
 function Invoke-HeartbeatPost {
@@ -78,6 +166,55 @@ function Invoke-HeartbeatPost {
     }
 }
 
+function ConvertTo-ArgString {
+    # Windows PowerShell 5.1's Start-Process -ArgumentList does NOT do
+    # per-element quoting the way the `&` call operator does (that's a
+    # PowerShell 7+/.NET Core-only ProcessStartInfo.ArgumentList behavior)
+    # -- it just joins the array with spaces into one command-line string.
+    # An unquoted VQL string (which always contains spaces) would get
+    # split into multiple separate argv entries and never reach
+    # velociraptor.exe intact. Confirmed live 2026-09-02 this quoting
+    # correctly round-trips VQL containing embedded single AND double
+    # quotes.
+    param([string[]]$Arguments)
+    ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') {
+            '"' + ($_ -replace '"', '\"') + '"'
+        } else {
+            $_
+        }
+    }) -join ' '
+}
+
+function Invoke-VRThrottled {
+    # Runs velociraptor.exe via Start-Process (not `&`) specifically to get
+    # a process handle to throttle -- confirmed live 2026-09-02 that a
+    # child process does NOT inherit this script's own background-mode
+    # priority (PROCESS_MODE_BACKGROUND_BEGIN, set above, only applies to
+    # the calling process itself). This is the actual disk-I/O-heavy part
+    # of a collection (a full MFT read alone measured ~5 min of sustained
+    # disk activity), so it's the single most important process to keep
+    # from competing with whoever's actually using the machine.
+    param([string[]]$Arguments, [string]$OutputPath)
+
+    $stdOut = "$OutputPath.raw"
+    $stdErr = "$OutputPath.err"
+    $argString = ConvertTo-ArgString $Arguments
+    $proc = Start-Process -FilePath $VRExe -ArgumentList $argString -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput $stdOut -RedirectStandardError $stdErr
+    try {
+        $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Idle
+    } catch {
+        # Non-fatal -- worst case velociraptor.exe runs at normal priority.
+    }
+    $proc.WaitForExit()
+
+    if (Test-Path $stdOut) {
+        Get-Content $stdOut | Where-Object { $_ -match '^\{' } | Set-Content -Path $OutputPath -Encoding UTF8
+    }
+    Remove-Item $stdOut, $stdErr -Force -ErrorAction SilentlyContinue
+}
+
 function Run-Technique {
     param([string]$TCode, [string]$VqlFile, [string]$YamlFile)
 
@@ -89,18 +226,23 @@ function Run-Technique {
         Write-Log "[$TCode] Running surgical YAML"
         Invoke-HeartbeatPost $TCode "RUNNING" "surgical_yaml"
         try {
-            & $VRExe artifacts collect --definitions $YamlFile 2>$null |
-                Where-Object { $_ -match '^\{' } |
-                Set-Content -Path $tmpOutput -Encoding UTF8
+            Invoke-VRThrottled -Arguments @('artifacts', 'collect', '--definitions', $YamlFile) -OutputPath $tmpOutput
             $lineCount = 0
             if (Test-Path $tmpOutput) {
                 $lineCount = (Get-Content $tmpOutput | Measure-Object -Line).Lines
             }
             if ($lineCount -gt 0) {
                 Write-Log "[$TCode] YAML returned $lineCount rows"
-                $content = Get-Content $tmpOutput -Raw
-                Invoke-IngestPost $TCode $content "surgical_yaml"
-                Invoke-HeartbeatPost $TCode "COMPLETE" "$lineCount rows"
+                $postResult = Invoke-IngestPost $TCode $tmpOutput "surgical_yaml"
+                if ($postResult) {
+                    Invoke-HeartbeatPost $TCode "COMPLETE" "$lineCount rows"
+                } else {
+                    Write-Log "[$TCode] Found $lineCount rows but upload failed -- NOT reporting complete" "ERROR"
+                    Invoke-HeartbeatPost $TCode "UPLOAD_FAILED" "$lineCount rows found locally but upload failed"
+                }
+                # Either way we found real data -- don't cascade into the
+                # broader fallback query or the NO_ARTIFACTS branch, both of
+                # which are for genuinely empty results, not failed uploads.
                 $ran = $true
             } else {
                 Write-Log "[$TCode] YAML returned 0 rows, trying VQL" "WARN"
@@ -116,18 +258,20 @@ function Run-Technique {
         Invoke-HeartbeatPost $TCode "RUNNING" "custom_vql"
         try {
             $vqlContent = Get-Content $VqlFile -Raw
-            & $VRExe query --format jsonl $vqlContent 2>$null |
-                Where-Object { $_ -match '^\{' } |
-                Set-Content -Path $tmpOutput -Encoding UTF8
+            Invoke-VRThrottled -Arguments @('query', '--format', 'jsonl', $vqlContent) -OutputPath $tmpOutput
             $lineCount = 0
             if (Test-Path $tmpOutput) {
                 $lineCount = (Get-Content $tmpOutput | Measure-Object -Line).Lines
             }
             if ($lineCount -gt 0) {
                 Write-Log "[$TCode] VQL returned $lineCount rows"
-                $content = Get-Content $tmpOutput -Raw
-                Invoke-IngestPost $TCode $content "custom_vql"
-                Invoke-HeartbeatPost $TCode "COMPLETE" "$lineCount rows"
+                $postResult = Invoke-IngestPost $TCode $tmpOutput "custom_vql"
+                if ($postResult) {
+                    Invoke-HeartbeatPost $TCode "COMPLETE" "$lineCount rows"
+                } else {
+                    Write-Log "[$TCode] Found $lineCount rows but upload failed -- NOT reporting complete" "ERROR"
+                    Invoke-HeartbeatPost $TCode "UPLOAD_FAILED" "$lineCount rows found locally but upload failed"
+                }
                 $ran = $true
             } else {
                 Write-Log "[$TCode] VQL returned 0 rows, trying fallback" "WARN"
@@ -148,18 +292,20 @@ function Run-Technique {
             $vql   = Get-Content $VqlFile -Raw
             $fbVql = $vql -replace '(?s)WHERE\s+.+?(?=LIMIT|ORDER BY|$)', ''
             $fbVql = "$fbVql LIMIT 1000"
-            & $VRExe query --format jsonl $fbVql 2>$null |
-                Where-Object { $_ -match '^\{' } |
-                Set-Content -Path $tmpOutput -Encoding UTF8
+            Invoke-VRThrottled -Arguments @('query', '--format', 'jsonl', $fbVql) -OutputPath $tmpOutput
             $lineCount = 0
             if (Test-Path $tmpOutput) {
                 $lineCount = (Get-Content $tmpOutput | Measure-Object -Line).Lines
             }
             if ($lineCount -gt 0) {
                 Write-Log "[$TCode] Fallback returned $lineCount rows"
-                $content = Get-Content $tmpOutput -Raw
-                Invoke-IngestPost $TCode $content "fallback"
-                Invoke-HeartbeatPost $TCode "FALLBACK_COMPLETE" "$lineCount rows"
+                $postResult = Invoke-IngestPost $TCode $tmpOutput "fallback"
+                if ($postResult) {
+                    Invoke-HeartbeatPost $TCode "FALLBACK_COMPLETE" "$lineCount rows"
+                } else {
+                    Write-Log "[$TCode] Found $lineCount fallback rows but upload failed -- NOT reporting complete" "ERROR"
+                    Invoke-HeartbeatPost $TCode "UPLOAD_FAILED" "$lineCount rows found locally but upload failed"
+                }
                 $ran = $true
             }
         } catch {
@@ -190,6 +336,19 @@ if (-not $allTechFiles) {
     Write-Log "No technique files found in $TechDir - aborting" "ERROR"
     exit 1
 }
+
+# AMCACHE/MFT/SUSPICIOUS_LOCATIONS_HASH surface the hashes the background
+# VirusTotal worker looks up -- sorted first (instead of the plain
+# alphabetical order Get-ChildItem would otherwise give) so those hashes
+# reach ORCA and join the VT queue as early into the collection as
+# possible, giving the rate-limited (4/min) lookups the most possible time
+# to come back while the rest of the collection is still running. Filename
+# match is safe here since t_code_safe (package_builder.py) is these
+# codes verbatim -- none of the three contain a "." to be replaced.
+$PRIORITY_TCODES = @('AMCACHE', 'MFT', 'SUSPICIOUS_LOCATIONS_HASH')
+$allTechFiles = $allTechFiles | Sort-Object -Property `
+    @{ Expression = { if ($PRIORITY_TCODES -contains $_.BaseName) { $PRIORITY_TCODES.IndexOf($_.BaseName) } else { 99 } } }, `
+    Name
 
 # ── Worker mode: process just this batch, report back, exit -- the
 # orchestrator invocation below owns start/complete notification and

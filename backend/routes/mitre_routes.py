@@ -13,6 +13,7 @@ from auth_utils import get_current_user, require_admin
 from config import cfg
 import vr_remote
 from package_builder import _ALWAYS_INCLUDED_TCODES
+from evidence_normalizer import normalize_windows_path
 
 router = APIRouter(prefix="/api/mitre")
 
@@ -1280,7 +1281,13 @@ async def query_mft(
                 fp = doc.get('FullPath')
                 sha256 = doc.get('SHA256')
                 if fp and sha256:
-                    path_hashes[fp.lower()] = sha256
+                    # normalize_windows_path is a no-op on already-normalized
+                    # (post-fix) FullPath values, and fixes up pre-fix rows
+                    # ingested before evidence_normalizer.py started
+                    # normalizing SUSPICIOUS_LOCATIONS_HASH's FullPath --
+                    # without a backfill migration, existing evidence would
+                    # otherwise never match mft_entries.full_path.
+                    path_hashes[normalize_windows_path(fp).lower()] = sha256
             elif hr.t_code == 'AMCACHE':
                 nm = doc.get('Name')
                 sha1 = doc.get('SHA1')

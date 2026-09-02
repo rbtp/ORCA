@@ -9,6 +9,37 @@ import re as _re
 
 logger = logging.getLogger(__name__)
 
+
+def normalize_windows_path(p):
+    """
+    Canonicalize a Windows path to the drive-RELATIVE backslash form the
+    file browser expects (e.g. "Users\\Sentinel\\...", no drive letter).
+    Different Velociraptor artifacts return completely different raw
+    formats for what's conceptually the same path --
+    Artifact.Windows.NTFS.MFT()'s OSPath comes back as a raw NTFS device
+    path ("\\\\.\\C:\\Users\\..."), while glob()'s FullPath (used by
+    SUSPICIOUS_LOCATIONS_HASH) comes back with forward slashes
+    ("C:/Users/..."). Both need to collapse to the same format or two
+    things silently break: exact-path hash matching between MFT and
+    SUSPICIOUS_LOCATIONS_HASH entries (they'd just never match), and the
+    file browser's tree view -- FileBrowserModal's path_prefix='' means
+    "drive root" and stores child paths with no drive letter at all
+    (enterFolder never prepends one), matching the root-level query's
+    "no backslash in path" check. A path that still had "C:\" in it would
+    never satisfy that at any depth. Confirmed live 2026-09-01 against a
+    real MFT collection -- the browser showed "no evidence" even with
+    real rows in mft_entries because of exactly this mismatch.
+    """
+    if not p:
+        return p
+    p = p.replace('/', '\\')
+    if p.startswith('\\\\.\\') or p.startswith('\\\\?\\'):
+        p = p[4:]
+    if len(p) >= 2 and p[1] == ':':
+        p = p[2:]
+    return p.lstrip('\\')
+
+
 _TRIAGE_PATTERNS = [
     (_re.compile(r'Microsoft-Windows-Sysmon', _re.I),          'EVENT_LOGS_SYSMON'),
     (_re.compile(r'Security\.evtx',           _re.I),          'EVENT_LOGS_SECURITY'),
@@ -521,9 +552,13 @@ def normalize_and_ingest(file_path, asset_id, t_code, target_name_hint=None, is_
             file_count = 0
             meta_count = 0
             for row in raw_rows:
-                path = row.get('OSPath') or row.get('FullPath') or ''
+                path = normalize_windows_path(row.get('OSPath') or row.get('FullPath') or '')
                 name = row.get('FileName') or ''
-                is_meta = name.startswith('$') or (path.startswith('$') and '\\' not in path)
+                # name == '.' is the volume root's own self-referential MFT
+                # entry (raw OSPath "\\.\C:\.", normalizes to path="") --
+                # not a real browsable file/folder, and keeping it would
+                # sit at the tree's root next to the real top-level folders.
+                is_meta = name.startswith('$') or name == '.' or (path.startswith('$') and '\\' not in path)
                 if is_meta:
                     meta_count += 1
                     continue  # skip $MFT system entries — not useful for analysis
@@ -605,6 +640,12 @@ def normalize_and_ingest(file_path, asset_id, t_code, target_name_hint=None, is_
                     clean_item[k] = json.dumps(v)
                 else:
                     clean_item[k] = v
+
+            if t_code == 'SUSPICIOUS_LOCATIONS_HASH' and clean_item.get('FullPath'):
+                # Matches the drive-relative form mft_entries.full_path is
+                # normalized to (see normalize_windows_path) so the file
+                # browser's exact-path hash match actually finds hits.
+                clean_item['FullPath'] = normalize_windows_path(clean_item['FullPath'])
 
             if is_fallback:
                 clean_item["_orca_fallback"] = True
