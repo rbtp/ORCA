@@ -832,3 +832,36 @@ index=<your_index> "4624"
 | eval has_newlogon=if(match(_raw,"New Logon:"),1,0)
 | stats count, sum(has_type) AS with_logontype, sum(has_src) AS with_srcip,
         sum(has_newlogon) AS with_newlogon, max(len) AS max_len, avg(len) AS avg_len
+
+
+
+
+index=<your_index> ("4624" OR "4672")
+| rex field=_raw "(?<EventID>\b46(?:24|72)\b)"
+| where EventID="4624" OR EventID="4672"
+| rex field=_raw max_match=0 "Logon ID:\s+(?<lid_list>0x[0-9A-Fa-f]+)"
+| eval LogonId=mvindex(lid_list,-1)
+| where isnotnull(LogonId) AND NOT LogonId IN ("0x0","0x3e7","0x3e4","0x3e5")
+| rex field=_raw max_match=0 "Account Name:\s+(?<acct_list>[^\t\r\n]+?)\s*(?=\t|Account Domain:)"
+| eval TargetUser=mvindex(acct_list,-1)
+| rex field=_raw "Logon Type:\s+(?<LogonType>\d+)"
+| rex field=_raw "Source Network Address:\s+(?<SrcIp>[^\s\t]+)"
+| rex field=_raw "Workstation Name:\s+(?<Workstation>[^\s\t]*)"
+| eval is_logon=if(EventID="4624",1,0), is_priv=if(EventID="4672",1,0)
+| stats max(is_logon) AS has_logon, max(is_priv) AS has_priv,
+        min(_time) AS logon_time,
+        values(TargetUser) AS TargetUser,
+        values(LogonType) AS LogonType,
+        values(SrcIp) AS SrcIp,
+        values(Workstation) AS Workstation,
+        values(host) AS Computer
+  BY LogonId
+| where has_logon=1 AND has_priv=1
+| where NOT match(mvjoin(TargetUser,","),"\$") AND NOT TargetUser IN ("SYSTEM","-")
+| eval logon_desc=case(LogonType=="2","Interactive",LogonType=="3","Network",
+    LogonType=="4","Batch",LogonType=="5","Service",LogonType=="7","Unlock",
+    LogonType=="8","NetworkCleartext",LogonType=="9","NewCredentials",
+    LogonType=="10","RDP",LogonType=="11","CachedInteractive",1=1,LogonType)
+| eval _time=logon_time
+| table _time, TargetUser, Computer, logon_desc, SrcIp, Workstation, LogonId
+| sort - _time
