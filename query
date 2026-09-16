@@ -865,3 +865,12 @@ index=<your_index> ("4624" OR "4672")
 | eval _time=logon_time
 | table _time, TargetUser, Computer, logon_desc, SrcIp, Workstation, LogonId
 | sort - _time
+
+
+
+index=<your_index> "4672"
+| rex field=_raw max_match=0 "Logon ID:\s+(?<lid>0x[0-9A-Fa-f]+)"
+| eval LogonId=mvindex(lid,-1)
+| stats count BY LogonId
+| sort - count
+| head 20
