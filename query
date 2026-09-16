@@ -419,3 +419,382 @@ baseline hygiene in a way that deploying an agent sometimes is not.
 
 Until then: authentication rarity is your detection, the firewall gives you timing
 brackets, and 7045 is your execution proxy.
+
+
+# Windows Logon Analysis — JSON Import, Unknown Sourcetype
+
+## Step 0 — Discovery (run these first)
+
+With `monitor://` ingest and no sourcetype defined, Splunk guesses. Field names depend
+entirely on what produced the JSON — Winlogbeat, EvtxECmd, evtx_dump, Chainsaw, native
+Event Viewer export, and the Splunk TA all use different schemas for the same event.
+
+### 0a. What sourcetype did Splunk actually assign?
+
+```spl
+index=* earliest=-30d
+| stats count, values(source) AS files BY index, sourcetype
+| sort - count
+```
+
+### 0b. What do the fields look like?
+
+```spl
+index=<your_index> sourcetype=<found_above>
+| head 1
+| spath
+| transpose 100
+```
+
+`spath` forces JSON parsing even when auto-KV did not fire. If `transpose` shows dotted
+paths like `winlog.event_data.TargetUserName`, you have Winlogbeat. If you see
+`Event.EventData.TargetUserName`, it is evtx_dump. If `EventCode` and `Account_Name`,
+the Splunk TA schema. If `PayloadData1` through `PayloadData6`, that is EvtxECmd.
+
+### 0c. Verify `_time` is real
+
+**Check this before building any timeline.** If Splunk did not recognize a timestamp
+field in the JSON, it falls back to file modification time or index time — which makes
+every event appear to have happened when you copied the files in.
+
+```spl
+index=<your_index>
+| eval indexed=_indextime
+| eval drift=abs(_time - indexed)
+| stats count, min(_time) AS earliest, max(_time) AS latest, avg(drift) AS avg_drift_sec
+| convert ctime(earliest) ctime(latest)
+```
+
+If `earliest` and `latest` cluster within minutes of each other, or `avg_drift_sec` is
+near zero across events that should span weeks, `_time` is wrong. Fix by extracting the
+event's own timestamp:
+
+```spl
+| spath
+| eval evt_time=coalesce('winlog.event_time', 'Event.System.TimeCreated.#attributes.SystemTime',
+                         'TimeCreated', 'timestamp', '@timestamp', 'UtcTime', 'SystemTime')
+| eval _time=strptime(evt_time, "%Y-%m-%dT%H:%M:%S.%N%Z")
+```
+
+Long term, fix it properly in `props.conf` with `TIMESTAMP_FIELDS` and `TIME_FORMAT`
+and reindex. The `eval` above is a search-time bandage.
+
+---
+
+## Step 1 — Normalization block
+
+Paste this after every base search below. It coalesces across the common schemas so the
+rest of the queries work regardless of exporter.
+
+```spl
+| spath
+| eval EventID=coalesce(EventCode, EventID, 'winlog.event_id', 'Event.System.EventID', event_id, EventId)
+| eval TargetUser=coalesce(Account_Name, TargetUserName, 'winlog.event_data.TargetUserName',
+                           'Event.EventData.TargetUserName', target_user)
+| eval TargetDomain=coalesce(TargetDomainName, 'winlog.event_data.TargetDomainName',
+                             'Event.EventData.TargetDomainName')
+| eval SubjectUser=coalesce(SubjectUserName, 'winlog.event_data.SubjectUserName',
+                            'Event.EventData.SubjectUserName')
+| eval SrcIp=coalesce(Source_Network_Address, IpAddress, 'winlog.event_data.IpAddress',
+                      'Event.EventData.IpAddress', src_ip)
+| eval SrcPort=coalesce(IpPort, 'winlog.event_data.IpPort', 'Event.EventData.IpPort')
+| eval LogonType=coalesce(Logon_Type, LogonType, 'winlog.event_data.LogonType',
+                          'Event.EventData.LogonType')
+| eval Workstation=coalesce(WorkstationName, 'winlog.event_data.WorkstationName',
+                            'Event.EventData.WorkstationName')
+| eval LogonId=coalesce(TargetLogonId, 'winlog.event_data.TargetLogonId',
+                        'Event.EventData.TargetLogonId')
+| eval TargetSid=coalesce(TargetUserSid, 'winlog.event_data.TargetUserSid',
+                          'Event.EventData.TargetUserSid')
+| eval Privileges=coalesce(PrivilegeList, 'winlog.event_data.PrivilegeList',
+                           'Event.EventData.PrivilegeList')
+| eval SubStatus=coalesce(SubStatus, 'winlog.event_data.SubStatus', 'Event.EventData.SubStatus')
+| eval Computer=coalesce(ComputerName, Computer, host, 'winlog.computer_name',
+                         'Event.System.Computer')
+| eval AuthPackage=coalesce(AuthenticationPackageName, 'winlog.event_data.AuthenticationPackageName')
+| eval LogonProcess=coalesce(LogonProcessName, 'winlog.event_data.LogonProcessName')
+| eval SrcIp=if(SrcIp IN ("-","::1","127.0.0.1",""), "local", SrcIp)
+| eval logon_desc=case(
+    LogonType=="2","Interactive", LogonType=="3","Network", LogonType=="4","Batch",
+    LogonType=="5","Service", LogonType=="7","Unlock", LogonType=="8","NetworkCleartext",
+    LogonType=="9","NewCredentials", LogonType=="10","RDP", LogonType=="11","CachedInteractive",
+    LogonType=="12","CachedRemoteInteractive", LogonType=="13","CachedUnlock",
+    1=1,"unknown")
+```
+
+Delete the coalesce branches that do not apply once you know your schema — this block is
+expensive and most of it will be dead weight.
+
+---
+
+## Query 1 — Admin logons: who, where, when, from where
+
+**4672 is the reliable admin signal.** It fires immediately after 4624 when the session
+is granted sensitive privileges, and it shares a `LogonId` with its 4624. That beats
+guessing from account names, which misses renamed admin accounts and flags service
+accounts that merely have "admin" in the string.
+
+```spl
+index=<your_index> (EventCode=4624 OR EventCode=4672 OR EventID=4624 OR EventID=4672)
+<normalization block>
+| eval is_admin_event=if(EventID=="4672",1,0)
+| eventstats max(is_admin_event) AS admin_session BY LogonId, Computer
+| where EventID="4624" AND admin_session=1
+| where NOT TargetUser IN ("SYSTEM","LOCAL SERVICE","NETWORK SERVICE","ANONYMOUS LOGON")
+| where NOT match(TargetUser, "\$$")
+| table _time, TargetUser, TargetDomain, Computer, logon_desc, LogonType, SrcIp, SrcPort, Workstation, LogonProcess, AuthPackage, LogonId
+| sort - _time
+```
+
+The `\$$` filter drops machine accounts, which trigger 4672 constantly and are almost
+never what you want.
+
+### Secondary admin signals (use if 4672 is absent)
+
+```spl
+| eval admin_by_rid=if(match(TargetSid, "-500$") OR match(TargetSid, "-(512|519|518|516)$"),1,0)
+| eval admin_by_name=if(match(lower(TargetUser), "^(da_|sa_|adm|admin)|_adm$|-a$|\.adm$"),1,0)
+| eval admin_by_priv=if(match(Privileges, "(SeDebugPrivilege|SeTcbPrivilege|SeLoadDriverPrivilege|SeTakeOwnershipPrivilege|SeBackupPrivilege|SeRestorePrivilege|SeImpersonatePrivilege)"),1,0)
+| eval admin_confidence=admin_by_rid+admin_by_name+admin_by_priv
+| where admin_confidence >= 1
+```
+
+RID `-500` is the built-in Administrator regardless of rename. `-512` Domain Admins,
+`-519` Enterprise Admins, `-518` Schema Admins, `-516` Domain Controllers.
+
+### Summary rollup
+
+```spl
+<query 1 above, replacing the table with:>
+| stats count AS logons, dc(Computer) AS machines, values(Computer) AS machine_list,
+        dc(SrcIp) AS sources, values(SrcIp) AS source_list,
+        values(logon_desc) AS methods,
+        min(_time) AS first, max(_time) AS last
+  BY TargetUser
+| convert ctime(first) ctime(last)
+| sort - machines
+```
+
+Sorting by `machines` puts the accounts touching the most systems at the top — usually
+the right place to start.
+
+---
+
+## Query 2 — Failed logins, timeline format
+
+```spl
+index=<your_index> (EventCode=4625 OR EventID=4625)
+<normalization block>
+| eval failure_reason=case(
+    SubStatus=="0xC0000064","account does not exist",
+    SubStatus=="0xC000006A","wrong password",
+    SubStatus=="0xC0000234","account locked out",
+    SubStatus=="0xC0000072","account disabled",
+    SubStatus=="0xC0000070","workstation restriction",
+    SubStatus=="0xC0000193","account expired",
+    SubStatus=="0xC0000071","password expired",
+    SubStatus=="0xC000015B","logon type not granted",
+    SubStatus=="0xC000006D","bad credentials (generic)",
+    SubStatus=="0xC000006E","account restriction",
+    SubStatus=="0xC0000224","must change password",
+    1=1, SubStatus)
+| table _time, TargetUser, TargetDomain, Computer, logon_desc, SrcIp, Workstation, failure_reason, SubStatus
+| sort - _time
+```
+
+**The substatus is the most important field here.** `0xC0000064` across many accounts is
+username enumeration. `0xC000006A` across many accounts is password spraying. Same event
+ID, different attack stage.
+
+### Visual timeline
+
+```spl
+<4625 base + normalization>
+| timechart span=15m count BY TargetUser limit=15 useother=t
+```
+
+Swap `BY TargetUser` for `BY SrcIp` or `BY Computer` depending on the question. Adjust
+`span` to the window — 15m for a day, 1h for a week.
+
+### Failure-to-success sequence (the actual finding)
+
+Failures alone are background noise. Failures followed by a success from the same source
+is the thing worth waking up for.
+
+```spl
+index=<your_index> (EventCode IN (4624,4625) OR EventID IN (4624,4625))
+<normalization block>
+| where SrcIp!="local" AND NOT match(TargetUser,"\$$")
+| sort 0 SrcIp, _time
+| streamstats count(eval(EventID=="4625")) AS running_fails BY SrcIp, TargetUser
+| streamstats current=f last(_time) AS prev_time BY SrcIp, TargetUser
+| where EventID=="4624" AND running_fails >= 5
+| eval gap_sec=round(_time-prev_time,0)
+| table _time, TargetUser, Computer, SrcIp, logon_desc, running_fails, gap_sec
+| sort - running_fails
+```
+
+---
+
+## Query 3 — What else to look at
+
+### 3a. Password spray shape
+
+```spl
+<4625 base + normalization>
+| bin _time span=1h
+| stats dc(TargetUser) AS users_tried, count AS attempts, dc(Computer) AS targets,
+        values(failure_reason) AS reasons BY _time, SrcIp
+| eval per_user=round(attempts/users_tried,2)
+| where users_tried >= 10 AND per_user <= 3
+| sort - users_tried
+```
+
+Low attempts per user across many users is the signature — designed to stay under
+lockout thresholds, which is exactly why per-account alerting misses it.
+
+### 3b. Type 9 — NewCredentials
+
+`runas /netonly`. Legitimate uses exist but are narrow. Heavily associated with
+pass-the-hash and overpass-the-hash tooling.
+
+```spl
+index=<your_index> (EventCode=4624 OR EventID=4624)
+<normalization block>
+| where LogonType="9"
+| table _time, SubjectUser, TargetUser, TargetDomain, Computer, LogonProcess, SrcIp
+| sort - _time
+```
+
+`seclogo` as the LogonProcess with a mismatched subject/target pair is the classic
+pattern.
+
+### 3c. Anonymous and null-session logons
+
+```spl
+<4624 base + normalization>
+| where TargetUser="ANONYMOUS LOGON" OR TargetSid="S-1-5-7"
+| stats count, values(Computer) AS targets, dc(Computer) AS target_count BY SrcIp
+| where SrcIp!="local"
+| sort - count
+```
+
+### 3d. Explicit credential use (4648)
+
+```spl
+index=<your_index> (EventCode=4648 OR EventID=4648)
+<normalization block>
+| eval UsedAccount=coalesce(TargetUserName, 'winlog.event_data.TargetUserName')
+| where lower(SubjectUser)!=lower(UsedAccount)
+| stats count, dc(Computer) AS hosts, values(UsedAccount) AS creds_used,
+        values(Computer) AS hosts_list BY SubjectUser
+| where hosts >= 2
+| sort - hosts
+```
+
+Underused and on by default. One user explicitly wielding another's credentials across
+multiple hosts is the standard lateral movement shape.
+
+### 3e. Account and group changes
+
+```spl
+index=<your_index> (EventCode IN (4720,4722,4724,4726,4728,4732,4756,4738,4767)
+                 OR EventID IN (4720,4722,4724,4726,4728,4732,4756,4738,4767))
+<normalization block>
+| eval action=case(
+    EventID=="4720","user created", EventID=="4722","user enabled",
+    EventID=="4724","password reset by admin", EventID=="4726","user deleted",
+    EventID=="4728","added to global group", EventID=="4732","added to local group",
+    EventID=="4756","added to universal group", EventID=="4738","user changed",
+    EventID=="4767","account unlocked")
+| table _time, SubjectUser, TargetUser, action, Computer
+| sort - _time
+```
+
+**4728/4732/4756 into a privileged group is the event to alert on.** Privilege
+escalation shows up here before it shows up anywhere else you have visibility into.
+
+### 3f. Lockouts (4740)
+
+```spl
+index=<your_index> (EventCode=4740 OR EventID=4740)
+<normalization block>
+| stats count, values(Workstation) AS source_workstations BY TargetUser
+| sort - count
+```
+
+Often just a stale mapped drive or phone email client. Sometimes the tail end of a
+spray. Worth separating.
+
+### 3g. Log cleared (1102 / 104)
+
+```spl
+index=<your_index> (EventCode IN (1102,104) OR EventID IN (1102,104))
+<normalization block>
+| table _time, Computer, SubjectUser, EventID
+| sort - _time
+```
+
+Rare, and almost never benign outside a documented maintenance window. Check this even
+if nothing else fires.
+
+### 3h. Session duration via logoff pairing
+
+```spl
+index=<your_index> (EventCode IN (4624,4634,4647) OR EventID IN (4624,4634,4647))
+<normalization block>
+| transaction LogonId startswith="4624" endswith=eval(EventID IN ("4634","4647")) maxspan=24h
+| where LogonType IN ("2","10")
+| eval duration_min=round(duration/60,1)
+| table _time, TargetUser, Computer, logon_desc, SrcIp, duration_min
+| sort - duration_min
+```
+
+`transaction` is expensive. For large volumes use `stats min(_time) max(_time) BY LogonId`
+instead.
+
+### 3i. Rare pairings (highest value per unit effort)
+
+```spl
+<4624 base + normalization>
+| where LogonType IN ("3","10") AND SrcIp!="local"
+| stats min(_time) AS first_seen, count BY TargetUser, Computer, SrcIp
+| eventstats min(first_seen) AS user_first_ever BY TargetUser
+| where first_seen > relative_time(now(),"-7d") AND first_seen!=user_first_ever
+| convert ctime(first_seen)
+| sort first_seen
+```
+
+An account reaching a machine it has never reached before. Rarity beats thresholds for
+intrusion detection, and this one query surfaces more real findings than most signature
+work.
+
+---
+
+## Fixing the ingest properly
+
+Search-time normalization is a workaround. The durable fix:
+
+```ini
+# props.conf
+[winevt_json]
+INDEXED_EXTRACTIONS = json
+KV_MODE = none
+TIMESTAMP_FIELDS = winlog.event_time
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%6N%Z
+MAX_TIMESTAMP_LOOKAHEAD = 40
+SHOULD_LINEMERGE = false
+TRUNCATE = 0
+```
+
+```ini
+# inputs.conf
+[monitor:///path/to/json/...]
+sourcetype = winevt_json
+index = wineventlog
+```
+
+Set `KV_MODE = none` when using `INDEXED_EXTRACTIONS = json` — running both double-extracts
+and roughly doubles your field count for no benefit.
+
+This requires reindexing to apply to existing data.
