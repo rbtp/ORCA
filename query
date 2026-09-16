@@ -798,3 +798,28 @@ Set `KV_MODE = none` when using `INDEXED_EXTRACTIONS = json` — running both do
 and roughly doubles your field count for no benefit.
 
 This requires reindexing to apply to existing data.
+
+
+index=<your_index> "4624"
+| rex field=_raw "^\w{3}\s+\w{3}\s+\d+\s+[\d:]+\s+\d{4}\s+(?<EventID>\d+)\s+(?<SourceName>\S+)"
+| where EventID=4624
+| rex field=_raw "Logon Type:\s+(?<LogonType>\d+)"
+| rex field=_raw "Source Network Address:\s+(?<SrcIp>[^\s\t]+)"
+| rex field=_raw "Source Port:\s+(?<SrcPort>\d+)"
+| rex field=_raw "Workstation Name:\s+(?<Workstation>[^\s\t]*)"
+| rex field=_raw "Logon Process:\s+(?<LogonProcess>[^\s\t]+)"
+| rex field=_raw max_match=0 "Account Name:\s+(?<acct_list>[^\t\r\n]+?)\s*(?=\t|Account Domain:|Supplied)"
+| rex field=_raw max_match=0 "Account Domain:\s+(?<dom_list>[^\t\r\n]+?)\s*(?=\t|Logon ID:)"
+| rex field=_raw max_match=0 "Logon ID:\s+(?<lid_list>0x[0-9A-Fa-f]+)"
+| eval TargetUser=mvindex(acct_list,-1)
+| eval TargetDomain=mvindex(dom_list,-1)
+| eval LogonId=mvindex(lid_list,-1)
+| eval Computer=coalesce(host, ComputerName)
+| eval logon_desc=case(LogonType=="2","Interactive",LogonType=="3","Network",
+    LogonType=="4","Batch",LogonType=="5","Service",LogonType=="7","Unlock",
+    LogonType=="8","NetworkCleartext",LogonType=="9","NewCredentials",
+    LogonType=="10","RDP",LogonType=="11","CachedInteractive",1=1,LogonType)
+| where NOT TargetUser IN ("SYSTEM","LOCAL SERVICE","NETWORK SERVICE","-","")
+| where NOT match(TargetUser,"\$$")
+| table _time, TargetUser, TargetDomain, Computer, logon_desc, SrcIp, SrcPort, Workstation, LogonProcess, LogonId
+| sort - _time
