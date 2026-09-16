@@ -100,3 +100,322 @@ index=<your_index> sourcetype=syslog
 | convert ctime(first_seen) ctime(last_seen)
 | sort - events
 | fields vendor, events, pct, senders, sample_senders, first_seen, last_seen
+
+
+
+# Initial Access Hunting — Default Windows Auditing + Deny-Only Firewall
+
+## What this telemetry can and cannot answer
+
+**Cannot:** process execution, command lines, script content, DLL loads, file writes,
+registry changes, successful network connections, C2 beaconing over allowed ports.
+
+**Can:** authentication patterns, credential use, service and task creation, pre-attack
+scanning, blocked lateral movement, blocked egress.
+
+**The core limitation.** A deny-only firewall log records traffic that did *not* reach
+its destination. Successful initial access is allowed traffic and will never appear in
+it. Every firewall query below is therefore inferential: it finds the reconnaissance
+that preceded access, or the failed movement that followed it, and uses timing to
+bracket the event you cannot see directly.
+
+Authentication is the primary lens. Everything else is corroboration.
+
+---
+
+## Part 1 — Regex extraction
+
+Assumes Windows events arriving as syslog text rather than structured. If you have the
+Splunk TA for Windows bound correctly, these fields already exist and you can skip to
+Part 2.
+
+### 4624 / 4625 core fields
+
+```spl
+| rex field=_raw "(?s)Logon Type:\s+(?<LogonType>\d+)"
+| rex field=_raw "(?s)New Logon:.*?Account Name:\s+(?<TargetUser>[^\r\n]+)"
+| rex field=_raw "(?s)New Logon:.*?Account Domain:\s+(?<TargetDomain>[^\r\n]+)"
+| rex field=_raw "(?s)Source Network Address:\s+(?<SrcIp>[0-9a-fA-F\.:]+)"
+| rex field=_raw "(?s)Source Port:\s+(?<SrcPort>\d+)"
+| rex field=_raw "(?s)Workstation Name:\s+(?<Workstation>[^\r\n]+)"
+| rex field=_raw "(?s)Logon Process:\s+(?<LogonProcess>[^\r\n]+)"
+| rex field=_raw "(?s)Authentication Package:\s+(?<AuthPackage>[^\r\n]+)"
+| rex field=_raw "(?s)Process Name:\s+(?<CallerProcess>[^\r\n]+)"
+```
+
+The `(?s)` flag makes `.` match newlines, which is required because these are multi-line
+events. Without it the lookahead patterns fail silently.
+
+For 4625 specifically, the substatus is the field that carries the intent:
+
+```spl
+| rex field=_raw "(?s)Failure Information:.*?Status:\s+(?<Status>0x[0-9A-Fa-f]+)"
+| rex field=_raw "(?s)Sub Status:\s+(?<SubStatus>0x[0-9A-Fa-f]+)"
+| eval failure_reason=case(
+    SubStatus=="0xC0000064", "user does not exist",
+    SubStatus=="0xC000006A", "wrong password",
+    SubStatus=="0xC0000234", "account locked out",
+    SubStatus=="0xC0000072", "account disabled",
+    SubStatus=="0xC0000070", "workstation restriction",
+    SubStatus=="0xC0000193", "account expired",
+    SubStatus=="0xC0000071", "password expired",
+    SubStatus=="0xC000015B", "logon type not granted",
+    SubStatus=="0xC000006D", "generic bad credentials",
+    SubStatus=="0xC000006E", "account restriction",
+    1=1, SubStatus)
+```
+
+**This distinction does most of the work.** `0xC0000064` across many accounts is
+*enumeration* — the attacker is discovering valid usernames. `0xC000006A` across many
+accounts is *spraying* — they already have the list and are guessing passwords. Those
+are different stages and they call for different responses.
+
+### Logon type decode
+
+```spl
+| eval logon_desc=case(
+    LogonType=="2",  "Interactive (console)",
+    LogonType=="3",  "Network (SMB/share)",
+    LogonType=="4",  "Batch (scheduled task)",
+    LogonType=="5",  "Service",
+    LogonType=="7",  "Unlock",
+    LogonType=="8",  "NetworkCleartext",
+    LogonType=="9",  "NewCredentials (runas /netonly)",
+    LogonType=="10", "RemoteInteractive (RDP)",
+    LogonType=="11", "CachedInteractive",
+    1=1, "unknown")
+```
+
+Types 3, 8, 9, and 10 are where initial access and lateral movement live. Type 8 is
+notable on its own — cleartext credentials over the network, typical of basic-auth
+web apps and some legacy tooling, and worth knowing about regardless of attack.
+
+### 4648 — explicit credentials
+
+The single most underused default event. Fires when a process authenticates as an
+account other than the one it is running under.
+
+```spl
+| rex field=_raw "(?s)Account Whose Credentials Were Used:.*?Account Name:\s+(?<UsedAccount>[^\r\n]+)"
+| rex field=_raw "(?s)Target Server:.*?Target Server Name:\s+(?<TargetServer>[^\r\n]+)"
+| rex field=_raw "(?s)Process Information:.*?Process Name:\s+(?<CallerProcess>[^\r\n]+)"
+```
+
+### System log 7045 — service install
+
+Not in the Security log and not dependent on any audit policy. Always present.
+
+```spl
+| rex field=_raw "(?s)Service Name:\s+(?<ServiceName>[^\r\n]+)"
+| rex field=_raw "(?s)Service File Name:\s+(?<ServiceFile>[^\r\n]+)"
+| rex field=_raw "(?s)Service Type:\s+(?<ServiceType>[^\r\n]+)"
+| rex field=_raw "(?s)Service Start Type:\s+(?<StartType>[^\r\n]+)"
+```
+
+### Firewall deny
+
+Normalize before analysis; field names differ per vendor.
+
+```spl
+| eval src_ip=coalesce(src_ip, src, 'id.orig_h')
+| eval dest_ip=coalesce(dest_ip, dest, 'id.resp_h')
+| eval dest_port=coalesce(dest_port, dport, 'id.resp_p')
+```
+
+---
+
+## Part 2 — Trend analytics
+
+Regex gives you fields. These give you findings.
+
+### H1 — Password spray
+
+Many accounts, few attempts each, one source, short window. Inverts the per-account
+lockout threshold, which is exactly why it evades default alerting.
+
+```spl
+<4625 base search + extractions>
+| bin _time span=1h
+| stats dc(TargetUser) AS users_tried, count AS attempts, values(failure_reason) AS reasons BY _time, SrcIp
+| eval attempts_per_user=round(attempts/users_tried,2)
+| where users_tried >= 10 AND attempts_per_user <= 3
+| sort - users_tried
+```
+
+**Then check whether it worked** — the step most spray hunts skip:
+
+```spl
+<4624 base search> 
+| search SrcIp IN (<spray source from above>)
+| stats min(_time) AS first_success, values(TargetUser) AS compromised BY SrcIp
+```
+
+A 4625 storm followed by a 4624 from the same source is the finding. The storm alone is
+just noise.
+
+### H2 — Account enumeration
+
+```spl
+<4625 base search + extractions>
+| where SubStatus="0xC0000064"
+| bin _time span=1h
+| stats dc(TargetUser) AS nonexistent_accounts, values(TargetUser) AS sample BY _time, SrcIp, Workstation
+| where nonexistent_accounts >= 15
+```
+
+`Workstation` is worth keeping — attacker tooling often sets a static or obviously
+synthetic workstation name, and that becomes a durable pivot.
+
+### H3 — First-ever source for an account
+
+Rarity beats threshold for initial access. This finds an account authenticating from
+somewhere it never has.
+
+```spl
+<4624 base search + extractions>
+| where LogonType IN ("3","8","10")
+| stats min(_time) AS first_seen, max(_time) AS last_seen, count BY TargetUser, SrcIp
+| eventstats min(first_seen) AS account_first_ever BY TargetUser
+| where first_seen > relative_time(now(), "-7d") AND first_seen != account_first_ever
+| convert ctime(first_seen) ctime(last_seen)
+| sort first_seen
+```
+
+Run once over 90 days to build intuition for your baseline before scheduling it.
+
+### H4 — Impossible / anomalous RDP
+
+```spl
+<4624 base search + extractions>
+| where LogonType="10"
+| where NOT (cidrmatch("10.0.0.0/8", SrcIp) OR cidrmatch("172.16.0.0/12", SrcIp) OR cidrmatch("192.168.0.0/16", SrcIp))
+| stats count, values(TargetUser) AS users, dc(host) AS hosts_reached BY SrcIp
+| sort - count
+```
+
+External RDP success is a finding on its own merits. Corroborate with the Terminal
+Services LocalSessionManager operational log (events 21, 25) and RemoteConnectionManager
+1149, both on by default.
+
+### H5 — Off-hours authentication
+
+```spl
+<4624 base search + extractions>
+| where LogonType IN ("3","10")
+| eval hour=strftime(_time,"%H"), dow=strftime(_time,"%w")
+| where (hour < 6 OR hour > 20) OR dow IN ("0","6")
+| stats count, values(SrcIp) AS sources, values(host) AS targets BY TargetUser
+| where count >= 3
+```
+
+Noisy in shops with real shift work or overseas teams. Baseline per account rather than
+globally if that describes you.
+
+### H6 — Service install as persistence
+
+```spl
+<7045 base search + extractions>
+| eval suspicious=case(
+    match(ServiceFile, "(?i)\\\\(Temp|Users\\\\Public|ProgramData|AppData|Windows\\\\Temp)\\\\"), "path",
+    match(ServiceFile, "(?i)(powershell|cmd\.exe|wscript|cscript|rundll32|mshta|regsvr32)"), "interpreter",
+    match(ServiceFile, "(?i)-enc|-e\s|frombase64|IEX|DownloadString"), "encoded",
+    match(ServiceName, "^[a-zA-Z0-9]{8,16}$") AND NOT match(ServiceName, "(?i)(update|sync|agent|monitor)"), "random name",
+    1=1, null())
+| where isnotnull(suspicious)
+| table _time, host, ServiceName, ServiceFile, StartType, suspicious
+```
+
+PsExec, Impacket `smbexec`, and Cobalt Strike's service jump all surface here. This is
+your single best execution-adjacent detection without 4688.
+
+### H7 — Firewall: scanning preceding a logon
+
+The one query that ties the two data sources together.
+
+```spl
+<firewall deny base search>
+| bin _time span=1h
+| stats dc(dest_port) AS ports_probed, dc(dest_ip) AS hosts_probed, count AS denies BY _time, src_ip
+| where ports_probed >= 20 OR hosts_probed >= 25
+| eval scan_time=_time
+| join type=left src_ip
+    [ search <4624 base search + extractions>
+    | rename SrcIp AS src_ip
+    | stats min(_time) AS logon_time, values(TargetUser) AS users, values(host) AS targets BY src_ip ]
+| where isnotnull(logon_time) AND logon_time > scan_time AND (logon_time - scan_time) < 86400
+| convert ctime(scan_time) ctime(logon_time)
+```
+
+Scanning followed by a successful authentication from the same address inside 24 hours.
+This is as close to "initial access" as deny-only logs can get you.
+
+### H8 — Firewall: the denial gap
+
+Counterintuitive but useful. A source that generates sustained denies and then stops
+either gave up or found an allowed path. The second case is invisible in deny logs,
+which is precisely why the silence matters.
+
+```spl
+<firewall deny base search>
+| bin _time span=1h
+| stats count AS denies BY _time, src_ip
+| streamstats window=6 avg(denies) AS trailing_avg BY src_ip
+| where denies=0 AND trailing_avg > 50
+```
+
+Treat as a hunting prompt, not an alert. Pair with H7 against the same source.
+
+### H9 — Blocked egress from a workstation
+
+Post-compromise, but often the first thing you actually see.
+
+```spl
+<firewall deny base search>
+| where cidrmatch("10.0.0.0/8", src_ip)
+| where NOT (cidrmatch("10.0.0.0/8", dest_ip) OR cidrmatch("172.16.0.0/12", dest_ip) OR cidrmatch("192.168.0.0/16", dest_ip))
+| stats count AS attempts, dc(dest_ip) AS destinations, values(dest_port) AS ports,
+        earliest(_time) AS first, latest(_time) AS last BY src_ip
+| eval duration_hr=round((last-first)/3600,1)
+| eval rate=round(attempts/duration_hr,1)
+| where attempts >= 50 AND destinations <= 5
+| convert ctime(first) ctime(last)
+```
+
+Few destinations, high count, sustained over time — beacon shape. A workstation
+repeatedly trying to reach one external address on a blocked port is worth a look
+regardless of what the rest of this finds.
+
+### H10 — 4648 anomaly
+
+```spl
+<4648 base search + extractions>
+| eval same=if(lower(SubjectUser)==lower(UsedAccount),1,0)
+| where same=0
+| stats count, dc(TargetServer) AS servers, values(TargetServer) AS targets BY host, SubjectUser, UsedAccount
+| where servers >= 3
+```
+
+One account explicitly using another's credentials against several servers is the
+classic post-access lateral pattern, and 4648 is on by default.
+
+---
+
+## Part 3 — The gap, stated plainly
+
+Everything above is working around missing telemetry. Three changes would do more than
+any query here:
+
+1. **Enable 4688 with command-line auditing.** One GPO setting plus
+   `ProcessCreationIncludeCmdLine_Enabled`. This is the single highest-value change
+   available and costs almost nothing.
+2. **Log firewall allows, at minimum on the perimeter and any segmentation boundary.**
+   Deny-only logging means the successful intrusion is structurally invisible. Volume is
+   the usual objection — sample or scope it rather than skipping it.
+3. **PowerShell script block logging (4104).** Even partially, it recovers most of what
+   attackers do after initial access.
+
+Sysmon is the obvious fourth, but the three above are native, free, and defensible as
+baseline hygiene in a way that deploying an agent sometimes is not.
+
+Until then: authentication rarity is your detection, the firewall gives you timing
+brackets, and 7045 is your execution proxy.
