@@ -823,3 +823,12 @@ index=<your_index> "4624"
 | where NOT match(TargetUser,"\$$")
 | table _time, TargetUser, TargetDomain, Computer, logon_desc, SrcIp, SrcPort, Workstation, LogonProcess, LogonId
 | sort - _time
+
+
+index=<your_index> "4624"
+| eval len=len(_raw)
+| eval has_type=if(match(_raw,"Logon Type:"),1,0)
+| eval has_src=if(match(_raw,"Source Network Address:"),1,0)
+| eval has_newlogon=if(match(_raw,"New Logon:"),1,0)
+| stats count, sum(has_type) AS with_logontype, sum(has_src) AS with_srcip,
+        sum(has_newlogon) AS with_newlogon, max(len) AS max_len, avg(len) AS avg_len
