@@ -80,4 +80,11 @@ HOME=/tmp soffice --headless --convert-to pdf --outdir /tmp /tmp/orca_warmup.htm
 rm -f /tmp/orca_warmup.html /tmp/orca_warmup.pdf
 echo "[ORCA] LibreOffice ready."
 
+# Bring the database schema up to date before the app starts (see migrate.py).
+# Fatal on failure: running new code against an old schema breaks login.
+if ! python /app/migrate.py; then
+    echo "[ORCA] FATAL: database migration failed (see the error above). Backend not started."
+    exit 1
+fi
+
 exec "$@"

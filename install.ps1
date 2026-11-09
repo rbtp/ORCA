@@ -128,6 +128,10 @@ $ready = $false
 while ((Get-Date) -lt $deadline) {
     $logs = docker compose logs --no-log-prefix orca-backend 2>&1 | Out-String
     if ($logs -match 'Application startup complete') { $ready = $true; break }
+    if ($logs -match 'Backend not started') {
+        $logs -split "`n" | Where-Object { $_ -match 'FATAL' } | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+        Fail 'Database migration failed (see above). Full log: docker compose logs orca-backend'
+    }
     Start-Sleep -Seconds 5
 }
 if (-not $ready) { Fail "Backend didn't come up in time. Check: docker compose logs orca-backend" }

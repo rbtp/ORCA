@@ -87,6 +87,10 @@ step "Waiting for the backend to finish starting (first boot loads the database,
 ready=0
 for _ in $(seq 1 72); do
     if docker compose logs --no-log-prefix orca-backend 2>&1 | grep -q "Application startup complete"; then ready=1; break; fi
+    if docker compose logs --no-log-prefix orca-backend 2>&1 | grep -q "Backend not started"; then
+        docker compose logs --no-log-prefix orca-backend 2>&1 | grep FATAL
+        fail "Database migration failed (see above). Full log: docker compose logs orca-backend"
+    fi
     sleep 5
 done
 [ "$ready" = 1 ] || fail "Backend didn't come up in time. Check: docker compose logs orca-backend"

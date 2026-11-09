@@ -52,10 +52,7 @@ git pull
 docker compose up -d --build
 ```
 
-Then apply any new files in `migrations/` that your database doesn't have yet (they're idempotent):
-```bash
-docker exec -i orca-postgres psql -U postgres -d orca_db < migrations/<file>.sql
-```
+Database migrations are applied automatically when the backend starts (`backend/migrate.py`): it runs any file in `migrations/` and `backend/*_migration.sql` that this database hasn't had yet, before the app serves requests. Check with `docker compose logs orca-backend | grep -i migration`.
 
 ## Refreshing the Grype Vulnerability DB
 

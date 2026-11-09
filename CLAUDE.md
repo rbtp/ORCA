@@ -28,6 +28,11 @@ Fresh `git clone` + `install.ps1` (Windows PowerShell 5.1) tested from scratch i
 Not tested: agent-dispatched collection end-to-end (no agent online); frontend session-revocation redirect in a real browser (API side verified).
 
 ## Progress Log
+- [x] Automatic DB migrations (2026-11-09):
+  - User reported login "Internal Server Error during Authentication" on another machine after pulling. Reproduced: an existing (pre-September) database lacks `users.is_active`/`token_version`; `schema.sql` only applies to brand-new volumes and migrations were manual
+  - `backend/migrate.py`, run by `entrypoint.sh` before `main.py` (before automap reflection): applies `backend/*_migration.sql` then `migrations/*.sql` (mounted `./migrations:/app/migrations:ro`), each once, tracked in `schema_migrations`, one transaction per file, advisory lock. Failure = `[ORCA] FATAL: migration <file> failed` and the backend exits (installers detect this and fail fast)
+  - `add_suspicious_locations_hash_technique.sql` upsert now only replaces a row not edited since 2026-08-28, since every migration now runs once on every existing DB
+  - Verified: live DB (14 applied, technique row unchanged, restart = "up to date"); August-schema DB + existing user under new backend -> migrated, login works; fresh schema+seed -> all migrations clean; broken migration -> FATAL, not recorded, recovers when removed
 - [x] Server-side session revocation (2026-11-09):
   - Problem found in testing: auth was JWT-only, so deactivation / password change / reset / role change didn't affect already-issued sessions (up to 60 min)
   - `migrations/add_users_token_version.sql` (applied live): `users.token_version`. Login JWT carries it as `tv`

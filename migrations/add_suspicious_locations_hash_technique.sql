@@ -44,4 +44,10 @@ WHERE NOT IsDir AND Size < 52428800 AND Size > 0$vql$,
 ON CONFLICT (t_code) DO UPDATE SET
     name = EXCLUDED.name,
     custom_vql = EXCLUDED.custom_vql,
-    updated_at = NOW();
+    updated_at = NOW()
+-- Only replace a row nobody has touched since this migration was written
+-- (2026-08-28). migrate.py applies every migration once, including on
+-- databases where this was already run by hand, and an analyst's later edits
+-- to this technique in the Artifact Library Editor must not be overwritten.
+WHERE public.ref_artifact_library.updated_at IS NULL
+   OR public.ref_artifact_library.updated_at < '2026-08-28 12:00:00';

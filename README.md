@@ -160,7 +160,7 @@ All API calls from the browser are relative `/api/...` paths. nginx proxies them
 
 ### Database Schema
 
-`backend/schema.sql` is a schema-only `pg_dump` snapshot of `orca_db` (tables, columns, constraints, indexes — no data). It's a reference/bootstrap artifact, not a migration tool: the backend reflects the live database via SQLAlchemy `automap_base()` rather than declared ORM models, and incremental changes ship as standalone `*_migration.sql` files (e.g. `backend/audit_log_migration.sql`) applied directly with `psql`. Regenerate the snapshot after a schema change with:
+`backend/schema.sql` is a schema-only `pg_dump` snapshot of `orca_db` (tables, columns, constraints, indexes — no data). It's a reference/bootstrap artifact, not a migration tool: the backend reflects the live database via SQLAlchemy `automap_base()` rather than declared ORM models, and incremental changes ship as idempotent `.sql` files in `migrations/` (or `backend/*_migration.sql`) that `backend/migrate.py` applies automatically at backend startup, once each, tracked in `schema_migrations`. Regenerate the snapshot after a schema change with:
 ```bash
 docker exec orca-postgres pg_dump -U postgres -d orca_db --schema-only --no-owner --no-privileges > backend/schema.sql
 ```

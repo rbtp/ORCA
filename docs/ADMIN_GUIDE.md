@@ -95,13 +95,7 @@ Wait 30–60 seconds for all services to be healthy, then open `https://<server-
 
 **Schema (automatic on a fresh volume):** `docker-compose.yml` mounts `backend/schema.sql` into Postgres's `docker-entrypoint-initdb.d/`. A brand-new `orca-postgres-data` volume therefore gets the full current schema on first start, with no manual migration step. `schema.sql` is regenerated from the live database after every schema change, so it already includes everything in `migrations/` and `backend/*_migration.sql`.
 
-**Existing database (upgrading):** `schema.sql` is *not* re-applied to a volume that already exists. Apply any migrations you don't have yet, for example:
-
-```bash
-docker exec -i orca-postgres psql -U postgres -d orca_db < migrations/add_user_account_management.sql
-```
-
-All migration files use `IF NOT EXISTS`, so re-running one that's already applied is harmless.
+**Migrations (automatic, every start):** before the app starts, `backend/entrypoint.sh` runs `backend/migrate.py`. It applies every `backend/*_migration.sql` and `migrations/*.sql` file (mounted at `/app/migrations`) that isn't yet recorded in the `schema_migrations` table, in name order, each in its own transaction. Upgrading an existing database is therefore just `git pull` + `docker compose up -d --build`. If a migration fails, the backend logs `[ORCA] FATAL: migration <file> failed: <error>` and does not start, rather than running new code against an old schema. To add a schema change, drop a new idempotent `.sql` file into `migrations/` and regenerate `backend/schema.sql` (see the README's Database Schema section).
 
 **Reference data (automatic on a fresh volume):** right after the schema, `backend/initdb/02-seed-data.sh` loads `seed_data/*.sql` (MITRE analytics/actors/log sources, artifact library, VQL mappings, threat attribution: reference tables only, no users/cases/evidence). On first backend start, `backend/data/mitre-attack.json` is imported into the MITRE technique/group/software tables. Loading `seed_data/` into an already-populated database fails on duplicate keys. Those files are only for empty databases.
 
@@ -305,12 +299,7 @@ docker compose build
 docker compose up -d --no-deps orca-backend orca-frontend
 ```
 
-Run any new SQL migration files:
-```bash
-for f in migrations/*.sql; do
-  docker exec -i orca-postgres psql -U postgres -d orca_db < "$f"
-done
-```
+New database migrations are applied automatically when the backend starts. Confirm with `docker compose logs orca-backend | grep -i migration` (`Applied migration ...` or `Database schema up to date.`).
 
 ---
 
@@ -403,6 +392,10 @@ The `audit_log` table (`backend/audit_log_migration.sql`) is general-purpose —
 ---
 
 ## Troubleshooting
+
+### Login Fails with "Internal Server Error during Authentication"
+
+The login query hit a database error, almost always because the database schema is older than the code (e.g. `column "is_active"` or `column "token_version" does not exist`). Check `docker compose logs orca-backend | grep -E "LOGIN_ERROR|migration"`. Since migrations are applied automatically at startup, this means the backend container is running an old image or `migrations/` isn't mounted. Run `docker compose up -d --build orca-backend` from the up-to-date repo and confirm the log shows `Applied migration ...` or `Database schema up to date.`
 
 ### Container Exits Immediately on Start
 
