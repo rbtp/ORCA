@@ -3,6 +3,14 @@
 ## Project Location
 `C:\Users\Sentinel\Desktop\Tests\ORCAWEB`
 
+## Offline install kit (the deliverable for the air-gapped machine)
+`C:\Users\Sentinel\Desktop\full_update_ORCA_Standalone_Install` -- NOT in git. This is what gets copied to and installed on the air-gapped remote:
+- `01_Prerequisites\` Docker Desktop, WSL MSI, Python 3.13, .NET Desktop Runtime installers
+- `02_Docker_Images\orca-export.tar.gz` (`docker save orcaweb-orca-backend:latest orcaweb-orca-frontend:latest postgres:15 | gzip`) + `image_ids.txt` (exact IDs; installer Phase 8 reloads when they differ)
+- `03_ORCA_Project\` = this repo mirrored with `robocopy /MIR`, excluding `.git`, `node_modules`, `frontend\dist`, `.env`, `.env.from-*` (includes the Grype DB)
+- `install_orca.ps1` (12 phases; also updates an existing install), `uninstall_orca.ps1`, `INSTALL.md`
+When code changes ship: rebuild images, re-export the tarball + `image_ids.txt`, re-mirror `03_ORCA_Project`, update `INSTALL.md`. The repo's own `install.ps1`/`install.sh` build from source and need internet: connected machines only.
+
 ## Stack
 - Backend: FastAPI (Python 3.9), entry point `backend/main.py`
 - Frontend: React/Vite, source in `frontend/src`
@@ -28,6 +36,12 @@ Fresh `git clone` + `install.ps1` (Windows PowerShell 5.1) tested from scratch i
 Not tested: agent-dispatched collection end-to-end (no agent online); frontend session-revocation redirect in a real browser (API side verified).
 
 ## Progress Log
+- [x] Offline kit updated to 2026-11-09 code (2026-11-09):
+  - This session first worked only in the repo and missed the kit (the user's "install.md" / "folder on the desktop" meant the kit); the remote had run the Nov 6 kit
+  - Kit: `03_ORCA_Project` re-mirrored, images re-exported (1.78 GB, incl. Linux velociraptor/grype/syft) + `image_ids.txt`
+  - `install_orca.ps1`: Phase 6 updates an existing install (keeps `.env`, agent `config.json`, `agent\bin`); Phase 8 compares exact image IDs; Phase 9 starts DB first + syncs DB password, readiness via `/api/auth/me` 401 (old `/docs` check was answered 200 by nginx while the backend was still down, so later phases hit 502); Phase 10 verifies `schema_migrations` and fills only empty seed tables (no manual psql); Phase 11 treats the template `config.json` (`YOUR_JWT_TOKEN`) as unconfigured, and its update path restarts the agent and moves the Grype DB out of `6\6`; phases 8-10 run with `$ErrorActionPreference = 'Continue'` (PS5.1 native stderr)
+  - `docker-compose.yml`: `image: orcaweb-orca-{backend,frontend}:latest` pinned so compose uses loaded images whatever the project name (otherwise it builds, which needs internet)
+  - Tested here with phases 6-12 (1-5 skipped: would install Python 3.13 system-wide; Startup-shortcut creation skipped: blocked as persistence), live ORCA paused and isolated: fresh install (API 115/115, UI 22/22, agent 12/12) and re-run update path (`.env`/config kept, agent code updated + restarted, Grype DB moved, data kept)
 - [x] Copy-folder install readiness + full functional sweep (2026-11-09):
   - User plan: run uninstall on the remote machine, copy the Desktop folder over, fresh install. Simulated exactly (6.9 GB folder copy, isolated `orcatest` stack): install from copied folder, uninstall keeping data + reinstall, foreign `.env` over existing DB, full wipe + fresh install
   - New `uninstall.ps1`/`uninstall.sh`: removes containers/images/network (compose-labelled and legacy standalone `orca-*`), data volumes only on `DELETE`/`-RemoveData`, `-RemoveEnv`
