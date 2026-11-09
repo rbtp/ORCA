@@ -35,10 +35,28 @@ On first start, a fresh database volume automatically gets:
 
 Then open `https://<server-ip>`, accept the self-signed certificate warning, log in, change the admin password under **Options → My Account**, and invite analysts from **Options → User Registry**.
 
-The installer is safe to re-run. It keeps an existing `.env` and Grype DB.
+The installer is safe to re-run. It keeps this machine's `.env` and the Grype DB.
+
+### Installing from a copied folder (instead of git)
+
+Copying the whole ORCA folder from another machine works. The installer recognises that the copied `.env` belongs to the other machine (installs record the machine name as `ORCA_INSTALL_HOST`). It saves the copied file as `.env.from-<machine>-<date>` and creates a fresh one with new secrets and this machine's address. Portable settings (VirusTotal key, SMTP, bootstrap admin) are carried over; machine-specific ones like `CASES_DIR` are not. The Grype DB in the copied folder is reused, so there's no 3 GB download.
+
+### Replacing an existing install
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1                          # asks before deleting data
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -RemoveData -RemoveEnv   # complete wipe, no prompt
+```
+```bash
+./uninstall.sh                              # asks before deleting data
+./uninstall.sh --remove-data --remove-env   # complete wipe
+```
+
+Uninstall removes ORCA's containers, images and network. Data (database, evidence, certificate volumes) is only deleted if you type `DELETE` at the prompt or pass `-RemoveData`. It also finds older installs whose `orca-postgres` container was started outside compose (`start.bat` era). If you keep the data, the next install reuses it: the installer sets the database password to whatever the new `.env` says, so a different `.env` can't lock the backend out.
 
 ## Everyday Commands
 
+Windows: `start.bat`, `stop.bat`, `logs.bat` in the ORCA folder. Or anywhere:
 ```bash
 docker compose up -d          # start
 docker compose down           # stop (data volumes are kept)
@@ -99,5 +117,6 @@ Delete the copied `.env` first if the offline machine has a different IP, or edi
 |------|---------|
 | 443 | Web UI + API (nginx, HTTPS) |
 | 80 | Redirects to 443 |
+| 8889 | Velociraptor GUI (only while started from Options → Velociraptor; has its own login) |
 
 The backend (8000) and PostgreSQL (5432) are only reachable inside the Docker network.

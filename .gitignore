@@ -1,6 +1,8 @@
 # Environment secrets — never commit
 .env
 *.env
+# .env backups made by install.ps1/install.sh (.env.from-<machine>-<date>)
+.env.from-*
 
 # TLS certificates and keys
 orca.crt

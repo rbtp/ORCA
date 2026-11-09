@@ -1,0 +1,7 @@
+# Build context excludes. node_modules must never be copied in: COPY . .
+# would overwrite the Linux packages from `npm install` with whatever the
+# host has (e.g. Windows-native esbuild/rollup binaries from a copied folder).
+node_modules
+dist
+.env
+*.log

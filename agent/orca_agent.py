@@ -160,7 +160,7 @@ class OrcaAgent:
         exe = os.path.join(self.bin_dir, "velociraptor.exe")
         cmd = [exe, "query", "--format", "jsonl", vql]
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"
         )
         rows = []
         for line in proc.stdout:
@@ -253,6 +253,7 @@ class OrcaAgent:
                     rows = [line.strip() for line in f if line.strip()]
             return rows, None
 
+        errors = []  # velociraptor failures; reported instead of a silent "0 rows"
         try:
             fallback_used = False
             if surgical_yaml.strip():
@@ -272,6 +273,8 @@ class OrcaAgent:
                     capture_output=True,
                 )
                 rows = []
+                if proc.returncode != 0:
+                    errors.append("artifact collect failed: " + proc.stderr.decode("utf-8", errors="replace")[-500:])
                 if proc.returncode == 0:
                     with open(out_file, "w", encoding="utf-8") as f:
                         f.write(proc.stdout.decode("utf-8", errors="replace"))
@@ -281,19 +284,28 @@ class OrcaAgent:
                 if not rows and custom_vql.strip():
                     fb = self._build_fallback_vql(custom_vql)
                     if fb:
-                        rows, _ = run_vql(fb, "fallback")
+                        rows, err = run_vql(fb, "fallback")
+                        if err: errors.append("fallback query failed: " + err)
                         fallback_used = bool(rows)
             elif custom_vql.strip():
                 converted_vql = self._convert_source_to_parse_evtx(custom_vql.replace(":tsource", clean_tsource))
-                rows, _ = run_vql(converted_vql, "query")
+                rows, err = run_vql(converted_vql, "query")
+                if err: errors.append("query failed: " + err)
                 if not rows:
                     fb = self._build_fallback_vql(custom_vql)
                     if fb:
-                        rows, _ = run_vql(fb, "fallback")
+                        rows, err = run_vql(fb, "fallback")
+                        if err: errors.append("fallback query failed: " + err)
                         fallback_used = bool(rows)
             else:
                 glob_vql = f"SELECT *, '{t_code}' AS TCode FROM glob(globs='{clean_tsource}/**/{t_code}*')"
-                rows, _ = run_vql(glob_vql, "query")
+                rows, err = run_vql(glob_vql, "query")
+                if err: errors.append("query failed: " + err)
+
+            if not rows and errors:
+                # Collection failed rather than finding nothing: say so, so the
+                # backend doesn't record a silent "no artifacts".
+                self._stream_line(job_id, "error", {"message": f"{t_code}: " + " | ".join(errors)[:1000]})
 
             for line in rows:
                 self._stream_line(job_id, "row", {"row": line, "t_code": t_code})
@@ -312,7 +324,7 @@ class OrcaAgent:
         # wherever clamscan would otherwise look by default.
         cmd = [exe, "-r", "--infected", f"--database={clamav_dir}", path]
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"
         )
         scanned, infected, threats = 0, 0, []
         for line in proc.stdout:
@@ -364,7 +376,7 @@ class OrcaAgent:
         cmd += [f"--filename={params['image_path']}", f"--provider={params.get('provider', 'auto')}"]
 
         proc = subprocess.run(
-            cmd, capture_output=True, text=True,
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=os.path.join(self.bin_dir, "arsenal"),
         )
         output = (proc.stdout or "") + (proc.stderr or "")
@@ -388,7 +400,7 @@ class OrcaAgent:
 
         cmd = [exe, f"--dismount={params['device_number']}", "--force"]
         proc = subprocess.run(
-            cmd, capture_output=True, text=True,
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=os.path.join(self.bin_dir, "arsenal"),
         )
         output = (proc.stdout or "") + (proc.stderr or "")
@@ -408,7 +420,7 @@ class OrcaAgent:
         sbom = subprocess.run(
             [syft_exe, path, "-o", "json"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         if sbom.returncode != 0:
             raise RuntimeError(f"Syft failed: {sbom.stderr[:500]}")
@@ -435,10 +447,10 @@ class OrcaAgent:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             env=grype_env,
         )
-        out, _ = proc.communicate(sbom.stdout)
+        out, grype_err = proc.communicate(sbom.stdout)
 
         try:
             data = json.loads(out)
@@ -448,7 +460,7 @@ class OrcaAgent:
             )
         except Exception:
             self._stream_line(
-                job_id, "error", {"message": "Failed to parse Grype output"}
+                job_id, "error", {"message": f"Grype failed (exit {proc.returncode}): {(grype_err or '').strip()[-500:]}"}
             )
 
     def _run_memory(self, job_id, params):
@@ -461,7 +473,7 @@ class OrcaAgent:
             vql = f"SELECT * FROM {plugin}()"
             cmd = [exe, "query", "--format", "jsonl", f"--add_plugins={image}", vql]
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"
             )
             rows = []
             for line in proc.stdout:
@@ -502,7 +514,7 @@ class OrcaAgent:
                 cmd = [exe, "query", "-f", vql_path, "--format", "jsonl"]
 
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"
             )
             row_count = 0
             for line in proc.stdout:
@@ -580,7 +592,12 @@ class OrcaAgent:
         # straight to disk like the simple binaries above.
         self._download_and_extract_zip("arsenal.zip", "aim_cli.exe", "arsenal", "arsenal (Arsenal Image Mounter)")
         self._download_and_extract_zip("clamav.zip", "clamscan.exe", "clamav", "clamav (ClamAV + signatures)")
-        self._download_and_extract_zip("grype-db.zip", "vulnerability.db", os.path.join("grype-db", "6"), "grype-db (vulnerability database)")
+        # grype-db.zip's entries are already "6/vulnerability.db", "6/import.json"
+        # (relative to the server's grype-db/), so extract into grype-db/ itself.
+        # Extracting into grype-db/6 produced grype-db/6/6/..., which grype
+        # (GRYPE_DB_CACHE_DIR=bin/grype-db, see _run_grype) never found, and the
+        # marker never matched, so every agent start re-downloaded the ~3 GB DB.
+        self._download_and_extract_zip("grype-db.zip", os.path.join("6", "vulnerability.db"), "grype-db", "grype-db (vulnerability database)")
 
     def run(self):
         self._bootstrap_binaries()

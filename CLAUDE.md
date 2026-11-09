@@ -28,6 +28,18 @@ Fresh `git clone` + `install.ps1` (Windows PowerShell 5.1) tested from scratch i
 Not tested: agent-dispatched collection end-to-end (no agent online); frontend session-revocation redirect in a real browser (API side verified).
 
 ## Progress Log
+- [x] Copy-folder install readiness + full functional sweep (2026-11-09):
+  - User plan: run uninstall on the remote machine, copy the Desktop folder over, fresh install. Simulated exactly (6.9 GB folder copy, isolated `orcatest` stack): install from copied folder, uninstall keeping data + reinstall, foreign `.env` over existing DB, full wipe + fresh install
+  - New `uninstall.ps1`/`uninstall.sh`: removes containers/images/network (compose-labelled and legacy standalone `orca-*`), data volumes only on `DELETE`/`-RemoveData`, `-RemoveEnv`
+  - Installers: `.env` ownership via `ORCA_INSTALL_HOST`; copied `.env` from another machine is backed up to `.env.from-<host>-<ts>` and regenerated (portable keys carried over); legacy `.env` + existing DB keeps secrets but fixes a non-local `ORCA_SERVER_URL`; DB password synced to `.env` via local socket (`ALTER USER`) before backend start; PS5.1 fixes: no `"` inside docker `--format` templates (PS5.1 strips them; conflict check never fired), no `2>&1` on visible docker output (red NativeCommandError noise)
+  - Build hygiene: `frontend/.dockerignore` (copied Windows node_modules overwrote Linux ones), `node_modules/` in `backend/.dockerignore`; working-copy seed SQL restored to LF (rebase had rewritten CRLF)
+  - Removed junk IOC `system` (FREE_TEXT, 2026-06-10) from `seed_data/ref_ioc_library.sql` (live DB untouched)
+  - Linux Velociraptor 0.77.2 added to backend image (`ORCA_VR_EXE_LOCAL`); in-container collection and VR GUI never had a Linux binary
+  - Velociraptor GUI (`velociraptor_manager.py`): config/datastore/creds in `DATA_ROOT/velociraptor` (was next to binary: never writable), ports moved off 8000, writeback path fixed, GUI admin user with random password created on first start, start/stop/credentials admin-only, port 8889 published in compose, modal shows login + errors
+  - `/api/behavioral/asset/{id}/artifact-files` always 500'd (nonexistent `artifact_results.source_file`); now lists received live file pulls (`file_fetch_jobs.local_path`)
+  - Agent: grype-db.zip extracted to `grype-db/6/6/` (DB never found, 3 GB re-download every start) -> fixed; all subprocess text decoding forced to UTF-8 (cp1252 broke Grype JSON parsing on Windows); Velociraptor/Grype errors surfaced instead of discarded; backend records "Collection failed on agent: ..." (and records dispatch failures instead of leaving techniques pending)
+  - start.bat/stop.bat/logs.bat/start.sh rewritten for current compose setup (old start.bat targeted standalone postgres + hardcoded http IP), CRLF for .bat
+  - Test tooling (scratchpad, not committed): API harness (115 checks), Playwright UI tour (22 checks incl. revocation redirect), live agent on this host (VQL test, ClamAV, Grype, RUN ON AGENT ingestion)
 - [x] Automatic DB migrations (2026-11-09):
   - User reported login "Internal Server Error during Authentication" on another machine after pulling. Reproduced: an existing (pre-September) database lacks `users.is_active`/`token_version`; `schema.sql` only applies to brand-new volumes and migrations were manual
   - `backend/migrate.py`, run by `entrypoint.sh` before `main.py` (before automap reflection): applies `backend/*_migration.sql` then `migrations/*.sql` (mounted `./migrations:/app/migrations:ro`), each once, tracked in `schema_migrations`, one transaction per file, advisory lock. Failure = `[ORCA] FATAL: migration <file> failed` and the backend exits (installers detect this and fail fast)

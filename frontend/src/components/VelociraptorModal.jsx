@@ -8,6 +8,7 @@ const POLL_INTERVAL_MS = 3000;
 export default function VelociraptorModal({ isOpen, onClose }) {
   const [status, setStatus] = useState(null); // { running, pid, port, config_exists, log }
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
   const startInflight = useRef(false);
   const pollRef = useRef(null);
 
@@ -35,8 +36,16 @@ export default function VelociraptorModal({ isOpen, onClose }) {
     startInflight.current = true;
     setLoading(true);
     try {
+      setError(null);
       const res = await fetch("/api/velociraptor/start", { method: "POST" });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(res.status === 403
+          ? "Only ORCA admins can start the Velociraptor GUI."
+          : (data.detail || `Start failed (${res.status})`));
+        fetchStatus();
+        return;
+      }
       setStatus(data);
       // Give Velociraptor time to bind before iframe loads
       setTimeout(fetchStatus, 8000);
@@ -188,6 +197,7 @@ export default function VelociraptorModal({ isOpen, onClose }) {
                     ? "A new config will be auto-generated on first start."
                     : "Click START to launch the GUI."}
                 </div>
+                {error && <div style={{ marginTop: 10, fontSize: 12, color: "#ef4444", fontFamily: "monospace" }}>{error}</div>}
               </div>
               {status?.log?.length > 0 && <LogPanel log={status.log} />}
             </>
@@ -220,6 +230,13 @@ export default function VelociraptorModal({ isOpen, onClose }) {
                 >
                   OPEN VELOCIRAPTOR ↗
                 </a>
+                {status?.credentials && (
+                  <div style={{ marginTop: 16, fontSize: 11, fontFamily: "monospace", color: "var(--color-text-muted, #94a3b8)" }}>
+                    Velociraptor login: <span style={{ color: "#e2e8f0" }}>{status.credentials.username}</span>
+                    {" / "}<span style={{ color: "#e2e8f0", userSelect: "all" }}>{status.credentials.password}</span>
+                    <div style={{ marginTop: 4, fontSize: 10 }}>(Velociraptor uses its own self-signed certificate; accept the browser warning once.)</div>
+                  </div>
+                )}
               </div>
               {status?.log?.length > 0 && <LogPanel log={status.log} />}
             </>

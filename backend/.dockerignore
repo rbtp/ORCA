@@ -6,3 +6,4 @@ __pycache__/
 .pytest_cache/
 sandbox_*/
 bin/
+node_modules/

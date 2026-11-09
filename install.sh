@@ -36,28 +36,90 @@ docker compose version >/dev/null 2>&1 || fail "'docker compose' plugin is not i
 
 for name in orca-backend orca-frontend orca-postgres; do
     if proj=$(docker inspect "$name" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null); then
-        [ "$proj" = "orcaweb" ] || fail "A container named '$name' already exists and isn't part of this ORCA install. Remove or rename it first."
+        [ "$proj" = "orcaweb" ] || fail "A container named '$name' already exists and isn't managed by this ORCA install (older start.sh-style install?). Run ./uninstall.sh first."
     fi
 done
 
 # ── 2. .env ──────────────────────────────────────────────────────────────────
-if [ -f .env ]; then
-    step ".env already exists, keeping it."
-else
-    step "Creating .env..."
-    if [ -z "$SERVER_ADDRESS" ]; then
-        detected=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
-        detected=${detected:-localhost}
-        read -r -p "Server IP/hostname analysts and agents will use [$detected]: " answer || true
-        SERVER_ADDRESS=${answer:-$detected}
+# .env holds this machine's secrets and address. Installs made by this script
+# record the machine in ORCA_INSTALL_HOST, so a .env that arrived with a
+# folder copied from another machine can be recognised and not reused.
+THIS_HOST=$(hostname)
+PROJECT="${COMPOSE_PROJECT_NAME:-orcaweb}"
+PORTABLE_KEYS="VT_API_KEY VT_RECHECK_DAYS VT_RATE_LIMIT_SECONDS SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD SMTP_FROM SMTP_USE_TLS ORCA_BOOTSTRAP_ADMIN_USERNAME ORCA_BOOTSTRAP_ADMIN_PASSWORD ORCA_BOOTSTRAP_ADMIN_INITIALS"
+
+env_get() { grep -E "^$2=" "$1" 2>/dev/null | head -1 | cut -d= -f2-; }
+env_set() {  # env_set FILE KEY VALUE
+    if grep -qE "^$2=" "$1"; then sed -i "s|^$2=.*|$2=$3|" "$1"
+    elif grep -qE "^# $2=" "$1"; then sed -i "s|^# $2=.*|$2=$3|" "$1"
+    else printf '%s=%s\n' "$2" "$3" >> "$1"; fi
+}
+read_server_address() {
+    if [ -n "$SERVER_ADDRESS" ]; then echo "$SERVER_ADDRESS"; return; fi
+    detected=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+    detected=${detected:-localhost}
+    read -r -p "Server IP/hostname analysts and agents will use [$detected]: " answer </dev/tty || true
+    echo "${answer:-$detected}"
+}
+is_local_address() {
+    case "$1" in localhost|127.0.0.1|"$THIS_HOST") return 0 ;; esac
+    hostname -I 2>/dev/null | tr ' ' '\n' | grep -qxF "$1"
+}
+
+HAVE_DATABASE=0
+docker volume inspect "${PROJECT}_orca-postgres-data" >/dev/null 2>&1 && HAVE_DATABASE=1
+if [ "$HAVE_DATABASE" = 0 ] && [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
+    docker inspect orca-postgres >/dev/null 2>&1 && HAVE_DATABASE=1
+fi
+
+ENV_HOST=""
+[ -f .env ] && ENV_HOST=$(env_get .env ORCA_INSTALL_HOST)
+
+if [ -f .env ] && [ "$ENV_HOST" = "$THIS_HOST" ]; then
+    step ".env already exists for this machine, keeping it."
+    if [ -n "$SERVER_ADDRESS" ]; then
+        env_set .env ORCA_SERVER_URL "https://$SERVER_ADDRESS"
+        env_set .env CORS_ORIGINS "https://$SERVER_ADDRESS,https://localhost"
+        echo "       Server address set to: https://$SERVER_ADDRESS"
     fi
-    sed -e "s|^JWT_SECRET=.*|JWT_SECRET=$(secret)|" \
-        -e "s|^DB_PASSWORD=.*|DB_PASSWORD=$(secret)|" \
-        -e "s|^CORS_ORIGINS=.*|CORS_ORIGINS=https://$SERVER_ADDRESS,https://localhost|" \
-        -e "s|^# ORCA_SERVER_URL=.*|ORCA_SERVER_URL=https://$SERVER_ADDRESS|" \
-        .env.example > .env
+elif [ -f .env ] && [ "$HAVE_DATABASE" = 1 ]; then
+    # Pre-marker .env with an existing ORCA database: the DB password is
+    # baked into that database, so the secrets must stay. Only the address
+    # may need fixing.
+    step ".env found alongside an existing ORCA database, keeping its secrets."
+    url=$(env_get .env ORCA_SERVER_URL)
+    url_host=$(echo "$url" | sed -E 's|^https?://||; s|[:/].*$||')
+    if [ -n "$SERVER_ADDRESS" ] || [ -z "$url_host" ] || ! is_local_address "$url_host"; then
+        [ -z "$SERVER_ADDRESS" ] && [ -n "$url_host" ] && printf '\033[33m       ORCA_SERVER_URL (%s) is not an address of this machine.\033[0m\n' "$url"
+        addr=$(read_server_address)
+        env_set .env ORCA_SERVER_URL "https://$addr"
+        env_set .env CORS_ORIGINS "https://$addr,https://localhost"
+        echo "       Server address: https://$addr"
+    fi
+    env_set .env ORCA_INSTALL_HOST "$THIS_HOST"
+else
+    if [ -f .env ]; then
+        backup=".env.from-${ENV_HOST:-another-machine}-$(date +%Y%m%d-%H%M%S)"
+        mv .env "$backup"
+        step ".env came from another machine (saved as $backup). Creating a new one for this machine..."
+    else
+        step "Creating .env..."
+    fi
+    addr=$(read_server_address)
+    cp .env.example .env
+    env_set .env JWT_SECRET "$(secret)"
+    env_set .env DB_PASSWORD "$(secret)"
+    env_set .env CORS_ORIGINS "https://$addr,https://localhost"
+    env_set .env ORCA_SERVER_URL "https://$addr"
+    if [ -n "${backup:-}" ]; then
+        for k in $PORTABLE_KEYS; do
+            v=$(env_get "$backup" "$k")
+            if [ -n "$v" ]; then env_set .env "$k" "$v"; echo "       Carried over $k"; fi
+        done
+    fi
+    env_set .env ORCA_INSTALL_HOST "$THIS_HOST"
     chmod 600 .env
-    echo "       Server address: https://$SERVER_ADDRESS"
+    echo "       Server address: https://$addr"
 fi
 
 # ── 3. Build ─────────────────────────────────────────────────────────────────
@@ -80,6 +142,26 @@ else
 fi
 
 # ── 5. Start ─────────────────────────────────────────────────────────────────
+step "Starting the database..."
+docker compose up -d orca-postgres || fail "Could not start the database container (see output above)."
+# TCP check (-h 127.0.0.1): on a new volume Postgres first runs the schema and
+# seed scripts on a socket-only server, which a socket check would report as ready.
+db_ready=0
+for _ in $(seq 1 100); do
+    if docker compose exec -T orca-postgres pg_isready -h 127.0.0.1 -U postgres -d orca_db >/dev/null 2>&1; then db_ready=1; break; fi
+    sleep 3
+done
+[ "$db_ready" = 1 ] || fail "Database didn't become ready. Check: docker compose logs orca-postgres"
+
+# Make the database password match .env. Postgres only applies
+# POSTGRES_PASSWORD when a volume is first created, so a database kept from an
+# earlier install (or a .env copied from another machine) could otherwise
+# have a different password and the backend couldn't connect. Runs over the
+# container's local socket, which needs no password.
+db_password=$(env_get .env DB_PASSWORD)
+docker compose exec -T orca-postgres psql -U postgres -d postgres -q -c "ALTER USER postgres WITH PASSWORD '$db_password'" >/dev/null \
+    || fail "Could not set the database password. Check: docker compose logs orca-postgres"
+
 step "Starting ORCA..."
 docker compose up -d || fail "'docker compose up' failed (see output above)."
 

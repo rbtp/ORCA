@@ -92,7 +92,7 @@
 - Static capability analysis via **Mandiant CAPA** — maps binary capabilities to MITRE ATT&CK techniques; badges appear on the matching technique rows in the investigation checklist
 - Obfuscated string extraction via **Mandiant FLOSS** — extracts static, stack, tight, and decoded strings; automatically flags IOCs (IPs, domains, URLs, registry keys, file paths, emails); cross-references extracted IOCs against the global IOC library with threat-actor attribution
 - Windows PE emulation via **Speakeasy** — captures API call sequences, network connections, file/registry activity, and memory operations without executing the sample on a real system
-- Submit binaries by file upload or by selecting a previously collected artifact directly from the evidence library
+- Submit binaries by file upload, or pick a file already pulled from the host (file browser **PULL FILE**)
 - SSE-streamed pipeline: live progress per tool with technique and string counts updating in real time
 - Full results persisted to database; history picker lets analysts compare runs across multiple samples on the same asset
 - Behavioral summary card in the asset Overview tab; BEHAVIORAL ANALYSIS tab badge shows live technique count

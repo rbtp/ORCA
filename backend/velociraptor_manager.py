@@ -3,7 +3,9 @@ velociraptor_manager.py
 Manages the Velociraptor GUI process lifecycle for ORCA.
 """
 
+import json
 import os
+import secrets
 import signal
 import subprocess
 import threading
@@ -15,15 +17,23 @@ from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import Response
 
 from config import cfg
-from auth_utils import get_current_user
+from auth_utils import get_current_user, require_admin
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
 VELO_BINARY    = str(cfg.VR_EXE_LOCAL)
-VELO_CONFIG    = Path(VELO_BINARY).parent / "server.config.yaml"
-_gui_port: int = 8889  # updated after config is read
+# Config, datastore and GUI credentials live in the persistent evidence
+# volume. (They used to sit next to the binary: /app/bin is a read-only
+# mount and /usr/local/bin isn't writable by the backend user, so config
+# generation always failed in Docker.)
+VELO_DIR       = Path(cfg.DATA_ROOT) / "velociraptor"
+VELO_CONFIG    = VELO_DIR / "server.config.yaml"
+VELO_CREDS     = VELO_DIR / "gui_credentials.json"
+GUI_USER       = "admin"
+GUI_PORT       = 8889  # published by docker-compose.yml
+_gui_port: int = GUI_PORT  # updated after config is read
 def _get_gui_port() -> int:
     """Read the GUI port from the generated config, fall back to 8889."""
     try:
@@ -86,25 +96,60 @@ def get_status() -> dict:
 
 
 def _ensure_config() -> bool:
-    if VELO_CONFIG.exists():
+    """Create the server config and a GUI admin user on first start."""
+    if VELO_CONFIG.exists() and VELO_CREDS.exists():
         return True
     _log(f"Config not found at {VELO_CONFIG}, generating...")
     try:
+        VELO_DIR.mkdir(parents=True, exist_ok=True)
+        merge = {
+            "Datastore": {"location": str(VELO_DIR / "datastore"),
+                          "filestore_directory": str(VELO_DIR / "filestore")},
+            # GUI on all interfaces so the published port reaches it; the
+            # other listeners moved off 8000/8001/8003 because the ORCA
+            # backend already owns 8000 inside this container.
+            "GUI": {"bind_address": "0.0.0.0", "bind_port": GUI_PORT},
+            "Frontend": {"bind_port": 8100},
+            "API": {"bind_port": 8101},
+            "Monitoring": {"bind_port": 8103},
+            # Default is /etc/velociraptor.writeback.yaml: not writable here.
+            "Client": {"writeback_linux": str(VELO_DIR / "client.writeback.yaml")},
+        }
         r = subprocess.run(
-            [VELO_BINARY, "config", "generate"],
-            capture_output=True, text=True, timeout=30,
+            [VELO_BINARY, "config", "generate", "--merge", json.dumps(merge)],
+            capture_output=True, text=True, timeout=60,
         )
         if r.returncode != 0:
-            _log(f"Config generation failed: {r.stderr.strip()}")
+            _log(f"Config generation failed: {r.stderr.strip()[-500:]}")
             return False
-        # config generate writes yaml to stdout — save it
-        VELO_CONFIG.parent.mkdir(parents=True, exist_ok=True)
         VELO_CONFIG.write_text(r.stdout, encoding="utf-8")
         _log(f"Config written to {VELO_CONFIG}.")
+
+        # `gui` creates no users when given a config, so every login was
+        # rejected. Create one admin with a random password, readable by
+        # ORCA admins via /api/velociraptor/status.
+        password = secrets.token_urlsafe(18)
+        r = subprocess.run(
+            [VELO_BINARY, "--config", str(VELO_CONFIG), "user", "add", GUI_USER, password, "--role", "administrator"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if r.returncode != 0:
+            _log(f"GUI user creation failed: {r.stderr.strip()[-500:]}")
+            return False
+        VELO_CREDS.write_text(json.dumps({"username": GUI_USER, "password": password}), encoding="utf-8")
+        os.chmod(VELO_CREDS, 0o600)
+        _log("GUI user created.")
         return True
     except Exception as e:
         _log(f"Config generation exception: {e}")
         return False
+
+
+def _gui_credentials() -> Optional[dict]:
+    try:
+        return json.loads(VELO_CREDS.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def start_velociraptor() -> dict:
@@ -179,19 +224,26 @@ def stop_velociraptor() -> dict:
 router = APIRouter(prefix="/api/velociraptor", tags=["velociraptor"])
 
 
+# Start/stop and the GUI credentials are admin-only: the Velociraptor GUI
+# runs arbitrary server-side VQL inside the backend container (which holds
+# the database password and JWT secret), so it is an admin tool.
 @router.post("/start")
-def api_start(current_user: dict = Depends(get_current_user)):
-    return start_velociraptor()
+def api_start(current_user: dict = Depends(require_admin)):
+    result = start_velociraptor()
+    return {**result, "credentials": _gui_credentials()}
 
 
 @router.post("/stop")
-def api_stop(current_user: dict = Depends(get_current_user)):
+def api_stop(current_user: dict = Depends(require_admin)):
     return stop_velociraptor()
 
 
 @router.get("/status")
 def api_status(current_user: dict = Depends(get_current_user)):
-    return get_status()
+    status = get_status()
+    if current_user.get("role") == "admin":
+        status["credentials"] = _gui_credentials()
+    return status
 
 
 # ---------------------------------------------------------------------------

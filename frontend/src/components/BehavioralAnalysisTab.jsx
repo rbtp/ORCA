@@ -137,7 +137,7 @@ function ArtifactPickerModal({ assetId, onSelect, onClose }) {
           {loading && <div style={{ padding: 20, color: C.greyDim, fontFamily: 'monospace', fontSize: 11 }}>Loading artifact files...</div>}
           {!loading && files.length === 0 && (
             <div style={{ padding: 20, color: C.greyDim, fontFamily: 'monospace', fontSize: 11 }}>
-              No artifact files found for this asset. Run Velociraptor collection first.
+              No collected files for this asset yet. Use PULL FILE in the file browser to fetch one from the host first.
             </div>
           )}
           {files.map((f, i) => (
@@ -146,7 +146,7 @@ function ArtifactPickerModal({ assetId, onSelect, onClose }) {
               onMouseEnter={e => e.currentTarget.style.background = C.bgHover}
               onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
               <span style={{ color: C.greyDim, minWidth: 90, flexShrink: 0 }}>{f.t_code}</span>
-              <span style={{ color: C.white, wordBreak: 'break-all' }}>{f.source_file}</span>
+              <span style={{ color: C.white, wordBreak: 'break-all' }}>{f.original_path || f.source_file}</span>
             </div>
           ))}
         </div>

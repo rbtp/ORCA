@@ -35,6 +35,17 @@ RUN wget -q "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION
 ENV ORCA_GRYPE_EXE=/usr/local/bin/grype \
     ORCA_SYFT_EXE=/usr/local/bin/syft
 
+# Linux Velociraptor for in-container collection and the Velociraptor GUI.
+# backend/bin/ only has velociraptor.exe (pushed to Windows targets), so the
+# local binary (cfg.VR_EXE_LOCAL) never existed in the container. Same
+# version as the vendored Windows build.
+ARG VELOCIRAPTOR_VERSION=0.77.2
+RUN wget -q "https://github.com/Velocidex/velociraptor/releases/download/v${VELOCIRAPTOR_VERSION}/velociraptor-v${VELOCIRAPTOR_VERSION}-linux-amd64" \
+         -O /usr/local/bin/velociraptor && \
+    chmod +x /usr/local/bin/velociraptor && \
+    velociraptor version | head -3
+ENV ORCA_VR_EXE_LOCAL=/usr/local/bin/velociraptor
+
 WORKDIR /app
 
 COPY requirements.txt .

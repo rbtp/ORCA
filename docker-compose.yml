@@ -9,6 +9,10 @@ services:
     restart: unless-stopped
     expose:
       - "8000"
+    ports:
+      # Velociraptor GUI (Options > Velociraptor, admin-only). Started on
+      # demand, protected by its own login; nothing listens here otherwise.
+      - "8889:8889"
     environment:
       - DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@orca-postgres:5432/orca_db
       - JWT_SECRET=${JWT_SECRET}

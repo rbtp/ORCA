@@ -390,6 +390,6 @@ Edit your own initials and email, and change your password (requires your curren
 
 A log of logged admin activity — currently, every evidence deletion (see [Reviewing Evidence in the Evidence Window](#reviewing-evidence-in-the-evidence-window)) — showing timestamp, operator, action, investigation, asset, technique, and details. Use the **INVESTIGATION** and **ASSET** dropdowns to narrow the list; the asset dropdown only offers assets from the currently selected investigation.
 
-### Velociraptor GUI
+### Velociraptor GUI (Admin Only)
 
-Click **VELOCIRAPTOR** in the Options sidebar to open the Velociraptor web GUI in a modal. This launches the Velociraptor server inside the backend container and opens the GUI URL based on the current hostname. Use this for advanced VQL queries and direct server management.
+Click **VELOCIRAPTOR** in the Options sidebar, then **START**. ORCA starts a Velociraptor server inside the backend container and shows **OPEN VELOCIRAPTOR ↗** plus the Velociraptor login (username `admin` and a password generated on first start). The GUI opens on port 8889 of the ORCA server, with its own self-signed certificate (accept the browser warning once). Its config, datastore and login are kept in the evidence volume, so they survive restarts. Starting the GUI and seeing its password are admin-only, because the GUI can run arbitrary VQL inside the ORCA server. Stop it from the same panel when you're done.

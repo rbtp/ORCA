@@ -605,10 +605,12 @@ async def run_vr_via_agent(target_list, tsource, agent_id, asset_id):
                 "surgical_yaml": item.get("surgical_yaml") or "",
             }, timeout=300.0)
         except Exception as e:
+            # Still record a result: skipping left the technique "pending"
+            # in the UI forever with no indication anything went wrong.
             print(f"[VR_AGENT] {t_code}: dispatch failed -- {e}")
-            continue
+            lines = [json.dumps({"type": "error", "data": {"message": f"dispatch to agent failed: {e}"}})]
 
-        raw_rows, fallback_used = [], False
+        raw_rows, fallback_used, agent_errors = [], False, []
         for raw_line in lines:
             try:
                 evt = json.loads(raw_line)
@@ -619,6 +621,7 @@ async def run_vr_via_agent(target_list, tsource, agent_id, asset_id):
             elif evt.get("type") == "done":
                 fallback_used = evt["data"].get("fallback_used", False)
             elif evt.get("type") == "error":
+                agent_errors.append(str(evt["data"].get("message")))
                 print(f"[VR_AGENT] {t_code}: agent error -- {evt['data'].get('message')}")
 
         clean_rows = []
@@ -662,7 +665,11 @@ async def run_vr_via_agent(target_list, tsource, agent_id, asset_id):
                     VALUES (:aid, :t, 'NO_ARTIFACTS', :s, FALSE)
                     ON CONFLICT (asset_id, t_code)
                     DO UPDATE SET verdict = 'NO_ARTIFACTS', evidence_summary = EXCLUDED.evidence_summary
-                """), {"aid": asset_id, "t": t_code, "s": json.dumps({"message": "Collection executed — no artifacts found on this host for this technique. Manual evidence upload recommended."})})
+                """), {"aid": asset_id, "t": t_code, "s": json.dumps({"message": (
+                    "Collection failed on agent: " + " | ".join(agent_errors)[:800]
+                    if agent_errors else
+                    "Collection executed — no artifacts found on this host for this technique. Manual evidence upload recommended."
+                )})})
                 print(f"[VR_AGENT] {t_code}: NO_ARTIFACTS")
             conn.commit()
 

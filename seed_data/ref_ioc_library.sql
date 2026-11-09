@@ -22,7 +22,6 @@ SET row_security = off;
 -- Data for Name: ref_ioc_library; Type: TABLE DATA; Schema: public; Owner: postgres
 --
 
-INSERT INTO public.ref_ioc_library (id, indicator_type, value, threat_actor, severity, description, added_at, label) VALUES (2, 'FREE_TEXT', 'system', '', 'HIGH', '', '2026-06-10 12:07:47.446392', NULL);
 
 
 --

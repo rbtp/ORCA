@@ -69,29 +69,111 @@ docker compose version *> $null
 if ($LASTEXITCODE -ne 0) { Fail "'docker compose' is not available. Update Docker Desktop." }
 
 foreach ($name in 'orca-backend', 'orca-frontend', 'orca-postgres') {
-    $proj = docker inspect $name --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>$null
-    if ($LASTEXITCODE -eq 0 -and $proj -ne 'orcaweb') {
-        Fail "A container named '$name' already exists and isn't part of this ORCA install. Remove or rename it first."
+    # {{json ...}} rather than {{index .Config.Labels "..."}}: Windows
+    # PowerShell 5.1 strips the inner double quotes when calling docker,
+    # which breaks the template and made this check silently never fire.
+    $labelsJson = docker inspect $name --format '{{json .Config.Labels}}' 2>$null
+    if ($LASTEXITCODE -ne 0) { continue }
+    $labels = $labelsJson | ConvertFrom-Json
+    $proj = if ($labels) { $labels.'com.docker.compose.project' } else { $null }
+    if ($proj -ne 'orcaweb') {
+        Fail "A container named '$name' already exists and isn't managed by this ORCA install (older start.bat-style install?). Run .\uninstall.ps1 first."
     }
 }
 
 # ── 2. .env ──────────────────────────────────────────────────────────────────
-if (Test-Path .env) {
-    Step '.env already exists, keeping it.'
-} else {
-    Step 'Creating .env...'
-    if (-not $ServerAddress) {
-        $detected = Get-PrimaryIPv4
-        $answer = Read-Host "Server IP/hostname analysts and agents will use [$detected]"
-        $ServerAddress = if ($answer) { $answer.Trim() } else { $detected }
+# .env holds this machine's secrets and address. Installs made by this script
+# record the machine in ORCA_INSTALL_HOST, so a .env that arrived with a
+# folder copied from another machine can be recognised and not reused.
+$thisHost = $env:COMPUTERNAME
+$project  = if ($env:COMPOSE_PROJECT_NAME) { $env:COMPOSE_PROJECT_NAME } else { 'orcaweb' }
+# Settings that are safe to carry over from another machine's .env.
+$portableKeys = 'VT_API_KEY','VT_RECHECK_DAYS','VT_RATE_LIMIT_SECONDS','SMTP_HOST','SMTP_PORT','SMTP_USER',
+                'SMTP_PASSWORD','SMTP_FROM','SMTP_USE_TLS','ORCA_BOOTSTRAP_ADMIN_USERNAME',
+                'ORCA_BOOTSTRAP_ADMIN_PASSWORD','ORCA_BOOTSTRAP_ADMIN_INITIALS'
+
+function Get-EnvValue($text, $key) {
+    if ($text -match "(?m)^$key=(.*)$") { return $Matches[1].Trim() } else { return $null }
+}
+function Set-EnvValue($text, $key, $value) {
+    if ($text -match "(?m)^$key=") { return ($text -replace "(?m)^$key=.*$", "$key=$value") }
+    if ($text -match "(?m)^# $key=") { return ($text -replace "(?m)^# $key=.*$", "$key=$value") }
+    return ($text.TrimEnd() + "`n$key=$value`n")
+}
+function Get-LocalAddresses {
+    $a = @('localhost', '127.0.0.1', $env:COMPUTERNAME.ToLower())
+    try { $a += (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop).IPAddress } catch {}
+    return $a
+}
+function Read-ServerAddress {
+    if ($ServerAddress) { return $ServerAddress }
+    $detected = Get-PrimaryIPv4
+    $answer = Read-Host "Server IP/hostname analysts and agents will use [$detected]"
+    if ($answer) { return $answer.Trim() } else { return $detected }
+}
+function Write-EnvFile($text) {
+    [IO.File]::WriteAllText((Join-Path $PSScriptRoot '.env'), $text, (New-Object Text.UTF8Encoding $false))
+}
+
+docker volume inspect "${project}_orca-postgres-data" *> $null
+$haveDatabase = ($LASTEXITCODE -eq 0)
+if (-not $haveDatabase -and -not $env:COMPOSE_PROJECT_NAME) {
+    docker inspect orca-postgres *> $null
+    $haveDatabase = ($LASTEXITCODE -eq 0)
+}
+
+$existing = if (Test-Path .env) { Get-Content .env -Raw } else { $null }
+$envHost  = if ($existing) { Get-EnvValue $existing 'ORCA_INSTALL_HOST' } else { $null }
+
+if ($existing -and $envHost -eq $thisHost) {
+    Step '.env already exists for this machine, keeping it.'
+    if ($ServerAddress) {
+        $existing = Set-EnvValue $existing 'ORCA_SERVER_URL' "https://$ServerAddress"
+        $existing = Set-EnvValue $existing 'CORS_ORIGINS' "https://$ServerAddress,https://localhost"
+        Write-EnvFile $existing
+        Write-Host "       Server address set to: https://$ServerAddress"
     }
+} elseif ($existing -and $haveDatabase) {
+    # Pre-marker .env with an existing ORCA database: the DB password is
+    # baked into that database, so the secrets must stay. Only the address
+    # may need fixing.
+    Step '.env found alongside an existing ORCA database, keeping its secrets.'
+    $url = Get-EnvValue $existing 'ORCA_SERVER_URL'
+    $urlHost = if ($url) { ([uri]$url).Host.ToLower() } else { '' }
+    if ($ServerAddress -or -not $urlHost -or ((Get-LocalAddresses) -notcontains $urlHost)) {
+        if (-not $ServerAddress -and $urlHost) {
+            Write-Host "       ORCA_SERVER_URL ($url) is not an address of this machine." -ForegroundColor Yellow
+        }
+        $addr = Read-ServerAddress
+        $existing = Set-EnvValue $existing 'ORCA_SERVER_URL' "https://$addr"
+        $existing = Set-EnvValue $existing 'CORS_ORIGINS' "https://$addr,https://localhost"
+        Write-Host "       Server address: https://$addr"
+    }
+    Write-EnvFile (Set-EnvValue $existing 'ORCA_INSTALL_HOST' $thisHost)
+} else {
+    if ($existing) {
+        $from = if ($envHost) { $envHost } else { 'another-machine' }
+        $backup = ".env.from-$from-$(Get-Date -Format yyyyMMdd-HHmmss)"
+        Copy-Item .env $backup
+        Step ".env came from another machine (saved as $backup). Creating a new one for this machine..."
+    } else {
+        Step 'Creating .env...'
+    }
+    $addr = Read-ServerAddress
     $envText = Get-Content .env.example -Raw
-    $envText = $envText -replace '(?m)^JWT_SECRET=.*$', "JWT_SECRET=$(New-Secret)"
-    $envText = $envText -replace '(?m)^DB_PASSWORD=.*$', "DB_PASSWORD=$(New-Secret)"
-    $envText = $envText -replace '(?m)^CORS_ORIGINS=.*$', "CORS_ORIGINS=https://$ServerAddress,https://localhost"
-    $envText = $envText -replace '(?m)^# ORCA_SERVER_URL=.*$', "ORCA_SERVER_URL=https://$ServerAddress"
-    [IO.File]::WriteAllText((Join-Path $PSScriptRoot '.env'), $envText, (New-Object Text.UTF8Encoding $false))
-    Write-Host "       Server address: https://$ServerAddress"
+    $envText = Set-EnvValue $envText 'JWT_SECRET' (New-Secret)
+    $envText = Set-EnvValue $envText 'DB_PASSWORD' (New-Secret)
+    $envText = Set-EnvValue $envText 'CORS_ORIGINS' "https://$addr,https://localhost"
+    $envText = Set-EnvValue $envText 'ORCA_SERVER_URL' "https://$addr"
+    if ($existing) {
+        foreach ($k in $portableKeys) {
+            $v = Get-EnvValue $existing $k
+            if ($v) { $envText = Set-EnvValue $envText $k $v; Write-Host "       Carried over $k" }
+        }
+    }
+    $envText = Set-EnvValue $envText 'ORCA_INSTALL_HOST' $thisHost
+    Write-EnvFile $envText
+    Write-Host "       Server address: https://$addr"
 }
 
 # ── 3. Build ─────────────────────────────────────────────────────────────────
@@ -118,6 +200,28 @@ if ($SkipGrypeDb) {
 }
 
 # ── 5. Start ─────────────────────────────────────────────────────────────────
+Step 'Starting the database...'
+docker compose up -d orca-postgres
+if ($LASTEXITCODE -ne 0) { Fail "Could not start the database container (see output above)." }
+# TCP check (-h 127.0.0.1): on a new volume Postgres first runs the schema and
+# seed scripts on a socket-only server, which a socket check would report as ready.
+$deadline = (Get-Date).AddMinutes(5)
+do {
+    docker compose exec -T orca-postgres pg_isready -h 127.0.0.1 -U postgres -d orca_db *> $null
+    if ($LASTEXITCODE -eq 0) { break }
+    Start-Sleep -Seconds 3
+} while ((Get-Date) -lt $deadline)
+if ($LASTEXITCODE -ne 0) { Fail "Database didn't become ready. Check: docker compose logs orca-postgres" }
+
+# Make the database password match .env. Postgres only applies
+# POSTGRES_PASSWORD when a volume is first created, so a database kept from an
+# earlier install (or a .env copied from another machine) could otherwise
+# have a different password and the backend couldn't connect. Runs over the
+# container's local socket, which needs no password.
+$dbPassword = Get-EnvValue (Get-Content .env -Raw) 'DB_PASSWORD'
+docker compose exec -T orca-postgres psql -U postgres -d postgres -q -c "ALTER USER postgres WITH PASSWORD '$dbPassword'" *> $null
+if ($LASTEXITCODE -ne 0) { Fail "Could not set the database password. Check: docker compose logs orca-postgres" }
+
 Step 'Starting ORCA...'
 docker compose up -d
 if ($LASTEXITCODE -ne 0) { Fail "'docker compose up' failed (see output above)." }

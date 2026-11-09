@@ -438,14 +438,22 @@ async def get_asset_capa_techniques(asset_id: int, current_user: dict = Depends(
 
 @router.get("/asset/{asset_id}/artifact-files")
 async def get_artifact_files(asset_id: int, current_user: dict = Depends(get_current_user)):
+    """Files collected from this asset that are actually stored on the server
+    and can be analysed: completed live file pulls (MFT browser "PULL FILE"),
+    saved under DATA_ROOT/file_fetches/ -- inside the evidence root that
+    /submit's file_path sandbox accepts. (This used to query a nonexistent
+    artifact_results.source_file column and always returned 500.)"""
     with db.engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT DISTINCT source_file, t_code
-            FROM artifact_results
-            WHERE asset_id=:aid AND source_file IS NOT NULL AND source_file != ''
-            ORDER BY source_file
+            SELECT local_path, file_path
+            FROM file_fetch_jobs
+            WHERE asset_id = :aid AND status = 'received' AND local_path IS NOT NULL
+            ORDER BY completed_at DESC
         """), {"aid": asset_id}).fetchall()
-    return [{"source_file": r[0], "t_code": r[1]} for r in rows]
+    # source_file is what the picker submits back as file_path; t_code is the
+    # label column it shows next to it.
+    return [{"source_file": r[0], "t_code": "FILE PULL", "original_path": r[1]}
+            for r in rows if os.path.isfile(r[0])]
 
 
 # ── Live single-file pull (MFT browser "PULL FILE") ───────────────────────────
