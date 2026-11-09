@@ -75,7 +75,7 @@ else
     docker compose run --rm --no-deps --user root \
         -v ./backend/bin/syftgrype/grype-db:/grype-db \
         -e GRYPE_DB_CACHE_DIR=/grype-db \
-        --entrypoint grype orca-backend db update \
+        --entrypoint sh orca-backend -c 'grype db update && chmod -R a+rX /grype-db' \
     || printf '\033[33m[ORCA] WARN: Grype DB download failed. ORCA will still run; vulnerability scans will not work until you re-run this installer or populate the DB (see docs/ADMIN_GUIDE.md).\033[0m\n'
 fi
 

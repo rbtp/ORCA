@@ -63,7 +63,7 @@
 - Grype queries the vulnerability database against the SBOM
 - Results deduplicated and stored per asset: CVE ID, severity, package, version, fix version
 - Severity breakdown (Critical / High / Medium / Low)
-- Uses a bundled, operator-populated Grype DB (`backend/bin/syftgrype/grype-db/`, ~3 GB, not in git). Offline scans disable DB auto-update and the DB age check, so an older offline DB keeps working
+- Uses a bundled, operator-populated Grype DB (`backend/bin/syftgrype/grype-db/`, ~3 GB, not in git). The backend never auto-updates it and skips the DB age check, so scans keep working as it ages; refresh it periodically (see DEPLOY.md)
 
 ### Disk Image Mounting
 - Mount E01, VMDK, VHD, VHDX, QCOW2 and other formats via Arsenal Image Mounter CLI

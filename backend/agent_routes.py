@@ -5,13 +5,15 @@ import json
 import os
 import socket
 import tempfile
+import threading
 import uuid
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -485,7 +487,7 @@ _AGENT_BIN_MAP = {
     # signature database) to do anything at all. Downloading just the one
     # .exe (what this used to do) would fail to even launch on the agent,
     # or silently run with zero signatures if it somehow did. Served as
-    # clamav.zip instead -- see _build_clamav_zip() below, same reasoning
+    # clamav.zip instead -- see _DIR_BUNDLES below, same reasoning
     # as arsenal.zip.
     "grype.exe":        os.path.join("syftgrype", "grype.exe"),
     "syft.exe":         os.path.join("syftgrype", "syft.exe"),
@@ -497,104 +499,75 @@ _AGENT_BIN_MAP = {
 # than one archive, since a single pre-built zip would exceed GitHub's 100MB
 # per-file limit. Zipped on first request and cached in /tmp (bin/ is a
 # read-only mount in the container) for orca_agent.py to download as one file.
-_ARSENAL_ZIP_CACHE = Path(tempfile.gettempdir()) / "orca_arsenal_cache.zip"
+_ZIP_BUILD_LOCKS: dict = {}
 
 
-def _build_arsenal_zip() -> Path:
-    if _ARSENAL_ZIP_CACHE.exists():
-        return _ARSENAL_ZIP_CACHE
-    arsenal_dir = Path(__file__).parent / "bin" / "arsenal"
-    if not arsenal_dir.is_dir():
-        raise HTTPException(404, "arsenal/ not present on server")
-    tmp_path = _ARSENAL_ZIP_CACHE.with_suffix(".building")
-    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in arsenal_dir.rglob("*"):
-            if f.is_file():
-                zf.write(f, f.relative_to(arsenal_dir))
-    tmp_path.rename(_ARSENAL_ZIP_CACHE)
-    return _ARSENAL_ZIP_CACHE
+def _cached_dir_zip(src_dir: Path, cache_name: str, compression: int, exclude_tmp: bool = False) -> Path:
+    """Zip src_dir into the container's temp dir (bin/ is a read-only mount)
+    and reuse it until any source file changes. Blocking: call it via
+    run_in_threadpool, never directly from an async handler -- zipping the
+    multi-GB Grype DB would otherwise freeze the whole backend.
+
+    - Rebuilt when any source file is newer than the cached zip, so a
+      refreshed Grype DB / ClamAV signatures reach agents without a
+      container recreate.
+    - One lock per cache file: concurrent first downloads wait for a single
+      build instead of racing on the same .building file.
+    """
+    if not src_dir.is_dir():
+        raise HTTPException(404, f"{src_dir.name}/ not present on server")
+    cache = Path(tempfile.gettempdir()) / cache_name
+    lock = _ZIP_BUILD_LOCKS.setdefault(cache_name, threading.Lock())
+
+    def wanted(f: Path) -> bool:
+        if not f.is_file():
+            return False
+        return not (exclude_tmp and any(part.startswith("tmp.") for part in f.relative_to(src_dir).parts))
+
+    with lock:
+        files = [f for f in src_dir.rglob("*") if wanted(f)]
+        newest = max((f.stat().st_mtime for f in files), default=0)
+        if cache.exists() and cache.stat().st_mtime >= newest:
+            return cache
+        tmp_path = cache.with_suffix(".building")
+        with zipfile.ZipFile(tmp_path, "w", compression) as zf:
+            for f in files:
+                zf.write(f, f.relative_to(src_dir))
+        os.replace(tmp_path, cache)
+        return cache
 
 
-# clamscan.exe needs its whole folder (DLLs it dynamically links against,
-# plus main.cvd/daily.cld -- its signature database) alongside it, same
-# reasoning as arsenal.zip above. tmp.* are freshclam's own leftover scratch
-# dirs, not needed to run clamscan and excluded to keep this smaller.
-_CLAMAV_ZIP_CACHE = Path(tempfile.gettempdir()) / "orca_clamav_cache.zip"
+_BIN_ROOT = Path(__file__).parent / "bin"
 
-
-def _build_clamav_zip() -> Path:
-    if _CLAMAV_ZIP_CACHE.exists():
-        return _CLAMAV_ZIP_CACHE
-    clamav_dir = Path(__file__).parent / "bin" / "clamav"
-    if not clamav_dir.is_dir():
-        raise HTTPException(404, "clamav/ not present on server")
-    tmp_path = _CLAMAV_ZIP_CACHE.with_suffix(".building")
-    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
-        for f in clamav_dir.rglob("*"):
-            if f.is_file() and not any(part.startswith("tmp.") for part in f.relative_to(clamav_dir).parts):
-                zf.write(f, f.relative_to(clamav_dir))
-    tmp_path.rename(_CLAMAV_ZIP_CACHE)
-    return _CLAMAV_ZIP_CACHE
-
-
-# Grype refuses to run at all without a vulnerability DB present (not just
-# degraded -- an outright error), and won't find one at all unless pointed
-# at it via GRYPE_DB_CACHE_DIR (see _run_artifact_collection's sibling
-# _run_grype in orca_agent.py). ZIP_STORED since this is already a compact
-# binary DB (multiple GB) -- compressing it further would just burn time
-# for no real size benefit.
-_GRYPE_DB_ZIP_CACHE = Path(tempfile.gettempdir()) / "orca_grype_db_cache.zip"
-
-
-def _build_grype_db_zip() -> Path:
-    if _GRYPE_DB_ZIP_CACHE.exists():
-        return _GRYPE_DB_ZIP_CACHE
-    db_dir = Path(__file__).parent / "bin" / "syftgrype" / "grype-db"
-    if not db_dir.is_dir():
-        raise HTTPException(404, "syftgrype/grype-db/ not present on server")
-    tmp_path = _GRYPE_DB_ZIP_CACHE.with_suffix(".building")
-    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
-        for f in db_dir.rglob("*"):
-            if f.is_file():
-                zf.write(f, f.relative_to(db_dir))
-    tmp_path.rename(_GRYPE_DB_ZIP_CACHE)
-    return _GRYPE_DB_ZIP_CACHE
+# Directory bundles served to agents as single zips:
+#  - arsenal.zip: aim_cli.exe needs its whole directory of DLLs (~300MB, 800+
+#    files). Committed as individual files because one pre-built zip would
+#    exceed GitHub's 100MB per-file limit.
+#  - clamav.zip: clamscan.exe needs its DLLs plus main.cvd/daily.cvd. tmp.*
+#    are freshclam's scratch dirs, not needed to run clamscan.
+#  - grype-db.zip: Grype refuses to run without a vulnerability DB (see
+#    _run_grype in orca_agent.py). ZIP_STORED: already a compact multi-GB
+#    binary DB, compressing it would just burn time.
+_DIR_BUNDLES = {
+    "arsenal.zip":  (_BIN_ROOT / "arsenal",                "orca_arsenal_cache.zip",  zipfile.ZIP_DEFLATED, False),
+    "clamav.zip":   (_BIN_ROOT / "clamav",                 "orca_clamav_cache.zip",   zipfile.ZIP_STORED,   True),
+    "grype-db.zip": (_BIN_ROOT / "syftgrype" / "grype-db", "orca_grype_db_cache.zip", zipfile.ZIP_STORED,   False),
+}
 
 
 @router.get("/download/bin/{filename}")
 async def download_binary(filename: str, current_user: dict = Depends(get_current_user)):
-    if filename == "arsenal.zip":
-        zip_path = _build_arsenal_zip()
-        return Response(
-            content=zip_path.read_bytes(),
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": 'attachment; filename="arsenal.zip"'},
-        )
-    if filename == "clamav.zip":
-        zip_path = _build_clamav_zip()
-        return Response(
-            content=zip_path.read_bytes(),
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": 'attachment; filename="clamav.zip"'},
-        )
-    if filename == "grype-db.zip":
-        zip_path = _build_grype_db_zip()
-        return Response(
-            content=zip_path.read_bytes(),
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": 'attachment; filename="grype-db.zip"'},
-        )
+    # FileResponse streams from disk -- never read multi-GB files into memory.
+    if filename in _DIR_BUNDLES:
+        src_dir, cache_name, compression, exclude_tmp = _DIR_BUNDLES[filename]
+        zip_path = await run_in_threadpool(_cached_dir_zip, src_dir, cache_name, compression, exclude_tmp)
+        return FileResponse(zip_path, media_type="application/octet-stream", filename=filename)
     if filename not in _AGENT_BIN_MAP:
         raise HTTPException(404, f"Binary not available for agent deployment: {filename}")
-    bin_root = Path(__file__).parent / "bin"
-    file_path = bin_root / _AGENT_BIN_MAP[filename]
+    file_path = _BIN_ROOT / _AGENT_BIN_MAP[filename]
     if not file_path.exists():
         raise HTTPException(404, f"{filename} not present on server")
-    return Response(
-        content=file_path.read_bytes(),
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
 
 
 @router.get("/download/orca_agent.py")

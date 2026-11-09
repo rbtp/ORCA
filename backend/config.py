@@ -84,7 +84,7 @@ class _Config:
     )
     # CLAM_BASE: the vendored Windows ClamAV bundle -- only ever served for
     # download to agents, as clamav.zip (agent_routes.py's
-    # _build_clamav_zip()), never executed in this process.
+    # _DIR_BUNDLES), never executed in this process.
     CLAM_BASE: str = os.environ.get(
         "ORCA_CLAM_BASE",
         os.path.join(_BASE, "bin", "clamav")

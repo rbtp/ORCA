@@ -57,6 +57,13 @@ Then apply any new files in `migrations/` that your database doesn't have yet (t
 docker exec -i orca-postgres psql -U postgres -d orca_db < migrations/<file>.sql
 ```
 
+## Refreshing the Grype Vulnerability DB
+
+The DB is used as-is and never auto-updated. To pull newer vulnerability data (e.g. monthly):
+```bash
+docker compose run --rm --no-deps --user root -v ./backend/bin/syftgrype/grype-db:/grype-db -e GRYPE_DB_CACHE_DIR=/grype-db --entrypoint sh orca-backend -c 'grype db update && chmod -R a+rX /grype-db'
+```
+
 ## Moving to a New Server IP
 
 Edit `ORCA_SERVER_URL` and `CORS_ORIGINS` in `.env`, then `docker compose up -d`. The TLS certificate is regenerated automatically on boot if it doesn't cover the new `ORCA_SERVER_URL`. No rebuild needed.

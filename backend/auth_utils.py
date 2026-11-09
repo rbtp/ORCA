@@ -6,6 +6,7 @@ import jwt
 from jwt.exceptions import PyJWTError
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, Request, status, Cookie
+from starlette.concurrency import run_in_threadpool
 
 SECRET_KEY = os.environ.get("JWT_SECRET")
 if not SECRET_KEY:
@@ -76,10 +77,50 @@ async def get_current_user(
     if not payload.get("sub"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
 
-    if payload.get("role") == "agent" and not request.url.path.startswith("/api/agent"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Agent tokens cannot access this endpoint")
+    if payload.get("role") == "agent":
+        # Agent tokens are standalone long-lived credentials (no user id),
+        # not user sessions, so the per-user check below doesn't apply.
+        if not request.url.path.startswith("/api/agent"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Agent tokens cannot access this endpoint")
+        return payload
 
+    # User session: the JWT alone isn't trusted for account state. The users
+    # row is re-read on every request so that deactivation, password
+    # change/reset (both bump token_version) and account deletion end
+    # existing sessions immediately, and role/initials changes apply without
+    # a re-login. Pre-token_version tokens carry no "tv" claim -> version 0.
+    user = await run_in_threadpool(_load_session_user, payload.get("id"))
+    if (
+        user is None
+        or not user["is_active"]
+        or int(payload.get("tv", 0)) != user["token_version"]
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="SESSION_REVOKED",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    payload["sub"] = user["username"]
+    payload["role"] = user["role"]
+    payload["initials"] = user["initials"]
+    payload["tv"] = user["token_version"]
     return payload
+
+
+def _load_session_user(user_id) -> Optional[dict]:
+    if user_id is None:
+        return None
+    # Imported here, not at module top: auth_utils is imported very early
+    # by many modules, and the DB manager connects on import.
+    from core.database_manager import db
+    from sqlalchemy import text
+    with db.engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT username, role, initials, is_active, token_version "
+            "FROM users WHERE id = :id"
+        ), {"id": user_id}).mappings().first()
+    return dict(row) if row else None
 
 # ── Admin guard ───────────────────────────────────────────────────────────────
 

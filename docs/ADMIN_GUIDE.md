@@ -172,11 +172,15 @@ The backend entrypoint attempts `freshclam` on each start — failures are non-f
 The Grype DB (~3 GB) is **not** in the git repository (it's gitignored). `install.ps1` / `install.sh` download it automatically using the Linux `grype` in the backend image. To do it by hand:
 
 ```bash
-docker compose run --rm --no-deps --user root -v ./backend/bin/syftgrype/grype-db:/grype-db -e GRYPE_DB_CACHE_DIR=/grype-db --entrypoint grype orca-backend db update
+docker compose run --rm --no-deps --user root -v ./backend/bin/syftgrype/grype-db:/grype-db -e GRYPE_DB_CACHE_DIR=/grype-db --entrypoint sh orca-backend -c 'grype db update && chmod -R a+rX /grype-db'
 # Result: backend/bin/syftgrype/grype-db/6/vulnerability.db (+ import.json)
+# chmod: grype creates the DB owner-only as root; the backend runs as the
+# unprivileged 'orca' user and must be able to read it.
+# (chmod: grype creates the DB owner-only as root; the backend runs as the
+#  unprivileged 'orca' user and must be able to read it)
 ```
 
-Then copy the ORCA folder, including `backend/bin/syftgrype/grype-db/`, to the air-gapped machine. The backend points Grype at this directory (`GRYPE_DB_DIR` in `config.py`; override with the `GRYPE_DB_CACHE_DIR` env var). It also serves the directory to agents as `grype-db.zip`. Offline scans turn off Grype's DB auto-update and DB age check, so an older DB keeps working. Re-run the update periodically to get newer vulnerability data.
+Then copy the ORCA folder, including `backend/bin/syftgrype/grype-db/`, to the air-gapped machine. The backend points Grype at this directory (`GRYPE_DB_DIR` in `config.py`; override with the `GRYPE_DB_CACHE_DIR` env var). It also serves the directory to agents as `grype-db.zip`. The backend never auto-updates it (the folder is read-only to the backend) and skips Grype's DB age check, so scans keep working as the DB ages. To get newer vulnerability data, re-run the command above periodically.
 
 ---
 
@@ -316,7 +320,7 @@ All user management requires the `admin` role.
 
 ### Via the UI
 
-Requires `migrations/add_user_account_management.sql` (adds `email`, `is_active`, `last_login` to `users`, plus the `enrollment_tokens` and `password_reset_tokens` tables).
+Requires `migrations/add_user_account_management.sql` and `migrations/add_users_token_version.sql` (adds `email`, `is_active`, `last_login` to `users`, plus the `enrollment_tokens` and `password_reset_tokens` tables).
 
 **Options → User Registry:**
 - View all users (username, initials, role, email, active status, last login)
@@ -324,6 +328,8 @@ Requires `migrations/add_user_account_management.sql` (adds `email`, `is_active`
 - **Reset password**: creates a one-time reset link, valid for 1 hour. Admins never see or set a user's password.
 - **Edit** initials, role, or email
 - **Deactivate / reactivate**: a deactivated user can't log in, but their audit-log and case-assignment history stays intact. Use this rather than deleting.
+
+**Changes take effect immediately.** Every request re-checks the account, so deactivating a user, or a password change or reset, logs them out of all open sessions at once (a user changing their own password stays logged in where they did it). Role changes apply on the user's next request. This needs `migrations/add_users_token_version.sql` on existing databases.
 - Delete user (cannot delete yourself)
 
 **Link delivery:** if SMTP is configured (see `SMTP_*` in the [Environment Variables Reference](#environment-variables-reference)), invite and reset links are emailed to the user's address. Either way, the link is also shown to the admin in the UI so it can be handed over manually. That is the normal workflow on an air-gapped install. Links are built from `ORCA_SERVER_URL`, so make sure it's set to the address analysts actually browse to.

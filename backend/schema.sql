@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict gVlF2Ok221i7Ua4Qo5da6amBw1ZychKwglT5IHEuLynLnSeBTl52MokCeqhfo4x
+\restrict kXZRvQgXDYMzWBhM2QpNfJVuTci3J4bSSd552DgLJgh7aCRQ8NbdnLArcmOcowL
 
 -- Dumped from database version 15.19 (Debian 15.19-1.pgdg13+2)
 -- Dumped by pg_dump version 15.19 (Debian 15.19-1.pgdg13+2)
@@ -1653,7 +1653,8 @@ CREATE TABLE public.users (
     created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
     email text,
     is_active boolean DEFAULT true NOT NULL,
-    last_login timestamp with time zone
+    last_login timestamp with time zone,
+    token_version integer DEFAULT 0 NOT NULL
 );
 
 
@@ -3197,5 +3198,5 @@ ALTER TABLE ONLY public.tool_locks
 -- PostgreSQL database dump complete
 --
 
-\unrestrict gVlF2Ok221i7Ua4Qo5da6amBw1ZychKwglT5IHEuLynLnSeBTl52MokCeqhfo4x
+\unrestrict kXZRvQgXDYMzWBhM2QpNfJVuTci3J4bSSd552DgLJgh7aCRQ8NbdnLArcmOcowL
 

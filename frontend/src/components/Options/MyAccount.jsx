@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 
 export default function MyAccount() {
-  const { user } = useAuth();
+  const { user, refreshSessionExpiry } = useAuth();
   const [email, setEmail] = useState(user?.email || '');
   const [initials, setInitials] = useState(user?.initials || '');
   const [profileMsg, setProfileMsg] = useState('');
@@ -49,6 +49,9 @@ export default function MyAccount() {
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
+        // The server re-issued this session's cookie (other sessions were
+        // logged out); restart the expiry timer from the new token.
+        refreshSessionExpiry(data.expires_at);
         setPwMsg('PASSWORD_UPDATED');
         setCurrentPassword(''); setNewPassword(''); setConfirmPassword('');
       } else {

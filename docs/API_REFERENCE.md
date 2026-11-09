@@ -57,6 +57,8 @@ Rate-limited to **5 requests/minute** per IP.
 
 The JWT is returned only as an HttpOnly, Secure, SameSite=Strict cookie (`orca_token`, 60 minutes), never in the body. API clients must keep the cookie, e.g. `curl -c jar -b jar ...`. `POST /api/auth/logout` clears it.
 
+Every authenticated request re-checks the user's account. A session ends immediately (`401 SESSION_REVOKED`) if the user is deactivated or deleted, or their password is changed or reset. Role and initials changes apply on the next request without re-login.
+
 **Errors**: `401 INVALID_CREDENTIALS`, `403 ACCOUNT_DEACTIVATED` (only returned after a correct password), `429 Rate limit exceeded`
 
 Successful logins update `users.last_login`.
@@ -77,7 +79,7 @@ Update your own profile. Username and role are admin-only (see Admin — Users).
 
 **Request body**: `{ "current_password": "string", "new_password": "string" }` (min 8 chars)
 
-**Response 200**: `{ "status": "OK" }`
+**Response 200**: `{ "status": "OK", "expires_at": 1767225600 }`. Logs the user out of every other session and re-issues this session's cookie.
 **Errors**: `400 PASSWORD_TOO_SHORT`, `401 CURRENT_PASSWORD_INCORRECT`
 
 ---
@@ -123,7 +125,7 @@ No auth. Validates a reset token.
 
 ### POST /api/auth/reset-password/{token}
 
-No auth. Sets a new password. Single use.
+No auth. Sets a new password and ends all of that user's existing sessions. Single use.
 
 **Request body**: `{ "password": "string" }` (min 8 chars)
 
@@ -1328,7 +1330,7 @@ Create a one-time password reset link (valid 1 hour).
 
 ### POST /api/admin/users/{username}/toggle-active
 
-Deactivate or reactivate an account. Deactivated users can't log in; their history is preserved.
+Deactivate or reactivate an account. Deactivation ends the user's open sessions immediately (they stay ended after reactivation); history is preserved.
 
 **Response 200**: `{ "status": "OK", "username": "alice", "is_active": false }`
 **Errors**: `400 CANNOT_DEACTIVATE_SELF`, `404 USER_NOT_FOUND`

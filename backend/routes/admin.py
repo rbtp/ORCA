@@ -250,7 +250,12 @@ async def toggle_active(username: str, current_user: dict = Depends(get_current_
 
     with db.engine.begin() as conn:
         row = conn.execute(text(
-            "UPDATE users SET is_active = NOT is_active WHERE username = :u RETURNING is_active"
+            # On deactivation also bump token_version, so sessions that were
+            # open at the time stay dead if the account is reactivated later
+            # (is_active on the right-hand side is the pre-update value).
+            "UPDATE users SET is_active = NOT is_active, "
+            "token_version = token_version + CASE WHEN is_active THEN 1 ELSE 0 END "
+            "WHERE username = :u RETURNING is_active"
         ), {"u": username}).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="USER_NOT_FOUND")

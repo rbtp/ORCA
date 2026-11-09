@@ -23,10 +23,21 @@
 - **Fully portable, no hardcoded IPs (as of 2026-06-18)**: frontend builds with `VITE_API_URL` empty, so all `fetch()` calls resolve to relative `/api/...` paths against whatever host served the page; nginx proxies `/api/` to the backend by Docker service name (`orca-backend:8000`); CORS reads allowed origins from `CORS_ORIGINS` in `.env` (comma-separated, default `https://localhost`); TLS cert auto-generates on first boot for whatever IP/hostname the container has. Moving to a new server requires editing only `.env` (`CORS_ORIGINS`) and running `docker compose up --build` — no source changes.
 
 ## Current Task
-**All work through 2026-11-06 committed (2026-11-09). Awaiting next task.**
-Not yet done for the latest work: running containers have not been rebuilt with the account-management / agent-collection code, and neither feature has been tested end-to-end in the running app (enrollment link → set password → login; reset link; deactivate; Evidence Window "RUN ON AGENT").
+**Clone-and-install readiness + server-side session revocation (2026-11-09).** Live instance rebuilt and tested. Fresh-clone install test via `install.ps1` (isolated `orcatest` stack on 8443/8080) in progress. Push to GitHub only after it passes (user instruction: "rebuild and test before pushing").
 
 ## Progress Log
+- [x] Server-side session revocation (2026-11-09):
+  - Problem found in testing: auth was JWT-only, so deactivation / password change / reset / role change didn't affect already-issued sessions (up to 60 min)
+  - `migrations/add_users_token_version.sql` (applied live): `users.token_version`. Login JWT carries it as `tv`
+  - `auth_utils.get_current_user`: for non-agent tokens, re-reads the users row every request (`run_in_threadpool`); 401 `SESSION_REVOKED` if missing / inactive / `tv` mismatch; role/initials/username taken from DB. Tokens without `tv` = version 0, so pre-upgrade sessions survive the deploy. Agent tokens (`role: agent`, no user id) are skipped, still limited to `/api/agent/*`
+  - Bumps: change-password (re-issues the caller's cookie via `main._issue_session_cookie`), completed reset, deactivation (so reactivation doesn't revive old sessions)
+  - Frontend `AuthContext.jsx`: global `fetch` wrapper logs out on 401 with detail `SESSION_REVOKED` / `Could not validate credentials` (not on other 401s like `CURRENT_PASSWORD_INCORRECT`); `MyAccount` restarts the expiry timer after a password change
+  - Verified 19 API scenarios live (see session history); frontend wrapper builds but was not exercised in a browser
+- [x] Fresh-clone installability (2026-11-09):
+  - `install.ps1` / `install.sh`: .env with random secrets + server address, build, Grype DB via `docker compose run ... grype db update`, start, print first-boot admin login. Use `docker compose logs` (service names), not container names
+  - Committed `backend/data/mitre-attack.json` and ClamAV sigs; `.gitattributes` (LF for container files, CRLF for .bat/.ps1); `backend/initdb/02-seed-data.sh` loads `seed_data/` on fresh volumes; Postgres healthcheck over TCP (`-h 127.0.0.1`)
+  - Backend image now includes Linux grype 0.117.0 / syft 1.51.0 (`ORCA_GRYPE_EXE`/`ORCA_SYFT_EXE`); in-container vuln scan previously had no Linux binary at all
+  - `DEPLOY.md` rewritten around the installer; README/ADMIN_GUIDE install sections updated; API docs fixed (login sets HttpOnly cookie, no `access_token` in body)
 - [x] Commit backlog + docs refresh (2026-11-09):
   - Committed the uncommitted Sept/Nov work as 3 commits (account management; agent-dispatched collection; seed data). `backend/main.py` was split by hunk between the first two
   - `.gitignore`: added `backend/bin/syftgrype/grype-db/`. The 3.2 GB `vulnerability.db` can't go to GitHub; operators populate it (`GRYPE_DB_CACHE_DIR=backend/bin/syftgrype/grype-db grype db update`)

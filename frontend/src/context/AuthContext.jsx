@@ -25,6 +25,9 @@ export const AuthProvider = ({ children }) => {
     } catch { /* best-effort cookie clear */ }
   }, []);
 
+  const logoutRef = React.useRef(logout);
+  logoutRef.current = logout;
+
   const scheduleExpiryLogout = useCallback((expiresAt) => {
     clearExpiryTimer();
     if (!expiresAt) return;
@@ -35,6 +38,32 @@ export const AuthProvider = ({ children }) => {
     }
     expiryTimerRef.current = setTimeout(() => logout(true), msUntilExpiry);
   }, [logout]);
+
+  // Global session-loss handler. The backend re-checks the account on every
+  // request (auth_utils.get_current_user), so a session can end at any time:
+  // the user was deactivated or deleted, or their password was changed or
+  // reset elsewhere. Any authenticated /api/ call answering 401 with one of
+  // the session-failure details sends the user back to the login screen,
+  // instead of every component having to handle it. Only those two details
+  // count -- e.g. change-password's 401 CURRENT_PASSWORD_INCORRECT must not
+  // log anyone out.
+  useEffect(() => {
+    const SESSION_FAILURES = new Set(['SESSION_REVOKED', 'Could not validate credentials']);
+    const UNAUTHENTICATED = /\/api\/auth\/(login|logout|me|forgot-password|enroll|reset-password)/;
+    const originalFetch = window.fetch;
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      if (response.status === 401) {
+        const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+        if (url.includes('/api/') && !UNAUTHENTICATED.test(url)) {
+          const body = await response.clone().json().catch(() => ({}));
+          if (SESSION_FAILURES.has(body.detail)) logoutRef.current(true);
+        }
+      }
+      return response;
+    };
+    return () => { window.fetch = originalFetch; };
+  }, []);
 
   // On mount — restore session via /auth/me (cookie sent automatically)
   useEffect(() => {
@@ -105,7 +134,7 @@ export const AuthProvider = ({ children }) => {
   }, [logout]);
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading, sessionExpired, handle401 }}>
+    <AuthContext.Provider value={{ user, login, logout, loading, sessionExpired, handle401, refreshSessionExpiry: scheduleExpiryLogout }}>
       {!loading && children}
     </AuthContext.Provider>
   );

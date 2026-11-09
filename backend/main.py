@@ -173,13 +173,34 @@ class MountRequest(BaseModel):
 # computed once (bcrypt hashing is deliberately slow) rather than per request.
 _DUMMY_PASSWORD_HASH = hash_password(os.urandom(16).hex())
 
+def _issue_session_cookie(response: Response, user_id, username, role, initials, token_version) -> int:
+    """Sets the HttpOnly session cookie. "tv" must equal users.token_version
+    or get_current_user rejects the token (see auth_utils.py). Returns the
+    expiry as unix seconds."""
+    import time as _time
+    token = create_access_token(data={
+        "sub": username, "id": user_id, "role": role,
+        "initials": initials, "tv": token_version,
+    })
+    response.set_cookie(
+        key="orca_token",
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=3600,
+        path="/",
+    )
+    return int(_time.time()) + (60 * 60)  # 60-minute expiry
+
+
 @app.post("/api/auth/login")
 @limiter.limit("5/minute")
 async def login(request: Request, response: Response, login_data: LoginRequest):
     """Verifies user credentials and sets an HttpOnly session cookie."""
     try:
         with db.engine.connect() as conn:
-            query = text("SELECT id, username, password_hash, initials, role, is_active FROM users WHERE username = :u")
+            query = text("SELECT id, username, password_hash, initials, role, is_active, token_version FROM users WHERE username = :u")
             user_record = conn.execute(query, {"u": login_data.username}).fetchone()
 
         if not user_record:
@@ -191,7 +212,7 @@ async def login(request: Request, response: Response, login_data: LoginRequest):
             verify_password(login_data.password, _DUMMY_PASSWORD_HASH)
             raise HTTPException(status_code=401, detail="INVALID_CREDENTIALS")
 
-        db_id, db_username, db_password_hash, db_initials, db_role, db_is_active = user_record
+        db_id, db_username, db_password_hash, db_initials, db_role, db_is_active, db_token_version = user_record
 
         if not verify_password(login_data.password, db_password_hash):
             raise HTTPException(status_code=401, detail="INVALID_CREDENTIALS")
@@ -203,24 +224,11 @@ async def login(request: Request, response: Response, login_data: LoginRequest):
             # "account disabled" without already knowing the password.
             raise HTTPException(status_code=403, detail="ACCOUNT_DEACTIVATED")
 
-        from datetime import timedelta as _td
-        import time as _time
-        token_data = {"sub": db_username, "id": db_id, "role": db_role, "initials": db_initials}
-        token = create_access_token(data=token_data)
-        expires_at = int(_time.time()) + (60 * 60)  # 60-minute expiry in unix seconds
+        expires_at = _issue_session_cookie(response, db_id, db_username, db_role, db_initials, db_token_version)
 
         with db.engine.begin() as conn:
             conn.execute(text("UPDATE users SET last_login = NOW() WHERE id = :id"), {"id": db_id})
 
-        response.set_cookie(
-            key="orca_token",
-            value=token,
-            httponly=True,
-            secure=True,
-            samesite="strict",
-            max_age=3600,
-            path="/",
-        )
         return {
             "user": {"username": db_username, "initials": db_initials, "role": db_role, "id": db_id},
             "expires_at": expires_at,
@@ -295,7 +303,7 @@ class ChangePasswordRequest(BaseModel):
 
 @app.post("/api/auth/change-password")
 @limiter.limit("5/minute")
-async def change_password(request: Request, body: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
+async def change_password(request: Request, response: Response, body: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
     """Self-service password change -- requires the current password,
     unlike an admin-initiated or token-based reset, since the caller is
     already proving who they are via an active session, not recovering
@@ -310,11 +318,18 @@ async def change_password(request: Request, body: ChangePasswordRequest, current
     if not row or not verify_password(body.current_password, row[0]):
         raise HTTPException(status_code=401, detail="CURRENT_PASSWORD_INCORRECT")
 
+    # Bumping token_version logs this user out of every other session; this
+    # session gets a fresh cookie carrying the new version so it stays in.
     with db.engine.begin() as conn:
-        conn.execute(text(
-            "UPDATE users SET password_hash = :p WHERE id = :id"
-        ), {"p": hash_password(body.new_password), "id": current_user["id"]})
-    return {"status": "OK"}
+        new_tv = conn.execute(text(
+            "UPDATE users SET password_hash = :p, token_version = token_version + 1 "
+            "WHERE id = :id RETURNING token_version"
+        ), {"p": hash_password(body.new_password), "id": current_user["id"]}).scalar()
+    expires_at = _issue_session_cookie(
+        response, current_user["id"], current_user["sub"],
+        current_user["role"], current_user["initials"], new_tv,
+    )
+    return {"status": "OK", "expires_at": expires_at}
 
 
 @app.post("/api/auth/logout")
@@ -479,8 +494,10 @@ async def complete_reset(request: Request, token: str, body: CompleteResetReques
         if not row:
             raise HTTPException(status_code=404, detail="INVALID_OR_EXPIRED_TOKEN")
 
+        # token_version bump ends every existing session for this account --
+        # a reset usually means the old password can't be trusted.
         conn.execute(text(
-            "UPDATE users SET password_hash = :p WHERE id = :id"
+            "UPDATE users SET password_hash = :p, token_version = token_version + 1 WHERE id = :id"
         ), {"p": hash_password(body.password), "id": row[0]})
         conn.execute(text(
             "UPDATE password_reset_tokens SET used_at = NOW() WHERE token = :t"
@@ -793,18 +810,18 @@ async def vuln_scan(
             # (some per-user home directory) -- without this it finds no
             # DB at all and refuses to run, regardless of the offline flag.
             grype_env["GRYPE_DB_CACHE_DIR"] = cfg.GRYPE_DB_DIR
+            # Always use the bundled DB as-is, online or not. It lives on the
+            # read-only /app/bin mount and is updated only by the operator
+            # (install script / ADMIN_GUIDE "Grype Vulnerability Database").
+            # Without these, grype checks for a newer DB on every run (slow
+            # or hanging offline) and -- confirmed live -- REFUSES to run once
+            # the DB is older than its default 5-day max age, because it
+            # can't write an update into the read-only dir. Scans from the
+            # UI (offline=False by default) all started failing that way.
+            grype_env["GRYPE_DB_AUTO_UPDATE"] = "false"
+            grype_env["GRYPE_DB_VALIDATE_AGE"] = "false"
             if offline:
                 grype_cmd.append("--only-fixed")
-                # Without these, grype still tries to reach the internet to
-                # check for a newer DB on every run (slow/hangs offline),
-                # and -- confirmed live -- outright REFUSES to run at all
-                # once the bundled DB is older than its default 5-day
-                # max-allowed-built-age, erroring instead of just warning.
-                # An offline kit's DB is only ever going to get older from
-                # the moment it's built, so this isn't optional for an
-                # offline deployment to keep working past its first few days.
-                grype_env["GRYPE_DB_AUTO_UPDATE"] = "false"
-                grype_env["GRYPE_DB_VALIDATE_AGE"] = "false"
 
             grype_proc = await asyncio.create_subprocess_exec(
                 *grype_cmd,
