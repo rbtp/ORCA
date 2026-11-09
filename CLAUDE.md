@@ -23,7 +23,9 @@
 - **Fully portable, no hardcoded IPs (as of 2026-06-18)**: frontend builds with `VITE_API_URL` empty, so all `fetch()` calls resolve to relative `/api/...` paths against whatever host served the page; nginx proxies `/api/` to the backend by Docker service name (`orca-backend:8000`); CORS reads allowed origins from `CORS_ORIGINS` in `.env` (comma-separated, default `https://localhost`); TLS cert auto-generates on first boot for whatever IP/hostname the container has. Moving to a new server requires editing only `.env` (`CORS_ORIGINS`) and running `docker compose up --build` — no source changes.
 
 ## Current Task
-**Clone-and-install readiness + server-side session revocation (2026-11-09).** Live instance rebuilt and tested. Fresh-clone install test via `install.ps1` (isolated `orcatest` stack on 8443/8080) in progress. Push to GitHub only after it passes (user instruction: "rebuild and test before pushing").
+**Fresh-clone install verified and pushed (2026-11-09). Awaiting next task.**
+Fresh `git clone` + `install.ps1` (Windows PowerShell 5.1) tested from scratch in an isolated `orcatest` stack: build, Grype DB download, schema + seed + MITRE import, first-boot admin, login, real UI-path vuln scan (68 findings), clamav.zip, password change/session revocation, zero backend tracebacks. To re-run that test: clone to a temp dir, set `COMPOSE_PROJECT_NAME=orcatest` and `COMPOSE_FILE=docker-compose.yml;<override>` where the override sets different `container_name`s and `ports: !override ["8443:443","8080:80"]`, then run the installer with `-ServerAddress localhost`; tear down with `docker compose down -v --rmi local`.
+Not tested: agent-dispatched collection end-to-end (no agent online); frontend session-revocation redirect in a real browser (API side verified).
 
 ## Progress Log
 - [x] Server-side session revocation (2026-11-09):
@@ -32,7 +34,8 @@
   - `auth_utils.get_current_user`: for non-agent tokens, re-reads the users row every request (`run_in_threadpool`); 401 `SESSION_REVOKED` if missing / inactive / `tv` mismatch; role/initials/username taken from DB. Tokens without `tv` = version 0, so pre-upgrade sessions survive the deploy. Agent tokens (`role: agent`, no user id) are skipped, still limited to `/api/agent/*`
   - Bumps: change-password (re-issues the caller's cookie via `main._issue_session_cookie`), completed reset, deactivation (so reactivation doesn't revive old sessions)
   - Frontend `AuthContext.jsx`: global `fetch` wrapper logs out on 401 with detail `SESSION_REVOKED` / `Could not validate credentials` (not on other 401s like `CURRENT_PASSWORD_INCORRECT`); `MyAccount` restarts the expiry timer after a password change
-  - Verified 19 API scenarios live (see session history); frontend wrapper builds but was not exercised in a browser
+  - Verified 19 API scenarios live; frontend wrapper builds but was not exercised in a browser
+- Also fixed (same session): Grype DB created 0700 by root-run `grype db update` (installers now `chmod -R a+rX`); backend always sets `GRYPE_DB_AUTO_UPDATE=false`/`GRYPE_DB_VALIDATE_AGE=false` (UI scans failed once the read-only DB was >5 days old); agent bundle zips (`_DIR_BUNDLES` in `agent_routes.py`) now streamed via `FileResponse`, built in a threadpool under a per-bundle lock, rebuilt when sources change
 - [x] Fresh-clone installability (2026-11-09):
   - `install.ps1` / `install.sh`: .env with random secrets + server address, build, Grype DB via `docker compose run ... grype db update`, start, print first-boot admin login. Use `docker compose logs` (service names), not container names
   - Committed `backend/data/mitre-attack.json` and ClamAV sigs; `.gitattributes` (LF for container files, CRLF for .bat/.ps1); `backend/initdb/02-seed-data.sh` loads `seed_data/` on fresh volumes; Postgres healthcheck over TCP (`-h 127.0.0.1`)
@@ -198,6 +201,7 @@ Also: `vmnetnat.conf` `resetConnectionOnDestLocalHost` changed from 1 → 0 (all
 - `AUDIT_REPORT.md` findings were fixed 2026-06-10, and a later full-codebase audit was fixed in commit `f6e6d16` (2026-08-20)
 - `impacket`, `pywinrm` and `paramiko` are all installed; all `vr_remote.py` transports (WINRM, SMB_TASK, SMB_PSEXEC, SSH) are importable
 - `backend/bin/syftgrype/grype-db/` (~3 GB) is gitignored. A fresh clone has no Grype DB, so vuln scans fail until it's populated (see ADMIN_GUIDE)
-- `agent_routes.py` serves `clamav.zip`/`grype-db.zip` with `zip_path.read_bytes()`. The Grype zip is ~3 GB, so each agent download loads it all into backend RAM. Should switch to `FileResponse` (streaming). Not yet fixed
+- `.claude/settings.local.json` is tracked in git (since the initial commit) and contains old test-login passwords in its allowed-command list. Not changed; user to decide whether to untrack it / rotate those passwords
+- Git Bash on this machine rewrites `/app/...` args to Windows paths for `docker exec`; use `MSYS_NO_PATHCONV=1`, and relative paths for curl cookie jars
 - `backend/schema.sql` must be regenerated after every schema change (`docker exec orca-postgres pg_dump -U postgres -d orca_db --schema-only --no-owner --no-privileges > backend/schema.sql`), since fresh installs are built from it
 - If port 443 stops answering externally after backend restarts, `docker restart orca-frontend` (Docker Desktop port-forward goes stale)
