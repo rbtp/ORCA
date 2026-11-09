@@ -19,6 +19,20 @@ services:
       - CASES_DIR=${CASES_DIR:-}
       - ORCA_DATA_ROOT=/app/evidence
       - VT_API_KEY=${VT_API_KEY:-}
+      # Optional SMTP for enrollment/reset links (email_utils.py) -- all
+      # empty by default, which disables email and falls back to showing
+      # the link in the admin UI.
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      # Optional first-boot admin (bootstrap_admin.py) -- only used when the
+      # users table is empty; unset = random password logged once.
+      - ORCA_BOOTSTRAP_ADMIN_USERNAME=${ORCA_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      - ORCA_BOOTSTRAP_ADMIN_INITIALS=${ORCA_BOOTSTRAP_ADMIN_INITIALS:-ADM}
+      - ORCA_BOOTSTRAP_ADMIN_PASSWORD=${ORCA_BOOTSTRAP_ADMIN_PASSWORD:-}
     volumes:
       - orca-certs:/app/certs          # shared TLS certs (writable — backend generates on first boot)
       - ./backend/bin:/app/bin:ro

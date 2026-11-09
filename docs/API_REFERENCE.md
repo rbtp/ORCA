@@ -61,7 +61,78 @@ Rate-limited to **5 requests/minute** per IP.
 }
 ```
 
-**Errors**: `401 INVALID_CREDENTIALS`, `429 Rate limit exceeded`
+**Errors**: `401 INVALID_CREDENTIALS`, `403 ACCOUNT_DEACTIVATED` (only returned after a correct password), `429 Rate limit exceeded`
+
+Successful logins update `users.last_login`.
+
+---
+
+### PATCH /api/auth/me
+
+Update your own profile. Username and role are admin-only (see Admin — Users).
+
+**Request body** (all optional): `{ "initials": "ALC", "email": "alice@example.com" }`
+
+**Response 200**: `{ "status": "OK" }`
+
+---
+
+### POST /api/auth/change-password
+
+**Request body**: `{ "current_password": "string", "new_password": "string" }` (min 8 chars)
+
+**Response 200**: `{ "status": "OK" }`
+**Errors**: `400 PASSWORD_TOO_SHORT`, `401 CURRENT_PASSWORD_INCORRECT`
+
+---
+
+### GET /api/auth/enroll/{token}
+
+No auth. Validates an enrollment (invite) token.
+
+**Response 200**: `{ "username", "initials", "role", "email" }`
+**Errors**: `404 INVALID_OR_EXPIRED_INVITE`
+
+---
+
+### POST /api/auth/enroll/{token}
+
+No auth. Completes enrollment: creates the `users` row with the invitee's chosen password. Single use.
+
+**Request body**: `{ "password": "string" }` (min 8 chars)
+
+**Response 200**: `{ "status": "ENROLLED", "username": "alice" }`
+**Errors**: `400 PASSWORD_TOO_SHORT`, `404 INVALID_OR_EXPIRED_INVITE`, `409 USERNAME_ALREADY_ENROLLED`
+
+---
+
+### POST /api/auth/forgot-password
+
+No auth. Rate-limited to 5/minute. Self-service reset request.
+
+**Request body**: `{ "username_or_email": "string" }`
+
+**Response 200**: always `{ "status": "OK", "message": "..." }`. The same message is returned whether or not the account exists, so this can't be used to enumerate accounts. If SMTP is not configured, the message tells the user to contact an administrator and no token is created. Otherwise a 1-hour reset link is emailed to the account's address, if it has one.
+
+---
+
+### GET /api/auth/reset-password/{token}
+
+No auth. Validates a reset token.
+
+**Response 200**: `{ "username": "alice" }`
+**Errors**: `404 INVALID_OR_EXPIRED_TOKEN`
+
+---
+
+### POST /api/auth/reset-password/{token}
+
+No auth. Sets a new password. Single use.
+
+**Request body**: `{ "password": "string" }` (min 8 chars)
+
+**Response 200**: `{ "status": "OK" }`
+**Errors**: `400 PASSWORD_TOO_SHORT`, `404 INVALID_OR_EXPIRED_TOKEN`
 
 ---
 
@@ -76,9 +147,12 @@ Trigger local Velociraptor collection for an asset (inline — runs inside the c
 {
   "action": "string",
   "asset_id": 12,
-  "tsource": "C:/"
+  "tsource": "C:/",
+  "agent_id": "optional-agent-id"
 }
 ```
+
+If `agent_id` is set, each technique is dispatched to that agent as an `artifact_collection` job (5-minute timeout per technique) instead of running in-container. This reaches any drive the agent can see (local physical disks or Arsenal-mounted images). The server ingests the returned rows into `evidence` / `artifact_results` exactly as for in-container runs.
 
 **Response 200**
 ```json
@@ -515,7 +589,7 @@ Auth: `?token=<jwt>` (SSE — headers not supported in browser EventSource).
 
 Download a binary for agent deployment.
 
-`filename` values: `velociraptor.exe`, `clamscan.exe`, `grype.exe`, `syft.exe`
+`filename` values: `velociraptor.exe`, `grype.exe`, `syft.exe`, `clamav.zip` (full Windows ClamAV bundle: DLLs + signatures), `grype-db.zip` (bundled Grype vulnerability DB). The two zips are built on first request and cached in the container's temp dir.
 
 **Response 200**: `application/octet-stream`
 
@@ -1205,7 +1279,7 @@ All admin endpoints require `role = "admin"`.
 
 List all users.
 
-**Response 200** — array of: `{ "username": "alice", "initials": "ALC", "role": "analyst" }`
+**Response 200** — array of: `{ "username": "alice", "initials": "ALC", "role": "analyst", "email": "alice@example.com", "is_active": true, "last_login": "2026-11-06T09:00:00Z" }`
 
 ---
 
@@ -1222,6 +1296,46 @@ Create a new user.
 
 **Response 200**: `{ "status": "USER_CREATED", "operator": "alice" }`  
 **Errors**: `400 OPERATOR_ALREADY_EXISTS`, `400 MISSING_USER_PARAMETERS`
+
+Legacy. Prefer `/users/invite`, so the admin never handles the user's password.
+
+---
+
+### POST /api/admin/users/invite
+
+Create a one-time enrollment link (valid 7 days). The `users` row is created only when the invitee completes enrollment.
+
+**Request body**: `{ "username": "alice", "initials": "ALC", "role": "analyst", "email": "alice@example.com" }` (`email` optional)
+
+**Response 200**: `{ "status": "INVITED", "username": "alice", "link": "https://<ORCA_SERVER_URL>/enroll/<token>", "emailed": false }`
+`emailed` is `true` only if SMTP is configured and the send succeeded. The link is always returned for manual hand-off.
+
+**Errors**: `400 OPERATOR_ALREADY_EXISTS`, `400 INVITE_ALREADY_PENDING_FOR_USERNAME`, `400 INVALID_ROLE`, `400 INITIALS_MUST_BE_1_TO_5_CHARS`
+
+---
+
+### PATCH /api/admin/users/{username}
+
+**Request body** (all optional): `{ "initials": "ALC", "role": "admin", "email": "..." }`
+
+**Errors**: `400 CANNOT_CHANGE_OWN_ROLE`, `400 NO_FIELDS_TO_UPDATE`, `400 INVALID_ROLE`, `404 USER_NOT_FOUND`
+
+---
+
+### POST /api/admin/users/{username}/reset-password
+
+Create a one-time password reset link (valid 1 hour).
+
+**Response 200**: `{ "status": "OK", "username": "alice", "link": "https://.../reset-password/<token>", "emailed": false }`
+
+---
+
+### POST /api/admin/users/{username}/toggle-active
+
+Deactivate or reactivate an account. Deactivated users can't log in; their history is preserved.
+
+**Response 200**: `{ "status": "OK", "username": "alice", "is_active": false }`
+**Errors**: `400 CANNOT_DEACTIVATE_SELF`, `404 USER_NOT_FOUND`
 
 ---
 

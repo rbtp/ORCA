@@ -40,6 +40,7 @@
 - Tokenised ingest pipeline: each package uses a single-use time-limited token; the agent auto-revokes it on completion
 - Real-time progress polling shows per-technique status as evidence arrives
 - Manual evidence upload (JSON / JSONL / CSV / TXT) is available for any technique that doesn't yet have evidence — not gated behind a prior automatic-collection attempt
+- **Agent-dispatched collection** — from the Evidence Window, technique collection can run on an online ORCA agent instead of in the container. This reaches any drive that agent can see, including locally attached physical disks and images it mounted via Arsenal. The agent streams rows back and the server ingests them into the same evidence tables
 
 ### Memory Forensics (Volatility3)
 - Run individual Volatility3 plugins (Windows, Linux, macOS) against a memory image
@@ -62,6 +63,7 @@
 - Grype queries the vulnerability database against the SBOM
 - Results deduplicated and stored per asset: CVE ID, severity, package, version, fix version
 - Severity breakdown (Critical / High / Medium / Low)
+- Uses a bundled, operator-populated Grype DB (`backend/bin/syftgrype/grype-db/`, ~3 GB, not in git). Offline scans disable DB auto-update and the DB age check, so an older offline DB keeps working
 
 ### Disk Image Mounting
 - Mount E01, VMDK, VHD, VHDX, QCOW2 and other formats via Arsenal Image Mounter CLI
@@ -106,7 +108,9 @@
 - Persistent Python agent (`orca_agent.py`) deployed to endpoints via remote SMB trigger or manual install
 - Agent registers with the server, polls for jobs (long-poll), streams results back via SSE
 - Deploy agent remotely from the ORCA UI: downloads binaries, creates a scheduled task, and waits for registration
-- Job types include disk image mount/dismount (backs Disk Image Mounting's agent-based mode above), with capabilities self-reported so only agents that support a given job type are offered as targets for it
+- Job types include disk image mount/dismount (backs Disk Image Mounting's agent-based mode above) and artifact collection (backs agent-dispatched collection), with capabilities self-reported so only agents that support a given job type are offered as targets for it
+- Agents can pull the ClamAV bundle (`clamav.zip`) and Grype DB (`grype-db.zip`) from the server for local scanning
+- Manual installer (`agent/install.bat`) locates `python.exe` explicitly and uses vendored Python dependencies (`agent/vendor/`), so it works without internet access
 - Dashboard widget shows online/offline agent count
 
 ### TLS & Network Configuration
@@ -121,7 +125,11 @@
 - JWT authentication (HS256, 60-minute expiry)
 - `admin` and `analyst` roles
 - Rate-limited login: 5 requests per minute per IP
-- Admin-only routes: user creation/deletion, cert regeneration, agent deletion, evidence deletion
+- Admin-only routes: user invite/edit/deactivate/deletion, cert regeneration, agent deletion, evidence deletion
+- **Account lifecycle** — admins invite users with one-time enrollment links (7-day expiry) and issue password-reset links (1-hour expiry), so admins never see or set passwords. Links are emailed when SMTP is configured, otherwise shown in the UI for manual hand-off (air-gapped)
+- Accounts can be deactivated (blocks login, keeps audit history) instead of deleted; last-login tracking
+- **My Account** page for editing your own profile and changing your password; self-service "forgot password" when SMTP is configured
+- First admin account auto-created on first boot (`ORCA_BOOTSTRAP_ADMIN_*` or a one-time random password in the logs)
 
 ### Audit Trail
 - Evidence deletion is admin-only and gated behind three sequential confirmations — an explicit "are you sure", a math-problem verification, and a final warning that the action is logged and attributed to the operator's account — before the delete is issued
@@ -216,14 +224,16 @@ docker compose up -d
 
 Open `https://<server-ip>` in your browser. Accept the self-signed certificate warning on the first visit.
 
-Default credentials are created by the database seed migration. See [First-Run Setup](#first-run-setup) below.
+The first admin account is created automatically on first boot. See [First-Run Setup](#first-run-setup) below.
 
 ### First-Run Setup
 
 1. The backend auto-generates a self-signed TLS certificate on first boot — no manual cert files needed.
-2. Log in with the seeded admin account (set during database initialisation).
-3. Navigate to **Options → User Registry** to create analyst accounts.
-4. Navigate to **Investigations** → create a case → add assets.
+2. The database schema is applied automatically to a fresh Postgres volume. Load the reference data once: `seed_data/*.sql` (see [docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md#step-5--initialise-the-database)).
+3. Get the first-boot admin password with `docker logs orca-backend 2>&1 | grep -A3 "FIRST-BOOT ADMIN"`, or preset it via `ORCA_BOOTSTRAP_ADMIN_PASSWORD` in `.env`.
+4. Navigate to **Options → User Registry** and **invite** analysts. Each gets a one-time enrollment link to set their own password (emailed if SMTP is configured, otherwise shown for you to hand over).
+5. If you'll run vulnerability scans, populate the Grype DB (not in git, ~3 GB). See the ADMIN_GUIDE section "Grype Vulnerability Database".
+6. Navigate to **Investigations** → create a case → add assets.
 
 ### Enabling Behavioral Analysis
 

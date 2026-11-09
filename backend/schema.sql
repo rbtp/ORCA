@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 2NODMaeTeRt1Dlhvo4byDOOa8GVKe3gFFfbtdaP4m8J9pQvfrLraf1JsVaJduZN
+\restrict gVlF2Ok221i7Ua4Qo5da6amBw1ZychKwglT5IHEuLynLnSeBTl52MokCeqhfo4x
 
 -- Dumped from database version 15.19 (Debian 15.19-1.pgdg13+2)
 -- Dumped by pg_dump version 15.19 (Debian 15.19-1.pgdg13+2)
@@ -405,6 +405,38 @@ ALTER SEQUENCE public.capa_results_id_seq OWNED BY public.capa_results.id;
 
 
 --
+-- Name: case_assignments; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.case_assignments (
+    id integer NOT NULL,
+    case_name text NOT NULL,
+    user_id integer NOT NULL,
+    assigned_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: case_assignments_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.case_assignments_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: case_assignments_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.case_assignments_id_seq OWNED BY public.case_assignments.id;
+
+
+--
 -- Name: case_notes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -587,6 +619,23 @@ ALTER SEQUENCE public.enrichment_staging_id_seq OWNED BY public.enrichment_stagi
 
 
 --
+-- Name: enrollment_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.enrollment_tokens (
+    token uuid DEFAULT gen_random_uuid() NOT NULL,
+    username character varying(50) NOT NULL,
+    initials character varying(5) NOT NULL,
+    role character varying(20) DEFAULT 'analyst'::character varying NOT NULL,
+    email text,
+    created_by integer,
+    expires_at timestamp with time zone NOT NULL,
+    used_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: evidence; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -620,6 +669,26 @@ CREATE SEQUENCE public.evidence_id_seq
 --
 
 ALTER SEQUENCE public.evidence_id_seq OWNED BY public.evidence.id;
+
+
+--
+-- Name: file_fetch_jobs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.file_fetch_jobs (
+    job_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    asset_id integer NOT NULL,
+    token uuid DEFAULT gen_random_uuid() NOT NULL,
+    file_path text NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    error text,
+    local_path text,
+    file_size bigint,
+    sha256 text,
+    created_by integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone
+);
 
 
 --
@@ -1200,7 +1269,6 @@ CREATE TABLE public.mitre_techniques (
 CREATE TABLE public.mount_sessions (
     id integer NOT NULL,
     asset_id integer NOT NULL,
-    agent_id character varying(64),
     image_path text NOT NULL,
     device_number character varying(20),
     drive_letter character varying(5),
@@ -1208,7 +1276,8 @@ CREATE TABLE public.mount_sessions (
     provider character varying(20),
     status character varying(20) DEFAULT 'MOUNTED'::character varying,
     mounted_at timestamp without time zone DEFAULT now(),
-    dismounted_at timestamp without time zone
+    dismounted_at timestamp without time zone,
+    agent_id character varying(64)
 );
 
 
@@ -1304,6 +1373,20 @@ CREATE TABLE public.package_tokens (
 
 
 --
+-- Name: password_reset_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.password_reset_tokens (
+    token uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id integer NOT NULL,
+    created_by integer,
+    expires_at timestamp with time zone NOT NULL,
+    used_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: ref_artifact_library; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1354,8 +1437,8 @@ CREATE TABLE public.ref_ioc_library (
     threat_actor character varying(100),
     severity character varying(20) DEFAULT 'HIGH'::character varying,
     description text,
-    label character varying(100),
-    added_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+    added_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    label character varying(100)
 );
 
 
@@ -1567,7 +1650,10 @@ CREATE TABLE public.users (
     password_hash text NOT NULL,
     initials character varying(5) NOT NULL,
     role character varying(20) DEFAULT 'analyst'::character varying,
-    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    email text,
+    is_active boolean DEFAULT true NOT NULL,
+    last_login timestamp with time zone
 );
 
 
@@ -1647,6 +1733,20 @@ CREATE VIEW public.v_software_threat_profiles AS
      JOIN public.mitre_relationships r ON (((s.stix_id)::text = (r.source_ref)::text)))
      JOIN public.mitre_techniques t ON (((r.target_ref)::text = (t.stix_id)::text)))
   WHERE ((r.relationship_type)::text = 'uses'::text);
+
+
+--
+-- Name: vt_lookups; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vt_lookups (
+    hash text NOT NULL,
+    status text NOT NULL,
+    malicious_count integer,
+    suspicious_count integer,
+    total_engines integer,
+    checked_at timestamp with time zone DEFAULT now() NOT NULL
+);
 
 
 --
@@ -1742,6 +1842,13 @@ ALTER TABLE ONLY public.audit_log ALTER COLUMN id SET DEFAULT nextval('public.au
 --
 
 ALTER TABLE ONLY public.capa_results ALTER COLUMN id SET DEFAULT nextval('public.capa_results_id_seq'::regclass);
+
+
+--
+-- Name: case_assignments id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.case_assignments ALTER COLUMN id SET DEFAULT nextval('public.case_assignments_id_seq'::regclass);
 
 
 --
@@ -2015,6 +2122,22 @@ ALTER TABLE ONLY public.capa_results
 
 
 --
+-- Name: case_assignments case_assignments_case_name_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.case_assignments
+    ADD CONSTRAINT case_assignments_case_name_user_id_key UNIQUE (case_name, user_id);
+
+
+--
+-- Name: case_assignments case_assignments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.case_assignments
+    ADD CONSTRAINT case_assignments_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: case_notes case_notes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2079,11 +2202,27 @@ ALTER TABLE ONLY public.enrichment_staging
 
 
 --
+-- Name: enrollment_tokens enrollment_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.enrollment_tokens
+    ADD CONSTRAINT enrollment_tokens_pkey PRIMARY KEY (token);
+
+
+--
 -- Name: evidence evidence_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.evidence
     ADD CONSTRAINT evidence_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: file_fetch_jobs file_fetch_jobs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.file_fetch_jobs
+    ADD CONSTRAINT file_fetch_jobs_pkey PRIMARY KEY (job_id);
 
 
 --
@@ -2343,6 +2482,14 @@ ALTER TABLE ONLY public.package_tokens
 
 
 --
+-- Name: password_reset_tokens password_reset_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.password_reset_tokens
+    ADD CONSTRAINT password_reset_tokens_pkey PRIMARY KEY (token);
+
+
+--
 -- Name: ref_artifact_library ref_artifact_library_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2479,6 +2626,14 @@ ALTER TABLE ONLY public.users
 
 
 --
+-- Name: vt_lookups vt_lookups_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vt_lookups
+    ADD CONSTRAINT vt_lookups_pkey PRIMARY KEY (hash);
+
+
+--
 -- Name: vuln_results vuln_results_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2543,6 +2698,20 @@ CREATE INDEX idx_capa_results_technique ON public.capa_results USING btree (tech
 
 
 --
+-- Name: idx_case_assignments_case; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_case_assignments_case ON public.case_assignments USING btree (case_name);
+
+
+--
+-- Name: idx_case_assignments_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_case_assignments_user ON public.case_assignments USING btree (user_id);
+
+
+--
 -- Name: idx_clam_results_asset_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2557,12 +2726,38 @@ CREATE INDEX idx_det_strategies_t_code ON public.mitre_detection_strategies USIN
 
 
 --
+-- Name: idx_enrollment_tokens_username; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_enrollment_tokens_username ON public.enrollment_tokens USING btree (username);
+
+
+--
 -- Name: idx_evidence_asset_tcode; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_evidence_asset_tcode ON public.evidence USING btree (asset_id, t_code);
 
+
+--
+-- Name: idx_evidence_starred; Type: INDEX; Schema: public; Owner: -
+--
+
 CREATE INDEX idx_evidence_starred ON public.evidence USING btree (asset_id, t_code, starred) WHERE (starred = true);
+
+
+--
+-- Name: idx_file_fetch_jobs_asset; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_file_fetch_jobs_asset ON public.file_fetch_jobs USING btree (asset_id);
+
+
+--
+-- Name: idx_file_fetch_jobs_token; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_file_fetch_jobs_token ON public.file_fetch_jobs USING btree (token);
 
 
 --
@@ -2696,6 +2891,13 @@ CREATE INDEX idx_package_tokens_asset_id ON public.package_tokens USING btree (a
 --
 
 CREATE INDEX idx_package_tokens_expires_at ON public.package_tokens USING btree (expires_at);
+
+
+--
+-- Name: idx_password_reset_tokens_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_password_reset_tokens_user ON public.password_reset_tokens USING btree (user_id);
 
 
 --
@@ -2848,6 +3050,22 @@ ALTER TABLE ONLY public.capa_results
 
 
 --
+-- Name: case_assignments case_assignments_case_name_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.case_assignments
+    ADD CONSTRAINT case_assignments_case_name_fkey FOREIGN KEY (case_name) REFERENCES public.cases(name) ON DELETE CASCADE;
+
+
+--
+-- Name: case_assignments case_assignments_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.case_assignments
+    ADD CONSTRAINT case_assignments_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: case_notes case_notes_author_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2861,6 +3079,14 @@ ALTER TABLE ONLY public.case_notes
 
 ALTER TABLE ONLY public.case_notes
     ADD CONSTRAINT case_notes_case_name_fkey FOREIGN KEY (case_name) REFERENCES public.cases(name) ON DELETE CASCADE;
+
+
+--
+-- Name: enrollment_tokens enrollment_tokens_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.enrollment_tokens
+    ADD CONSTRAINT enrollment_tokens_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id);
 
 
 --
@@ -2901,6 +3127,22 @@ ALTER TABLE ONLY public.network_links
 
 ALTER TABLE ONLY public.network_links
     ADD CONSTRAINT network_links_target_id_fkey FOREIGN KEY (target_id) REFERENCES public.assets(id) ON DELETE CASCADE;
+
+
+--
+-- Name: password_reset_tokens password_reset_tokens_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.password_reset_tokens
+    ADD CONSTRAINT password_reset_tokens_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id);
+
+
+--
+-- Name: password_reset_tokens password_reset_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.password_reset_tokens
+    ADD CONSTRAINT password_reset_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -2955,5 +3197,5 @@ ALTER TABLE ONLY public.tool_locks
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 2NODMaeTeRt1Dlhvo4byDOOa8GVKe3gFFfbtdaP4m8J9pQvfrLraf1JsVaJduZN
+\unrestrict gVlF2Ok221i7Ua4Qo5da6amBw1ZychKwglT5IHEuLynLnSeBTl52MokCeqhfo4x
 

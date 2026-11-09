@@ -23,9 +23,33 @@
 - **Fully portable, no hardcoded IPs (as of 2026-06-18)**: frontend builds with `VITE_API_URL` empty, so all `fetch()` calls resolve to relative `/api/...` paths against whatever host served the page; nginx proxies `/api/` to the backend by Docker service name (`orca-backend:8000`); CORS reads allowed origins from `CORS_ORIGINS` in `.env` (comma-separated, default `https://localhost`); TLS cert auto-generates on first boot for whatever IP/hostname the container has. Moving to a new server requires editing only `.env` (`CORS_ORIGINS`) and running `docker compose up --build` — no source changes.
 
 ## Current Task
-**Remote collection pipeline fully working (2026-07-27). End-to-end verified: Registry collected from SANS-SIFT, 634,939 keys ingested. Awaiting next task.**
+**All work through 2026-11-06 committed (2026-11-09). Awaiting next task.**
+Not yet done for the latest work: running containers have not been rebuilt with the account-management / agent-collection code, and neither feature has been tested end-to-end in the running app (enrollment link → set password → login; reset link; deactivate; Evidence Window "RUN ON AGENT").
 
 ## Progress Log
+- [x] Commit backlog + docs refresh (2026-11-09):
+  - Committed the uncommitted Sept/Nov work as 3 commits (account management; agent-dispatched collection; seed data). `backend/main.py` was split by hunk between the first two
+  - `.gitignore`: added `backend/bin/syftgrype/grype-db/`. The 3.2 GB `vulnerability.db` can't go to GitHub; operators populate it (`GRYPE_DB_CACHE_DIR=backend/bin/syftgrype/grype-db grype db update`)
+  - `docker-compose.yml`: bug fix: `SMTP_*` and `ORCA_BOOTSTRAP_ADMIN_*` were never passed through to `orca-backend`, so setting them in `.env` did nothing. Added passthroughs
+  - `backend/schema.sql` regenerated (was stale since 2026-08-25: 52→57 tables, missing `users.email/is_active/last_login`, `enrollment_tokens`, `password_reset_tokens`, `file_fetch_jobs`, `vt_lookups`, `case_assignments`). A fresh install would have failed at login (login selects `is_active`). Verified: schema + all `seed_data/*.sql` load cleanly into a throwaway `postgres:15`
+  - Docs: README (features, first-run), ADMIN_GUIDE (DB init rewritten for auto-schema + seed + bootstrap admin, user management, Grype DB, SMTP env vars), USER_GUIDE (enrollment/reset, My Account, RUN ON AGENT), API_REFERENCE (new auth/admin endpoints, `agent_id` on `/api/assets/execute`, `clamav.zip`/`grype-db.zip`)
+- [x] Agent-dispatched collection + agent hardening (2026-11-04 → 11-06, commit `6436745`):
+  - `main.py` `run_vr_via_agent()`: `/api/assets/execute` takes optional `agent_id`; each technique is dispatched as an `artifact_collection` agent job (300s timeout), rows streamed back, ingested server-side into `evidence`/`artifact_results`
+  - `agent/orca_agent.py`: `artifact_collection` job type (VQL with EVTX source conversion + fallback VQL); downloads/extracts `clamav.zip` and `grype-db.zip`
+  - `agent_routes.py`: serves `clamav.zip` (whole Windows ClamAV dir; standalone `clamscan.exe` removed, it can't run without its DLLs/sigs) and `grype-db.zip`, both cached in container temp
+  - `config.py` `GRYPE_DB_DIR`; vuln scan sets `GRYPE_DB_CACHE_DIR`, and when offline disables auto-update + age validation (grype refuses to run on a >5-day-old DB otherwise)
+  - `backend/Dockerfile`: `freshclam` at build time (non-fatal)
+  - Mount wait 120s → 900s for large images
+  - `agent/install.bat`: explicit `python.exe` discovery, config written via `%~dp0`, installs `requests` from `agent/vendor/` wheels (offline), URL hint no longer suggests `:8000`
+  - `EvidenceWindow.jsx`: DRIVE input + "RUN (IN-CONTAINER)" / agent picker + "RUN ON AGENT"
+  - Added Arsenal `DriverSetup/`, `deviodrv.sys`, `deviosvc.exe`
+- [x] User account management (2026-09-03, commit `89f58c5`):
+  - `migrations/add_user_account_management.sql` (applied to live `orca_db`): `users.email/is_active/last_login`, `enrollment_tokens` (7-day), `password_reset_tokens` (1-hour)
+  - Admin: `/api/admin/users/invite`, `PATCH /users/{u}`, `/users/{u}/reset-password`, `/users/{u}/toggle-active`. Self: `PATCH /api/auth/me`, `/api/auth/change-password`, `/api/auth/enroll/{token}`, `/api/auth/forgot-password` (works only with SMTP; generic response, no enumeration), `/api/auth/reset-password/{token}`
+  - Login: `403 ACCOUNT_DEACTIVATED` only after a correct password; updates `last_login`
+  - `backend/email_utils.py`: optional SMTP; with no `SMTP_HOST`, links are shown in the admin UI for hand-off (air-gapped). Links are built from `ORCA_SERVER_URL`
+  - Frontend: `auth/EnrollmentPage.jsx`, `auth/ResetPasswordPage.jsx` (routed by pathname in `main.jsx`), `Options/MyAccount.jsx`, reworked `UserManagement.jsx` and `LoginScreen.jsx` (forgot-password mode)
+- [x] 2026-08-18 → 2026-09-02 (committed, see `git log d75dc95..5ef2a7a` for details): noexec tmpfs for behavioral samples; evidence-deletion audit trail; full-codebase audit fixes; vendored all tool binaries + Font Awesome + MITRE STIX import for air-gapped; first-boot admin bootstrap (`bootstrap_admin.py`); `schema.sql` auto-applied on fresh Postgres volume; configurable remote staging dir; WinRM transport, evidence starring, IOC editing; agent-based disk mounting; SMB push delivery of packages (then WinRM push); TLS SAN/validity fixes; custom technique create/delete in Artifact Library Editor; per-technique collection monitoring + parallel workers; SSH injection hardening; situational-awareness file browser + VirusTotal lookup/re-check, flagged files, live file pull; full-MFT ingest fix, collection throttling, WinRM auto-enable/disable (only touches state it can confirm), cross-analyst progress visibility
 - [x] Documentation (2026-07-14):
   - Read entire codebase (all backend routes, frontend components, DB schema, Docker/nginx/entrypoint config)
   - Generated `README.md` (project root) — feature summary, architecture diagram, tech stack table, quick start, air-gapped deployment, prerequisites, screenshots placeholder
@@ -135,6 +159,9 @@
   - Bug fix found during verification: `backend/main.py`'s `/api/auth/login` caught its own deliberately-raised `HTTPException(401)` in a broad `except Exception` and rewrapped it as a 500 — bad credentials returned 500 instead of 401. Fixed by re-raising `HTTPException` before the generic catch-all.
 
 ## Last Completed Step
+Commit backlog + docs refresh (2026-11-09). See Progress Log.
+
+### Earlier: remote collection pipeline end-to-end verified (2026-07-27)
 Remote collection pipeline end-to-end verified working (2026-07-27). Three root-cause fixes applied:
 1. `orca-postgres` container had exited (exit 255, ~17 hours); `docker start orca-postgres` restored it.
 2. Docker Desktop port forwarding for `orca-frontend` was stale after the backend's crash-loop restart cycles; `docker restart orca-frontend` restored port 443/80 forwarding. **This can recur — if port 443 is unreachable externally, restart the frontend container.**
@@ -157,6 +184,9 @@ Also: `vmnetnat.conf` `resetConnectionOnDestLocalHost` changed from 1 → 0 (all
 - ClamAV has a Linux package (clamav) — use that instead of the Windows binaries
 - Node.js must be in the same container as Python backend (report_gen.js subprocess)
 - TLS cert is auto-generated by `backend/entrypoint.sh` on first boot into the `orca-certs` Docker volume — no manual cert files needed
-- See `AUDIT_REPORT.md` for full prioritized list of known bugs and inconsistencies (4 Critical, 7 Warning, 9 Info — unfixed as of 2026-06-10)
-- `impacket` is now installed (2026-06-18); `paramiko` is still not installed — `vr_remote.py`'s `SSH` transport (an option in the separate `/triage-execute` feature) will throw `ImportError` if selected; `WINRM`, `SMB_TASK`, and `SMB_PSEXEC` are all functional there (`SMB_TASK`'s default there is unaffected by this fix, which only changed the default for the bulk-deploy/triage/agent-deploy *trigger* mechanism, a separate code path)
-- `backend/main.py`'s `/api/assets/remote-execute` route calls `vr_remote.run_remote_collection`, which does not exist anywhere in `vr_remote.py` — pre-existing dead code, will throw `AttributeError` if hit, found during the 2026-06-18 remote-collection fix but left unfixed as out of scope
+- `AUDIT_REPORT.md` findings were fixed 2026-06-10, and a later full-codebase audit was fixed in commit `f6e6d16` (2026-08-20)
+- `impacket`, `pywinrm` and `paramiko` are all installed; all `vr_remote.py` transports (WINRM, SMB_TASK, SMB_PSEXEC, SSH) are importable
+- `backend/bin/syftgrype/grype-db/` (~3 GB) is gitignored. A fresh clone has no Grype DB, so vuln scans fail until it's populated (see ADMIN_GUIDE)
+- `agent_routes.py` serves `clamav.zip`/`grype-db.zip` with `zip_path.read_bytes()`. The Grype zip is ~3 GB, so each agent download loads it all into backend RAM. Should switch to `FileResponse` (streaming). Not yet fixed
+- `backend/schema.sql` must be regenerated after every schema change (`docker exec orca-postgres pg_dump -U postgres -d orca_db --schema-only --no-owner --no-privileges > backend/schema.sql`), since fresh installs are built from it
+- If port 443 stops answering externally after backend restarts, `docker restart orca-frontend` (Docker Desktop port-forward goes stale)

@@ -28,6 +28,12 @@ This guide covers day-to-day operation of the ORCA platform for analysts.
 
 Navigate to `https://<server-ip>` in your browser. On first visit, accept the self-signed certificate warning (click **Advanced** → **Proceed**). Enter your username and password. Sessions expire after 60 minutes; you will be redirected to the login screen when your token expires.
 
+**New account:** an admin sends you an enrollment link (by email, or directly if the server has no email). Open it within 7 days, choose a password (at least 8 characters), and then log in normally.
+
+**Forgot your password:** click the forgot-password link on the login screen and enter your username or email. This only works if the server has email configured. Otherwise, ask an admin to generate a reset link for you. Reset links are valid for 1 hour.
+
+A deactivated account can't log in. Contact an admin.
+
 ---
 
 ## Dashboard
@@ -155,7 +161,10 @@ The **PKG** panel on each asset shows live collection progress:
    - **Notes** — add analyst annotations at the technique level
    - **Status** — change the lifecycle status (UNCLAIMED → IN_PROGRESS → PENDING_REVIEW → CLOSED)
 5. Any technique with no evidence yet shows a **manual upload** option (JSON/JSONL/CSV/TXT) — use it to attach evidence that wasn't collected automatically, regardless of whether a collection was ever attempted for that technique.
-6. **Admins only**: a technique that already has evidence shows a red **⚠ FLUSH_EVIDENCE** button next to the verdict selector. This permanently deletes the evidence collected for that technique and is logged — see [Audit Trail (Admin Only)](#audit-trail-admin-only) below.
+6. **Running collection from the Evidence Window**: enter a **DRIVE** (e.g. `C:` or `E:\`), then either:
+   - **▶ RUN (IN-CONTAINER)** runs collection inside the ORCA server against that drive (only drives visible to the container), or
+   - pick an online agent under **SELECT AGENT...** and click **▶ RUN ON AGENT**. Collection then runs on that agent's machine and can reach any drive it sees: a locally attached physical disk, or a disk image it mounted via [Disk Image Mounting](#disk-image-mounting). Results land in the same technique rows as any other collection.
+7. **Admins only**: a technique that already has evidence shows a red **⚠ FLUSH_EVIDENCE** button next to the verdict selector. This permanently deletes the evidence collected for that technique and is logged — see [Audit Trail (Admin Only)](#audit-trail-admin-only) below.
 
 ### Timeline View
 
@@ -364,11 +373,18 @@ Profiles appear in the **GEOPOLITICAL_FOCUS** dropdown when creating a case (und
 - **Certificate Info** — expiry date, days remaining, Subject Alternative Names, key type (ECDSA P-256)
 - **Regenerate Certificate** (admin only) — generates a new self-signed ECDSA P-256 cert including the current server IP and hostname as SANs. The backend restarts in 5 seconds to load the new cert; nginx detects the cert file change and reloads automatically. You will need to accept the new certificate in your browser.
 
+### My Account
+
+Edit your own initials and email, and change your password (requires your current password).
+
 ### User Registry (Admin Only)
 
-- **View all users** — username, initials, role
-- **Create user** — username, password, initials, role (`admin` or `analyst`)
-- **Delete user** — cannot delete your own account
+- **View all users**: username, initials, role, email, active status, last login
+- **Invite user**: username, initials, role (`admin` or `analyst`), optional email. This produces a one-time enrollment link (valid 7 days) that the user opens to set their own password. If the server has email configured, the link is emailed too. Either way it's shown to you so you can pass it on.
+- **Reset password**: produces a one-time reset link (valid 1 hour), delivered the same way
+- **Edit**: initials, role, email (you can't change your own role)
+- **Deactivate / reactivate**: blocks login without deleting the account or its history. Prefer this over deleting.
+- **Delete user**: cannot delete your own account
 
 ### Audit Trail (Admin Only)
 

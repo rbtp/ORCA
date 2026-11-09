@@ -110,36 +110,35 @@ Wait 30–60 seconds for all services to be healthy, then open `https://<server-
 
 ### Step 5 — Initialise the Database
 
-Run migrations to create all required tables:
+**Schema (automatic on a fresh volume):** `docker-compose.yml` mounts `backend/schema.sql` into Postgres's `docker-entrypoint-initdb.d/`. A brand-new `orca-postgres-data` volume therefore gets the full current schema on first start, with no manual migration step. `schema.sql` is regenerated from the live database after every schema change, so it already includes everything in `migrations/` and `backend/*_migration.sql`.
+
+**Existing database (upgrading):** `schema.sql` is *not* re-applied to a volume that already exists. Apply any migrations you don't have yet, for example:
 
 ```bash
-# Core tables (run all SQL files in the migrations directory)
-docker exec -i orca-postgres psql -U postgres -d orca_db < migrations/add_package_tokens.sql
-
-# Agent tables
-docker exec -i orca-postgres psql -U postgres -d orca_db < backend/agent_migration.sql
-
-# Behavioral analysis tables (CAPA / FLOSS / Speakeasy)
-docker exec -i orca-postgres psql -U postgres -d orca_db < backend/behavioral_analysis_migration.sql
-
-# Audit log (evidence deletion and future admin-action logging)
-docker exec -i orca-postgres psql -U postgres -d orca_db < backend/audit_log_migration.sql
+docker exec -i orca-postgres psql -U postgres -d orca_db < migrations/add_user_account_management.sql
 ```
 
-`backend/schema.sql` is a full schema-only snapshot of a running `orca_db` (see [Database Schema](../README.md#database-schema) in the README) — useful as a reference for what the database should look like after all migrations are applied, but the migration files above are still the source of truth for a fresh install.
+All migration files use `IF NOT EXISTS`, so re-running one that's already applied is harmless.
 
-Create the initial admin user:
+**Reference data (MITRE ATT&CK, artifact library, threat attribution):** load the seed dumps once on a fresh database:
+
 ```bash
-docker exec -i orca-postgres psql -U postgres -d orca_db <<'EOF'
-INSERT INTO users (username, password_hash, initials, role)
-VALUES ('admin', '<bcrypt-hash>', 'ADM', 'admin');
-EOF
+for f in seed_data/*.sql; do
+  docker exec -i orca-postgres psql -U postgres -d orca_db -v ON_ERROR_STOP=1 -q < "$f"
+done
 ```
 
-To generate a bcrypt hash:
-```bash
-docker exec orca-backend python -c "from passlib.hash import bcrypt; print(bcrypt.hash('your-password'))"
+```powershell
+Get-ChildItem seed_data\*.sql | ForEach-Object { Get-Content $_ -Raw | docker exec -i orca-postgres psql -U postgres -d orca_db -v ON_ERROR_STOP=1 -q }
 ```
+
+These contain reference tables only (no users, cases or evidence). They are plain `COPY` data, so load them into an *empty* database only: re-loading into a populated one fails on duplicate keys.
+
+**First admin account (automatic):** if the `users` table is empty at backend startup, `backend/bootstrap_admin.py` creates an admin account:
+- If `ORCA_BOOTSTRAP_ADMIN_USERNAME` / `ORCA_BOOTSTRAP_ADMIN_PASSWORD` / `ORCA_BOOTSTRAP_ADMIN_INITIALS` are set, it uses those.
+- Otherwise it generates a random password and logs it **once**. Find it with `docker logs orca-backend 2>&1 | grep -A3 "FIRST-BOOT ADMIN"`, then change it under **Options → My Account**.
+
+Log in with that account, then invite everyone else from **Options → User Registry** (see [User Management](#user-management)).
 
 ### Step 6 — Connect an Existing PostgreSQL Container
 
@@ -199,13 +198,15 @@ The backend entrypoint attempts `freshclam` on each start — failures are non-f
 
 ### Grype Vulnerability Database (Air-Gapped)
 
-```bash
-# On a connected machine
-grype db update
-# Copy ~/.cache/grype/db/ to the air-gapped machine
+The Grype DB (~3 GB) is **not** in the git repository (it's gitignored). Populate it on each deployment:
 
-# Set the GRYPE_DB_CACHE_DIR env var to point at the pre-populated cache
+```bash
+# On a connected machine, download straight into ORCA's bundled DB location
+GRYPE_DB_CACHE_DIR=backend/bin/syftgrype/grype-db grype db update
+# Result: backend/bin/syftgrype/grype-db/6/vulnerability.db (+ import.json)
 ```
+
+Then copy the ORCA folder, including `backend/bin/syftgrype/grype-db/`, to the air-gapped machine. The backend points Grype at this directory (`GRYPE_DB_DIR` in `config.py`; override with the `GRYPE_DB_CACHE_DIR` env var). It also serves the directory to agents as `grype-db.zip`. Offline scans turn off Grype's DB auto-update and DB age check, so an older DB keeps working. Re-run the update periodically to get newer vulnerability data.
 
 ---
 
@@ -227,6 +228,12 @@ Set these in the root `.env` file. All are passed to the `orca-backend` containe
 | `ORCA_VR_MAX_WORKERS` | No | `5` | Maximum concurrent Velociraptor worker processes for local collection. |
 | `ORCA_VR_EXE_LOCAL` | No | `bin/velociraptor` | Path to the Velociraptor binary executed inside the container (Linux build). |
 | `ORCA_VR_EXE_WINDOWS` | No | `bin/velociraptor.exe` | Path to the Velociraptor Windows binary packaged into collection ZIPs for remote targets. |
+| `GRYPE_DB_CACHE_DIR` | No | `bin/syftgrype/grype-db` | Grype vulnerability DB directory. |
+| `SMTP_HOST` | No | — | SMTP relay for emailing enrollment/reset links. If unset, email is disabled and links are shown in the admin UI instead. |
+| `SMTP_PORT` | No | `587` | SMTP port. |
+| `SMTP_USER` / `SMTP_PASSWORD` | No | — | SMTP credentials. |
+| `SMTP_FROM` | No | `SMTP_USER` | Sender address. |
+| `SMTP_USE_TLS` | No | `true` | Use STARTTLS. |
 
 ### Startup Validation
 
@@ -341,29 +348,45 @@ All user management requires the `admin` role.
 
 ### Via the UI
 
+Requires `migrations/add_user_account_management.sql` (adds `email`, `is_active`, `last_login` to `users`, plus the `enrollment_tokens` and `password_reset_tokens` tables).
+
 **Options → User Registry:**
-- View all users (username, initials, role)
-- Create user: username, password, initials, role (`admin` or `analyst`)
+- View all users (username, initials, role, email, active status, last login)
+- **Invite user** (username, initials, role, optional email): creates a one-time enrollment link, valid for 7 days. The invitee opens it and sets their own password. The `users` row is only created when enrollment is completed.
+- **Reset password**: creates a one-time reset link, valid for 1 hour. Admins never see or set a user's password.
+- **Edit** initials, role, or email
+- **Deactivate / reactivate**: a deactivated user can't log in, but their audit-log and case-assignment history stays intact. Use this rather than deleting.
 - Delete user (cannot delete yourself)
+
+**Link delivery:** if SMTP is configured (see `SMTP_*` in the [Environment Variables Reference](#environment-variables-reference)), invite and reset links are emailed to the user's address. Either way, the link is also shown to the admin in the UI so it can be handed over manually. That is the normal workflow on an air-gapped install. Links are built from `ORCA_SERVER_URL`, so make sure it's set to the address analysts actually browse to.
+
+**Self-service:** every user can edit their own initials/email and change their password under **Options → My Account**. The "Forgot password" link on the login screen only works when SMTP is configured. Without SMTP it tells the user to contact an admin.
 
 ### Via the API
 
 ```bash
 TOKEN="<admin-jwt>"
+ORCA="https://<server>"
 
 # List users
-curl -k -H "Authorization: Bearer $TOKEN" https://localhost:8000/api/admin/users
+curl -k -H "Authorization: Bearer $TOKEN" $ORCA/api/admin/users
 
-# Create user
-curl -k -X POST https://localhost:8000/api/admin/users/create \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"s3cur3","initials":"ALC","role":"analyst"}'
+# Invite user (response includes "link" and "emailed")
+curl -k -X POST $ORCA/api/admin/users/invite \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"username":"alice","initials":"ALC","role":"analyst","email":"alice@example.com"}'
+
+# Generate a password reset link
+curl -k -X POST $ORCA/api/admin/users/alice/reset-password -H "Authorization: Bearer $TOKEN"
+
+# Deactivate / reactivate
+curl -k -X POST $ORCA/api/admin/users/alice/toggle-active -H "Authorization: Bearer $TOKEN"
 
 # Delete user
-curl -k -X DELETE https://localhost:8000/api/admin/users/alice \
-  -H "Authorization: Bearer $TOKEN"
+curl -k -X DELETE $ORCA/api/admin/users/alice -H "Authorization: Bearer $TOKEN"
 ```
+
+The legacy `POST /api/admin/users/create` (admin sets the password directly) still exists.
 
 ### Roles
 
