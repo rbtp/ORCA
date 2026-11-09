@@ -91,6 +91,10 @@ services:
       # tables. schema.sql is pure DDL (no seed data), so re-running it here
       # is exactly as safe as running it once.
       - ./backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      # Reference data (MITRE analytics, artifact library, threat
+      # attribution...), loaded once right after the schema on a fresh volume.
+      - ./backend/initdb/02-seed-data.sh:/docker-entrypoint-initdb.d/02-seed-data.sh:ro
+      - ./seed_data:/seed_data:ro
     networks:
       - orca-net
     healthcheck:
@@ -102,10 +106,14 @@ services:
       # up once on first boot" symptom that only shows up on a truly fresh
       # volume, never on one that's already initialized). depends_on above
       # now waits for this healthcheck instead of racing it.
-      test: ["CMD-SHELL", "pg_isready -U postgres -d orca_db"]
+      # -h 127.0.0.1 (TCP), not the default Unix socket: while initdb scripts
+      # (schema + seed data) run, Postgres serves a temporary socket-only
+      # instance, so a socket check reports "ready" before the backend can
+      # actually connect over the network.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d orca_db"]
       interval: 3s
       timeout: 5s
-      retries: 20
+      retries: 60
       start_period: 10s
 
 networks:

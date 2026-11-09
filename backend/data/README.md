@@ -1,16 +1,15 @@
 # backend/data/
 
-Reference data that is deliberately **not** vendored into this repo, unlike
-everything under `backend/bin/` — updated independently of the app itself,
-same reasoning as ClamAV's signature definitions.
+Reference data loaded by the backend. `mitre-attack.json` is committed to the
+repo so a fresh install works with no download; replace it with a newer
+release whenever you want to update ATT&CK.
 
 ## mitre-attack.json
 
-Drop the official MITRE ATT&CK STIX 2.1 bundle here as `mitre-attack.json`
+This is the official MITRE ATT&CK STIX 2.1 bundle, stored as `mitre-attack.json`
 (the Enterprise matrix — `enterprise-attack.json` from
 [mitre-attack/attack-stix-data](https://github.com/mitre-attack/attack-stix-data),
-renamed) before first boot, or set `ORCA_MITRE_ATTACK_JSON` to point at it
-somewhere else.
+renamed). To use a file somewhere else, set `ORCA_MITRE_ATTACK_JSON` to its path.
 
 On startup, the backend automatically imports this file into
 `mitre_groups` / `mitre_software` / `mitre_mitigations` / `mitre_techniques`

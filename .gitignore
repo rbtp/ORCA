@@ -28,29 +28,27 @@ frontend/node_modules/
 # Frontend build output
 frontend/dist/
 
-# ClamAV signature definitions -- updated by freshclam at runtime, not
-# vendored (large, frequently stale the moment they're committed). The
-# ClamAV engine itself, Velociraptor, Grype/Syft, Arsenal, Volatility3 (incl.
-# its symbol tables) etc. under backend/bin/ ARE committed -- ORCA is meant
-# to be self-contained on a disconnected network except for these
-# definitions and the MITRE ATT&CK JSON import (see backend/data/).
-backend/bin/clamav/**/*.cvd
-backend/bin/clamav/**/*.cld
-backend/bin/clamav/**/*.sign
+# ClamAV signature definitions under backend/bin/clamav/ (*.cvd, *.cvd.sign,
+# certs/clamav.crt) ARE committed, so a fresh clone can scan with no internet
+# (they go to agents inside clamav.zip). Refresh them with freshclam and
+# re-commit periodically. Only freshclam's own local state file is excluded.
 backend/bin/clamav/**/freshclam.dat
+# ClamAV's public signature-verification cert, not a secret (*.crt is
+# otherwise ignored above).
+!backend/bin/clamav/certs/clamav.crt
 
 # Generated at request time by agent_routes.py from the already-committed
 # backend/bin/arsenal/ directory -- a pre-built zip of it exceeds GitHub's
 # 100MB single-file limit, so it's never committed, only cached in /tmp.
 backend/bin/arsenal.zip
 
-# MITRE ATT&CK STIX bundle -- same reasoning, operator-supplied at deploy
-# time (see backend/data/README.md), not vendored.
-backend/data/mitre-attack.json
-backend/data/*.json
+# MITRE ATT&CK STIX bundle (backend/data/mitre-attack.json) IS committed
+# (~52 MB) so a fresh install imports ATT&CK on first boot with no download.
 
 # Logs
 *.log
+backend_stdout.log
+backend_stderr.log
 claude_logs/
 
 # IDE

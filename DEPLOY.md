@@ -1,88 +1,99 @@
 # ORCA Deployment Guide
 
-## Fresh Install (New Machine)
+For the full reference (env vars, TLS, backup/restore, troubleshooting), see [docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md).
 
-1. Install Docker Desktop
-2. Copy the ORCA folder to the new machine
-3. Ensure `backend/orca.crt` and `backend/orca.key` exist (TLS cert/key)
-4. Edit `.env` — set `JWT_SECRET` and `VITE_API_URL` to your server's IP
-5. Run: `start.bat`
-6. Open browser: `http://YOUR_SERVER_IP`
+## Fresh Install
 
-## Existing Installation (Same Machine)
+Requirements: Docker Desktop (Windows, with WSL2) or Docker Engine + compose plugin (Linux), ports 80 and 443 free, internet access for the first build, ~25 GB disk.
 
-If you already have a running `orca-postgres` container with data:
+**Windows** (PowerShell, from the repo folder):
+```powershell
+git clone https://github.com/rbtp/ORCA.git
+cd ORCA
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
 
-1. Export existing data:
-   ```
-   docker exec orca-postgres pg_dump -U postgres orca_db > orca_backup.sql
+**Linux:**
+```bash
+git clone https://github.com/rbtp/ORCA.git
+cd ORCA
+./install.sh
+```
+
+The installer:
+1. Checks Docker is installed and running
+2. Creates `.env` from `.env.example` with random `JWT_SECRET` / `DB_PASSWORD`, and sets `ORCA_SERVER_URL` / `CORS_ORIGINS` to this machine's IP (it asks; pass `-ServerAddress` / `--server-address` to skip the prompt)
+3. Builds the images (10–20 minutes the first time)
+4. Downloads the Grype vulnerability DB into `backend/bin/syftgrype/grype-db/` (skip with `-SkipGrypeDb` / `--skip-grype-db`)
+5. Starts everything and prints the first-boot admin username and password
+
+On first start, a fresh database volume automatically gets:
+- the schema (`backend/schema.sql`)
+- reference data (`seed_data/*.sql`: MITRE analytics, artifact library, VQL mappings, threat attribution)
+- the MITRE ATT&CK import (`backend/data/mitre-attack.json`)
+- one admin account (password printed once by the installer, also in `docker logs orca-backend`)
+
+Then open `https://<server-ip>`, accept the self-signed certificate warning, log in, change the admin password under **Options → My Account**, and invite analysts from **Options → User Registry**.
+
+The installer is safe to re-run. It keeps an existing `.env` and Grype DB.
+
+## Everyday Commands
+
+```bash
+docker compose up -d          # start
+docker compose down           # stop (data volumes are kept)
+docker compose logs -f orca-backend
+```
+
+## Updating
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+Then apply any new files in `migrations/` that your database doesn't have yet (they're idempotent):
+```bash
+docker exec -i orca-postgres psql -U postgres -d orca_db < migrations/<file>.sql
+```
+
+## Moving to a New Server IP
+
+Edit `ORCA_SERVER_URL` and `CORS_ORIGINS` in `.env`, then `docker compose up -d`. The TLS certificate is regenerated automatically on boot if it doesn't cover the new `ORCA_SERVER_URL`. No rebuild needed.
+
+## Migrating Data to a New Machine
+
+1. On the old machine: `docker exec orca-postgres pg_dump -U postgres -Fc orca_db > orca_backup.dump`
+2. On the new machine: run the installer as above
+3. Restore over the fresh database:
+   ```bash
+   docker cp orca_backup.dump orca-postgres:/tmp/
+   docker exec orca-postgres pg_restore -U postgres -d orca_db --clean --if-exists /tmp/orca_backup.dump
+   docker compose restart orca-backend
    ```
 
-2. Create the shared network and connect the existing postgres container:
-   ```
-   docker network create orca-net
-   docker network connect orca-net orca-postgres
-   ```
+## Air-Gapped Deployment
 
-3. Start only the backend and frontend (skip postgres):
-   ```
-   docker compose up -d orca-backend orca-frontend
-   ```
+Run the installer on an internet-connected machine first, then copy to the offline machine:
 
-## Migrating to a New Machine
+```bash
+docker save orcaweb-orca-backend orcaweb-orca-frontend postgres:15 | gzip > orca-images.tar.gz
+```
 
-1. Export data from old machine:
-   ```
-   docker exec orca-postgres pg_dump -U postgres orca_db > orca_backup.sql
-   ```
+Copy `orca-images.tar.gz` and the whole ORCA folder (including `backend/bin/syftgrype/grype-db/`, which isn't in git) to the offline machine, then:
 
-2. Start full stack on new machine:
-   ```
-   docker compose up -d
-   ```
+```bash
+docker load < orca-images.tar.gz
+docker compose up -d
+```
 
-3. Import data:
-   ```
-   docker exec -i orca-postgres psql -U postgres orca_db < orca_backup.sql
-   ```
-
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `JWT_SECRET` | Secret for JWT token signing | `orca-secret-change-me` |
-| `VITE_API_URL` | Backend HTTPS URL (used by frontend) | `https://localhost:8000` |
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://postgres:postgres@orca-postgres:5432/orca_db` |
-| `TLS_CERT_PATH` | Path to TLS certificate inside container | `/app/certs/orca.crt` |
-| `TLS_KEY_PATH` | Path to TLS key inside container | `/app/certs/orca.key` |
+Delete the copied `.env` first if the offline machine has a different IP, or edit `ORCA_SERVER_URL` / `CORS_ORIGINS` in it.
 
 ## Ports
 
-| Service | Port |
-|---------|------|
-| Frontend (nginx) | 80 |
-| Backend API (HTTPS) | 8000 |
-| PostgreSQL | 5432 / 5433 |
+| Port | Service |
+|------|---------|
+| 443 | Web UI + API (nginx, HTTPS) |
+| 80 | Redirects to 443 |
 
-## TLS Certificate
-
-The backend requires a TLS certificate. The self-signed cert in `backend/` is used by default via volume mount.
-
-To generate a new self-signed cert:
-```
-openssl req -x509 -newkey rsa:4096 -keyout backend/orca.key -out backend/orca.crt -days 365 -nodes -subj "/CN=orca"
-```
-
-## Updating VITE_API_URL for a New Server
-
-1. Edit `.env` in the project root:
-   ```
-   VITE_API_URL=https://NEW_SERVER_IP:8000
-   ```
-2. Rebuild the frontend container:
-   ```
-   docker compose build orca-frontend
-   docker compose up -d orca-frontend
-   ```
-
-Note: `VITE_API_URL` is baked into the frontend at build time. Any change requires a rebuild.
+The backend (8000) and PostgreSQL (5432) are only reachable inside the Docker network.

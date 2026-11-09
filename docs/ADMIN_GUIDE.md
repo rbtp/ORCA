@@ -54,50 +54,33 @@ git clone https://github.com/rbtp/ORCA.git
 cd ORCA
 ```
 
-### Step 2 — Configure Environment
+All tool binaries (Velociraptor, ClamAV + signatures, Grype/Syft Windows builds, Volatility3, Arsenal Image Mounter, WinPMem...), the MITRE ATT&CK bundle and the reference data are in the repository. The only thing not in git is the ~3 GB Grype vulnerability DB, which the installer downloads.
 
-```bash
-cp .env.example .env
+### Step 2 — Run the Installer
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1     # Windows
+./install.sh                                               # Linux
 ```
 
-Edit `.env`:
+Options: `-ServerAddress <ip>` / `--server-address <ip>` (skip the prompt), `-SkipGrypeDb` / `--skip-grype-db`.
 
-```env
-# Required
-JWT_SECRET=<generate with: python -c "import secrets; print(secrets.token_hex(32))">
-DB_PASSWORD=<strong-password>
+The installer creates `.env` from `.env.example`. It generates random `JWT_SECRET` and `DB_PASSWORD`, sets `ORCA_SERVER_URL=https://<server>` and `CORS_ORIGINS=https://<server>,https://localhost`, then builds, downloads the Grype DB, starts the stack, and prints the first-boot admin password. An existing `.env` is kept, so to change settings later, edit `.env` and run `docker compose up -d`.
 
-# Required for remote collection — set to the IP/hostname where target endpoints can reach this server
-ORCA_SERVER_URL=https://10.x.x.x:8000
+`ORCA_SERVER_URL` must be the address remote targets and browsers use to reach this machine, **without** `:8000` (the backend port is internal; everything goes through nginx on 443).
 
-# Required for CORS — must match the origin analysts use in their browsers
-CORS_ORIGINS=https://10.x.x.x
+### Step 3 — Manual Alternative
 
-# Optional — leave empty for relative-path frontend (recommended)
-VITE_API_URL=
-```
-
-### Step 3 — Place Binaries
-
-The following binaries must be present in `backend/bin/` before building:
-
-| Path | Description |
-|------|-------------|
-| `backend/bin/velociraptor.exe` | Velociraptor Windows binary (deployed to remote targets) |
-| `backend/bin/velociraptor` | Velociraptor Linux binary (runs inside the container) |
-| `backend/bin/syftgrype/syft` | Syft SBOM generator |
-| `backend/bin/syftgrype/grype` | Grype vulnerability scanner |
-| `backend/bin/clamav/` | ClamAV binaries and signature files |
-| `backend/bin/remora/volatility3/` | Volatility3 Python package |
-| `backend/bin/arsenal/aim_cli` | Arsenal Image Mounter CLI |
-
-These are excluded from the Git repository (`.gitignore`) and must be sourced separately.
-
-### Step 4 — Build and Start
+If you'd rather not use the installer:
 
 ```bash
+cp .env.example .env      # then set JWT_SECRET, DB_PASSWORD, CORS_ORIGINS, ORCA_SERVER_URL
+docker compose build
+# optional: Grype DB, see "Grype Vulnerability Database" below
 docker compose up -d
 ```
+
+### Step 4 — What Happens on First Boot
 
 On first run:
 - PostgreSQL 15 initialises the `orca_db` database
@@ -120,19 +103,7 @@ docker exec -i orca-postgres psql -U postgres -d orca_db < migrations/add_user_a
 
 All migration files use `IF NOT EXISTS`, so re-running one that's already applied is harmless.
 
-**Reference data (MITRE ATT&CK, artifact library, threat attribution):** load the seed dumps once on a fresh database:
-
-```bash
-for f in seed_data/*.sql; do
-  docker exec -i orca-postgres psql -U postgres -d orca_db -v ON_ERROR_STOP=1 -q < "$f"
-done
-```
-
-```powershell
-Get-ChildItem seed_data\*.sql | ForEach-Object { Get-Content $_ -Raw | docker exec -i orca-postgres psql -U postgres -d orca_db -v ON_ERROR_STOP=1 -q }
-```
-
-These contain reference tables only (no users, cases or evidence). They are plain `COPY` data, so load them into an *empty* database only: re-loading into a populated one fails on duplicate keys.
+**Reference data (automatic on a fresh volume):** right after the schema, `backend/initdb/02-seed-data.sh` loads `seed_data/*.sql` (MITRE analytics/actors/log sources, artifact library, VQL mappings, threat attribution: reference tables only, no users/cases/evidence). On first backend start, `backend/data/mitre-attack.json` is imported into the MITRE technique/group/software tables. Loading `seed_data/` into an already-populated database fails on duplicate keys. Those files are only for empty databases.
 
 **First admin account (automatic):** if the `users` table is empty at backend startup, `backend/bootstrap_admin.py` creates an admin account:
 - If `ORCA_BOOTSTRAP_ADMIN_USERNAME` / `ORCA_BOOTSTRAP_ADMIN_PASSWORD` / `ORCA_BOOTSTRAP_ADMIN_INITIALS` are set, it uses those.
@@ -198,11 +169,10 @@ The backend entrypoint attempts `freshclam` on each start — failures are non-f
 
 ### Grype Vulnerability Database (Air-Gapped)
 
-The Grype DB (~3 GB) is **not** in the git repository (it's gitignored). Populate it on each deployment:
+The Grype DB (~3 GB) is **not** in the git repository (it's gitignored). `install.ps1` / `install.sh` download it automatically using the Linux `grype` in the backend image. To do it by hand:
 
 ```bash
-# On a connected machine, download straight into ORCA's bundled DB location
-GRYPE_DB_CACHE_DIR=backend/bin/syftgrype/grype-db grype db update
+docker compose run --rm --no-deps --user root -v ./backend/bin/syftgrype/grype-db:/grype-db -e GRYPE_DB_CACHE_DIR=/grype-db --entrypoint grype orca-backend db update
 # Result: backend/bin/syftgrype/grype-db/6/vulnerability.db (+ import.json)
 ```
 
@@ -222,7 +192,7 @@ Set these in the root `.env` file. All are passed to the `orca-backend` containe
 | `TLS_CERT_PATH` | **Yes** | `/app/certs/orca.crt` | Path to TLS certificate inside the backend container. |
 | `TLS_KEY_PATH` | **Yes** | `/app/certs/orca.key` | Path to TLS private key inside the backend container. |
 | `CORS_ORIGINS` | Recommended | `https://localhost` | Comma-separated list of allowed CORS origins (browser origins that can call the API). Set to `https://<your-server-ip>` or `https://<hostname>`. |
-| `ORCA_SERVER_URL` | Recommended | Auto-detected | Absolute HTTPS URL that remote Windows endpoints will use to reach the ORCA API (e.g. `https://10.x.x.x:8000`). If unset, ORCA auto-detects its own IP — may be wrong in multi-homed environments. |
+| `ORCA_SERVER_URL` | Recommended | Auto-detected | Absolute HTTPS URL that remote Windows endpoints will use to reach the ORCA API (e.g. `https://10.x.x.x`, no port). If unset, ORCA auto-detects its own IP — may be wrong in multi-homed environments. |
 | `VITE_API_URL` | No | `` (empty) | Backend URL baked into the frontend at build time. Leave empty to use relative `/api/...` paths (recommended). Only set if your frontend is served from a different origin than the API proxy. |
 | `ORCA_DATA_ROOT` | No | `/app/evidence` | Directory inside the container where evidence packages and results are stored. |
 | `ORCA_VR_MAX_WORKERS` | No | `5` | Maximum concurrent Velociraptor worker processes for local collection. |
@@ -264,9 +234,7 @@ From the ORCA UI (admin role required):
 
 From the command line:
 ```bash
-# Trigger via the API
-curl -k -X POST https://localhost:8000/api/network/regenerate-cert \
-  -H "Authorization: Bearer <admin-jwt>"
+curl -k -b orca.jar -X POST https://<server>/api/network/regenerate-cert   # orca.jar: see "Via the API" under User Management
 ```
 
 ### Custom Certificates
@@ -365,25 +333,24 @@ Requires `migrations/add_user_account_management.sql` (adds `email`, `is_active`
 ### Via the API
 
 ```bash
-TOKEN="<admin-jwt>"
 ORCA="https://<server>"
+# Log in once; the session is an HttpOnly cookie, kept in ./orca.jar
+curl -k -c orca.jar -X POST $ORCA/api/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"..."}'
 
 # List users
-curl -k -H "Authorization: Bearer $TOKEN" $ORCA/api/admin/users
+curl -k -b orca.jar $ORCA/api/admin/users
 
 # Invite user (response includes "link" and "emailed")
-curl -k -X POST $ORCA/api/admin/users/invite \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"username":"alice","initials":"ALC","role":"analyst","email":"alice@example.com"}'
+curl -k -b orca.jar -X POST $ORCA/api/admin/users/invite -H "Content-Type: application/json" -d '{"username":"alice","initials":"ALC","role":"analyst","email":"alice@example.com"}'
 
 # Generate a password reset link
-curl -k -X POST $ORCA/api/admin/users/alice/reset-password -H "Authorization: Bearer $TOKEN"
+curl -k -b orca.jar -X POST $ORCA/api/admin/users/alice/reset-password
 
 # Deactivate / reactivate
-curl -k -X POST $ORCA/api/admin/users/alice/toggle-active -H "Authorization: Bearer $TOKEN"
+curl -k -b orca.jar -X POST $ORCA/api/admin/users/alice/toggle-active
 
 # Delete user
-curl -k -X DELETE $ORCA/api/admin/users/alice -H "Authorization: Bearer $TOKEN"
+curl -k -b orca.jar -X DELETE $ORCA/api/admin/users/alice
 ```
 
 The legacy `POST /api/admin/users/create` (admin sets the password directly) still exists.
@@ -419,10 +386,10 @@ The backend endpoint (`DELETE /api/mitre/evidence/{asset_id}/{t_code}`) rejects 
 TOKEN="<admin-jwt>"
 
 # Full log (most recent 1000)
-curl -k -H "Authorization: Bearer $TOKEN" https://localhost:8000/api/admin/audit-log
+curl -k -b orca.jar https://<server>/api/admin/audit-log
 
 # Scoped to one investigation
-curl -k -H "Authorization: Bearer $TOKEN" "https://localhost:8000/api/admin/audit-log?case_name=Op%20Phantom"
+curl -k -b orca.jar "https://<server>/api/admin/audit-log?case_name=Op%20Phantom"
 ```
 
 The `audit_log` table (`backend/audit_log_migration.sql`) is general-purpose — `action` is free text — so future admin-gated actions can log into the same table without another migration.

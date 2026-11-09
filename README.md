@@ -202,7 +202,7 @@ docker exec orca-postgres pg_dump -U postgres -d orca_db --schema-only --no-owne
 
 - **Docker Desktop** (Windows or Linux) with Docker Compose v2
 - **WSL2** (Windows only) with nested virtualisation enabled — required for Linux containers under Docker Desktop
-- **Ports available**: 80, 443 (frontend), 8000 (backend)
+- **Ports available**: 80, 443 (the backend's 8000 is internal to the Docker network)
 - **Hardware**: 4 GB RAM minimum; 8 GB recommended (LibreOffice and memory analysis are heavyweight)
 - **Storage**: 20 GB+ for evidence volumes and container images
 - Target Windows endpoints must have **SMB port 445** reachable and local administrator credentials available for remote collection; **WinRM port 5985** is only needed if you choose WinRM as the trigger transport instead of the SMB/Task Scheduler default — package staging still goes over SMB either way
@@ -211,29 +211,26 @@ docker exec orca-postgres pg_dump -U postgres -d orca_db --schema-only --no-owne
 
 ## Quick Start
 
-```bash
+```powershell
 git clone https://github.com/rbtp/ORCA.git
 cd ORCA
-
-# Copy and configure the environment file
-cp .env.example .env
-# Edit .env — set JWT_SECRET and (optionally) CORS_ORIGINS and ORCA_SERVER_URL
-
-docker compose up -d
+powershell -ExecutionPolicy Bypass -File .\install.ps1    # Windows
+./install.sh                                              # Linux
 ```
 
-Open `https://<server-ip>` in your browser. Accept the self-signed certificate warning on the first visit.
-
-The first admin account is created automatically on first boot. See [First-Run Setup](#first-run-setup) below.
+The installer creates `.env` (random secrets, your server IP), builds the images, downloads the Grype vulnerability DB, starts ORCA, and prints the first admin login. Open `https://<server-ip>` and accept the self-signed certificate warning on the first visit. See [DEPLOY.md](DEPLOY.md) for details, updating, and air-gapped installs.
 
 ### First-Run Setup
 
-1. The backend auto-generates a self-signed TLS certificate on first boot — no manual cert files needed.
-2. The database schema is applied automatically to a fresh Postgres volume. Load the reference data once: `seed_data/*.sql` (see [docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md#step-5--initialise-the-database)).
-3. Get the first-boot admin password with `docker logs orca-backend 2>&1 | grep -A3 "FIRST-BOOT ADMIN"`, or preset it via `ORCA_BOOTSTRAP_ADMIN_PASSWORD` in `.env`.
-4. Navigate to **Options → User Registry** and **invite** analysts. Each gets a one-time enrollment link to set their own password (emailed if SMTP is configured, otherwise shown for you to hand over).
-5. If you'll run vulnerability scans, populate the Grype DB (not in git, ~3 GB). See the ADMIN_GUIDE section "Grype Vulnerability Database".
-6. Navigate to **Investigations** → create a case → add assets.
+Everything below happens automatically on first boot of a fresh install:
+- Self-signed TLS certificate generated for `ORCA_SERVER_URL`
+- Database schema, reference data (`seed_data/`) and the MITRE ATT&CK import (`backend/data/mitre-attack.json`) loaded
+- First admin account created (the installer prints the password; it's also in `docker logs orca-backend 2>&1 | grep -A3 "FIRST-BOOT ADMIN"`)
+
+Then:
+1. Log in and change the admin password under **Options → My Account**.
+2. Go to **Options → User Registry** and **invite** analysts. Each gets a one-time enrollment link to set their own password (emailed if SMTP is configured, otherwise shown for you to hand over).
+3. Go to **Investigations** → create a case → add assets.
 
 ### Enabling Behavioral Analysis
 
@@ -251,27 +248,19 @@ This applies the `behavioral_analysis_migration.sql` schema, downloads flare-cap
 
 For networks without internet access:
 
-**On an internet-connected machine:**
+**On an internet-connected machine:** run the installer, then
 ```powershell
-# Save all container images to a tar archive
-docker save orca-backend orca-frontend postgres:15 | gzip > orca-images.tar.gz
-
-# Copy orca-images.tar.gz and the ORCA project folder to the target machine
+docker save orcaweb-orca-backend orcaweb-orca-frontend postgres:15 | gzip > orca-images.tar.gz
 ```
+Copy `orca-images.tar.gz` and the whole ORCA folder (including `backend/bin/syftgrype/grype-db/`, which isn't in git) to the target machine.
 
 **On the air-gapped machine:**
 ```powershell
-# Load the images
 docker load < orca-images.tar.gz
-
-# Configure and start
-cp .env.example .env
-# Edit .env
-
 docker compose up -d
 ```
 
-ClamAV signatures are bundled in `backend/bin/clamav/`. The Grype vulnerability database can be pre-populated by running `grype db update` on a connected machine and copying the cache directory.
+Everything else is in the repo: tool binaries, ClamAV signatures (`backend/bin/clamav/`), the MITRE ATT&CK bundle and reference data. Only the ~3 GB Grype DB has to be carried over separately. See [DEPLOY.md](DEPLOY.md#air-gapped-deployment).
 
 ---
 

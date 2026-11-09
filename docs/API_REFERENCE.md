@@ -50,16 +50,12 @@ Rate-limited to **5 requests/minute** per IP.
 **Response 200**
 ```json
 {
-  "access_token": "eyJ...",
-  "token_type": "bearer",
-  "user": {
-    "username": "analyst1",
-    "initials": "A1",
-    "role": "analyst",
-    "id": 3
-  }
+  "user": { "username": "analyst1", "initials": "A1", "role": "analyst", "id": 3 },
+  "expires_at": 1767225600
 }
 ```
+
+The JWT is returned only as an HttpOnly, Secure, SameSite=Strict cookie (`orca_token`, 60 minutes), never in the body. API clients must keep the cookie, e.g. `curl -c jar -b jar ...`. `POST /api/auth/logout` clears it.
 
 **Errors**: `401 INVALID_CREDENTIALS`, `403 ACCOUNT_DEACTIVATED` (only returned after a correct password), `429 Rate limit exceeded`
 

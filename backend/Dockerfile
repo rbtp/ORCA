@@ -19,6 +19,22 @@ RUN apt-get update && apt-get install -y \
 # access still succeeds, just without this freshness benefit.
 RUN mkdir -p /var/lib/clamav && freshclam --quiet || true
 
+# Linux Grype/Syft for in-container vulnerability scans. backend/bin/syftgrype/
+# only holds the Windows .exe builds (served to agents), and /app/bin is a
+# read-only bind mount anyway, so these go in /usr/local/bin and config.py is
+# pointed at them via ORCA_GRYPE_EXE/ORCA_SYFT_EXE. Versions match the vendored
+# Windows builds so both read the same DB schema (v6) from grype-db/.
+ARG GRYPE_VERSION=0.117.0
+ARG SYFT_VERSION=1.51.0
+RUN wget -q "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz" -O /tmp/grype.tgz && \
+    tar -xzf /tmp/grype.tgz -C /usr/local/bin grype && \
+    wget -q "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" -O /tmp/syft.tgz && \
+    tar -xzf /tmp/syft.tgz -C /usr/local/bin syft && \
+    rm /tmp/grype.tgz /tmp/syft.tgz && \
+    grype version && syft version
+ENV ORCA_GRYPE_EXE=/usr/local/bin/grype \
+    ORCA_SYFT_EXE=/usr/local/bin/syft
+
 WORKDIR /app
 
 COPY requirements.txt .
