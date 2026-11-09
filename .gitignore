@@ -68,3 +68,10 @@ Thumbs.db
 # Temp / generated
 tmp/
 sandbox_*/
+
+# Grype vulnerability DB -- ~3 GB (vulnerability.db alone exceeds GitHub's
+# 100MB single-file limit by ~30x). Operator-populated at deploy time on a
+# connected machine (see docs/ADMIN_GUIDE.md, "Grype Vulnerability
+# Database"); config.py's GRYPE_DB_DIR points grype here, and
+# agent_routes.py serves it to agents as grype-db.zip.
+backend/bin/syftgrype/grype-db/

@@ -479,7 +479,14 @@ class DeployAgentRequest(BaseModel):
 
 _AGENT_BIN_MAP = {
     "velociraptor.exe": "velociraptor.exe",
-    "clamscan.exe":     os.path.join("clamav", "clamscan.exe"),
+    # clamscan.exe deliberately NOT listed as a standalone download here --
+    # on Windows it dynamically links against libclamav.dll and a dozen
+    # other DLLs sitting next to it, and needs main.cvd/daily.cld (its
+    # signature database) to do anything at all. Downloading just the one
+    # .exe (what this used to do) would fail to even launch on the agent,
+    # or silently run with zero signatures if it somehow did. Served as
+    # clamav.zip instead -- see _build_clamav_zip() below, same reasoning
+    # as arsenal.zip.
     "grype.exe":        os.path.join("syftgrype", "grype.exe"),
     "syft.exe":         os.path.join("syftgrype", "syft.exe"),
 }
@@ -508,6 +515,52 @@ def _build_arsenal_zip() -> Path:
     return _ARSENAL_ZIP_CACHE
 
 
+# clamscan.exe needs its whole folder (DLLs it dynamically links against,
+# plus main.cvd/daily.cld -- its signature database) alongside it, same
+# reasoning as arsenal.zip above. tmp.* are freshclam's own leftover scratch
+# dirs, not needed to run clamscan and excluded to keep this smaller.
+_CLAMAV_ZIP_CACHE = Path(tempfile.gettempdir()) / "orca_clamav_cache.zip"
+
+
+def _build_clamav_zip() -> Path:
+    if _CLAMAV_ZIP_CACHE.exists():
+        return _CLAMAV_ZIP_CACHE
+    clamav_dir = Path(__file__).parent / "bin" / "clamav"
+    if not clamav_dir.is_dir():
+        raise HTTPException(404, "clamav/ not present on server")
+    tmp_path = _CLAMAV_ZIP_CACHE.with_suffix(".building")
+    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
+        for f in clamav_dir.rglob("*"):
+            if f.is_file() and not any(part.startswith("tmp.") for part in f.relative_to(clamav_dir).parts):
+                zf.write(f, f.relative_to(clamav_dir))
+    tmp_path.rename(_CLAMAV_ZIP_CACHE)
+    return _CLAMAV_ZIP_CACHE
+
+
+# Grype refuses to run at all without a vulnerability DB present (not just
+# degraded -- an outright error), and won't find one at all unless pointed
+# at it via GRYPE_DB_CACHE_DIR (see _run_artifact_collection's sibling
+# _run_grype in orca_agent.py). ZIP_STORED since this is already a compact
+# binary DB (multiple GB) -- compressing it further would just burn time
+# for no real size benefit.
+_GRYPE_DB_ZIP_CACHE = Path(tempfile.gettempdir()) / "orca_grype_db_cache.zip"
+
+
+def _build_grype_db_zip() -> Path:
+    if _GRYPE_DB_ZIP_CACHE.exists():
+        return _GRYPE_DB_ZIP_CACHE
+    db_dir = Path(__file__).parent / "bin" / "syftgrype" / "grype-db"
+    if not db_dir.is_dir():
+        raise HTTPException(404, "syftgrype/grype-db/ not present on server")
+    tmp_path = _GRYPE_DB_ZIP_CACHE.with_suffix(".building")
+    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
+        for f in db_dir.rglob("*"):
+            if f.is_file():
+                zf.write(f, f.relative_to(db_dir))
+    tmp_path.rename(_GRYPE_DB_ZIP_CACHE)
+    return _GRYPE_DB_ZIP_CACHE
+
+
 @router.get("/download/bin/{filename}")
 async def download_binary(filename: str, current_user: dict = Depends(get_current_user)):
     if filename == "arsenal.zip":
@@ -516,6 +569,20 @@ async def download_binary(filename: str, current_user: dict = Depends(get_curren
             content=zip_path.read_bytes(),
             media_type="application/octet-stream",
             headers={"Content-Disposition": 'attachment; filename="arsenal.zip"'},
+        )
+    if filename == "clamav.zip":
+        zip_path = _build_clamav_zip()
+        return Response(
+            content=zip_path.read_bytes(),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": 'attachment; filename="clamav.zip"'},
+        )
+    if filename == "grype-db.zip":
+        zip_path = _build_grype_db_zip()
+        return Response(
+            content=zip_path.read_bytes(),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": 'attachment; filename="grype-db.zip"'},
         )
     if filename not in _AGENT_BIN_MAP:
         raise HTTPException(404, f"Binary not available for agent deployment: {filename}")

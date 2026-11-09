@@ -8,6 +8,17 @@ RUN apt-get update && apt-get install -y \
     libreoffice \
     && rm -rf /var/lib/apt/lists/*
 
+# Bake in current signatures at build time (this machine has internet;
+# the entrypoint's own freshclam call at container START does not, on an
+# air-gapped deployment, and that call is non-fatal/silently skipped --
+# without this, an offline deployment's in-container ClamAV would start
+# with whatever bare-minimum state apt-get install left it in, not
+# updated signatures, and /var/lib/clamav isn't a persistent volume
+# either, so this would otherwise never improve across container
+# recreations. Non-fatal here too (|| true) so a build without internet
+# access still succeeds, just without this freshness benefit.
+RUN mkdir -p /var/lib/clamav && freshclam --quiet || true
+
 WORKDIR /app
 
 COPY requirements.txt .

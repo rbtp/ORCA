@@ -61,6 +61,14 @@ class _Config:
         "ORCA_GRYPE_EXE",
         os.path.join(_BASE, "bin", "syftgrype", f"grype{_EXE}")
     )
+    # Grype's own default cache dir is some per-user home directory that's
+    # empty inside this container -- it refuses to run at all with no DB
+    # present, so this has to point at the bundled one explicitly rather
+    # than relying on Grype finding it on its own.
+    GRYPE_DB_DIR: str = os.environ.get(
+        "GRYPE_DB_CACHE_DIR",
+        os.path.join(_BASE, "bin", "syftgrype", "grype-db")
+    )
     # Arsenal Image Mounter (aim_cli) has no Linux build and is never executed
     # in this process -- disk mounting is dispatched to a Windows ORCA agent
     # instead (main.py's /api/assets/mount), so there's no local-path config here.
@@ -75,8 +83,8 @@ class _Config:
         os.path.join(_BASE, "bin", "remora", "volatility3")
     )
     # CLAM_BASE: the vendored Windows ClamAV bundle -- only ever served for
-    # download to remote targets via /api/agent/download/bin/clamscan.exe
-    # (agent_routes.py's _AGENT_BIN_MAP), never executed in this process.
+    # download to agents, as clamav.zip (agent_routes.py's
+    # _build_clamav_zip()), never executed in this process.
     CLAM_BASE: str = os.environ.get(
         "ORCA_CLAM_BASE",
         os.path.join(_BASE, "bin", "clamav")

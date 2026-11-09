@@ -1,11 +1,13 @@
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
 import tempfile
 import threading
 import time
+import zipfile
 
 import requests
 import urllib3
@@ -28,7 +30,7 @@ class OrcaAgent:
         caps = []
         bins = {
             "velociraptor": "velociraptor.exe",
-            "clamav": "clamscan.exe",
+            "clamav": os.path.join("clamav", "clamscan.exe"),
             "grype": "grype.exe",
             "syft": "syft.exe",
             "aim": os.path.join("arsenal", "aim_cli.exe"),
@@ -101,6 +103,8 @@ class OrcaAgent:
                 self._run_memory(job_id, params)
             elif jtype == "vql_test":
                 self._run_vql_test(job_id, params)
+            elif jtype == "artifact_collection":
+                self._run_artifact_collection(job_id, params)
             elif jtype == "folder_sync":
                 self._run_folder_sync(params)
                 return  # fire-and-forget — no DB tracking for sync jobs
@@ -167,10 +171,146 @@ class OrcaAgent:
         proc.wait()
         self._stream_line(job_id, "done", {"total_rows": len(rows)})
 
+    # Channel -> real evtx path. Ported from backend/run_technique.py's
+    # _LOCAL_CHANNEL_MAP: that map was written back when the backend ran
+    # directly on Windows, with real access to these paths -- containerizing
+    # the backend into Linux broke it there (C:/Windows/... doesn't exist in
+    # that container), but it's exactly correct here, since this runs on a
+    # genuine Windows machine. Kept in sync with run_technique.py manually
+    # (same reason orca_agent.py's other mirrored logic is -- these two
+    # files run in different processes/machines and can't share an import).
+    _LOCAL_CHANNEL_MAP = {
+        'security':                                    'C:/Windows/System32/winevt/Logs/Security.evtx',
+        'system':                                      'C:/Windows/System32/winevt/Logs/System.evtx',
+        'application':                                 'C:/Windows/System32/winevt/Logs/Application.evtx',
+        'microsoft-windows-sysmon/operational':        'C:/Windows/System32/winevt/Logs/Microsoft-Windows-Sysmon%4Operational.evtx',
+        'microsoft-windows-powershell/operational':    'C:/Windows/System32/winevt/Logs/Microsoft-Windows-PowerShell%4Operational.evtx',
+        'microsoft-windows-taskscheduler/operational': 'C:/Windows/System32/winevt/Logs/Microsoft-Windows-TaskScheduler%4Operational.evtx',
+        'microsoft-windows-winrm/operational':         'C:/Windows/System32/winevt/Logs/Microsoft-Windows-WinRM%4Operational.evtx',
+        'microsoft-windows-wmi-activity/operational':  'C:/Windows/System32/winevt/Logs/Microsoft-Windows-WMI-Activity%4Operational.evtx',
+    }
+    _EVENTID_FILTER = re.compile(
+        r'System\.EventID\.Value\s*(?:=|IN)\s*(?:\([\w,\s]+\)|\w+)',
+        re.IGNORECASE | re.DOTALL
+    )
+
+    @classmethod
+    def _convert_source_to_parse_evtx(cls, vql_text):
+        def replacer(m):
+            path = cls._LOCAL_CHANNEL_MAP.get(m.group(1).lower())
+            return f"parse_evtx(filename='{path}')" if path else m.group(0)
+        return re.sub(
+            r"source\s*\(\s*artifact\s*=\s*['\"]Windows\.EventLogs\.Evtx['\"]\s*,\s*channel\s*=\s*['\"]([^'\"]+)['\"]\s*\)",
+            replacer, vql_text, flags=re.IGNORECASE
+        )
+
+    @classmethod
+    def _build_fallback_vql(cls, custom_vql):
+        if not custom_vql:
+            return None
+        eid_match = cls._EVENTID_FILTER.search(custom_vql)
+        if not eid_match:
+            return None
+        channel_match = re.search(r"channel\s*=\s*['\"]([^'\"]+)['\"]", custom_vql, re.IGNORECASE)
+        channel = channel_match.group(1).lower() if channel_match else None
+        evtx_path = cls._LOCAL_CHANNEL_MAP.get(channel) if channel else None
+        if not evtx_path:
+            return None
+        return f"SELECT *\nFROM parse_evtx(filename='{evtx_path}')\nWHERE {eid_match.group(0).strip()}\nLIMIT 10000"
+
+    def _run_artifact_collection(self, job_id, params):
+        """Runs one MITRE-technique artifact collection locally against
+        `tsource` (any drive letter/path reachable on this machine) --
+        the agent-dispatched counterpart to run_technique.py's in-container
+        path, for scanning a drive that only this agent can see (a locally
+        attached physical disk, or anything mounted here via Arsenal).
+        Mirrors run_technique.py's VQL-building/fallback logic; results
+        stream back as rows for the backend to write to evidence/
+        artifact_results, since this process has no DB access of its own.
+        """
+        t_code        = params["t_code"]
+        tsource        = params.get("tsource") or "C:"
+        custom_vql     = params.get("custom_vql") or ""
+        surgical_yaml  = params.get("surgical_yaml") or ""
+        clean_tsource  = tsource.replace("\\", "/").rstrip("/")
+        vr_exe = os.path.join(self.bin_dir, "velociraptor.exe")
+        work_dir = tempfile.mkdtemp(prefix=f"orca_art_{t_code}_")
+
+        def run_vql(vql_text, label):
+            vql_file = os.path.join(work_dir, f"{label}.vql")
+            out_file = os.path.join(work_dir, f"{label}.jsonl")
+            with open(vql_file, "w", encoding="utf-8") as f:
+                f.write(vql_text)
+            proc = subprocess.run(
+                [vr_exe, "query", "-f", vql_file, "--format", "jsonl", "--output", out_file],
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                return [], proc.stderr.decode("utf-8", errors="replace")[:500]
+            rows = []
+            if os.path.exists(out_file) and os.path.getsize(out_file) > 0:
+                with open(out_file, "r", encoding="utf-8-sig", errors="ignore") as f:
+                    rows = [line.strip() for line in f if line.strip()]
+            return rows, None
+
+        try:
+            fallback_used = False
+            if surgical_yaml.strip():
+                converted = self._convert_source_to_parse_evtx(surgical_yaml.strip().replace("\r\n", "\n"))
+                yaml_file = os.path.join(work_dir, "artifact.yaml")
+                with open(yaml_file, "w", encoding="utf-8") as f:
+                    f.write(converted)
+                try:
+                    artifact_name = surgical_yaml.split("name:")[1].split("\n")[0].strip()
+                except Exception:
+                    raise RuntimeError("could not parse artifact name from surgical_yaml")
+                if not re.match(r'^[A-Za-z0-9._\-/ ]+$', artifact_name):
+                    raise RuntimeError("invalid artifact name")
+                out_file = os.path.join(work_dir, "artifact.jsonl")
+                proc = subprocess.run(
+                    [vr_exe, "--definitions", work_dir, "artifacts", "collect", artifact_name, "--format", "jsonl"],
+                    capture_output=True,
+                )
+                rows = []
+                if proc.returncode == 0:
+                    with open(out_file, "w", encoding="utf-8") as f:
+                        f.write(proc.stdout.decode("utf-8", errors="replace"))
+                    if os.path.getsize(out_file) > 0:
+                        with open(out_file, "r", encoding="utf-8-sig", errors="ignore") as f:
+                            rows = [line.strip() for line in f if line.strip()]
+                if not rows and custom_vql.strip():
+                    fb = self._build_fallback_vql(custom_vql)
+                    if fb:
+                        rows, _ = run_vql(fb, "fallback")
+                        fallback_used = bool(rows)
+            elif custom_vql.strip():
+                converted_vql = self._convert_source_to_parse_evtx(custom_vql.replace(":tsource", clean_tsource))
+                rows, _ = run_vql(converted_vql, "query")
+                if not rows:
+                    fb = self._build_fallback_vql(custom_vql)
+                    if fb:
+                        rows, _ = run_vql(fb, "fallback")
+                        fallback_used = bool(rows)
+            else:
+                glob_vql = f"SELECT *, '{t_code}' AS TCode FROM glob(globs='{clean_tsource}/**/{t_code}*')"
+                rows, _ = run_vql(glob_vql, "query")
+
+            for line in rows:
+                self._stream_line(job_id, "row", {"row": line, "t_code": t_code})
+            self._stream_line(job_id, "done", {"total_rows": len(rows), "fallback_used": fallback_used, "t_code": t_code})
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
     def _run_clamav(self, job_id, params):
-        exe = os.path.join(self.bin_dir, "clamscan.exe")
+        clamav_dir = os.path.join(self.bin_dir, "clamav")
+        exe = os.path.join(clamav_dir, "clamscan.exe")
+        if not os.path.exists(exe):
+            raise RuntimeError(f"clamscan.exe not found at {exe}")
         path = params["scan_path"]
-        cmd = [exe, "-r", "--infected", path]
+        # --database explicit, not left to clamscan's own default search --
+        # main.cvd/daily.cld live in this same bundled folder, not
+        # wherever clamscan would otherwise look by default.
+        cmd = [exe, "-r", "--infected", f"--database={clamav_dir}", path]
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
@@ -274,12 +414,29 @@ class OrcaAgent:
             raise RuntimeError(f"Syft failed: {sbom.stderr[:500]}")
 
         self._stream_line(job_id, "log", {"message": "Running Grype..."})
+        # Without these, grype tries to reach the internet to check for a
+        # newer DB on every single scan (this agent has none, by design),
+        # and -- confirmed live -- outright REFUSES to run at all once its
+        # bundled DB is older than the default 5-day max-allowed-built-age,
+        # erroring instead of just warning. Always disabled here, unlike
+        # the backend's equivalent (gated on an analyst-facing "offline"
+        # toggle there) -- this agent has no such toggle, and exists
+        # specifically for offline/standalone deployments.
+        grype_env = os.environ.copy()
+        grype_env["GRYPE_DB_AUTO_UPDATE"] = "false"
+        grype_env["GRYPE_DB_VALIDATE_AGE"] = "false"
+        # Grype's own default cache dir is some per-user profile path that
+        # doesn't exist on a freshly deployed agent -- point it at the
+        # bundled DB (downloaded as grype-db.zip in _bootstrap_binaries)
+        # explicitly, same reasoning as the backend's equivalent.
+        grype_env["GRYPE_DB_CACHE_DIR"] = os.path.join(self.bin_dir, "grype-db")
         proc = subprocess.Popen(
             [grype_exe, "-o", "json"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=grype_env,
         )
         out, _ = proc.communicate(sbom.stdout)
 
@@ -382,8 +539,29 @@ class OrcaAgent:
                 f.write(chunk)
         return True
 
+    def _download_and_extract_zip(self, zip_name, marker_file, extract_subdir, label):
+        """Shared helper for the three bundles that need their whole
+        directory, not a single file: Arsenal (DLLs), ClamAV (DLLs +
+        signature database), Grype's vulnerability DB. `marker_file` is
+        checked first so an already-extracted bundle is never re-downloaded."""
+        dest_marker = os.path.join(self.bin_dir, extract_subdir, marker_file)
+        if os.path.exists(dest_marker):
+            return
+        zip_path = os.path.join(self.bin_dir, zip_name)
+        print(f"[ORCA Agent] Downloading {zip_name}...", flush=True)
+        try:
+            if self._download_bin(zip_name, zip_path):
+                extract_dir = os.path.join(self.bin_dir, extract_subdir)
+                os.makedirs(extract_dir, exist_ok=True)
+                with zipfile.ZipFile(zip_path) as zf:
+                    zf.extractall(extract_dir)
+                os.remove(zip_path)
+                print(f"[ORCA Agent] {label} ready", flush=True)
+        except Exception as e:
+            print(f"[ORCA Agent] Warning: could not set up {label}: {e}", flush=True)
+
     def _bootstrap_binaries(self):
-        needed = ["velociraptor.exe", "clamscan.exe", "grype.exe", "syft.exe"]
+        needed = ["velociraptor.exe", "grype.exe", "syft.exe"]
         os.makedirs(self.bin_dir, exist_ok=True)
         for name in needed:
             dest = os.path.join(self.bin_dir, name)
@@ -396,29 +574,34 @@ class OrcaAgent:
             except Exception as e:
                 print(f"[ORCA Agent] Warning: could not download {name}: {e}", flush=True)
 
-        # Arsenal Image Mounter isn't a single file -- aim_cli.exe needs its
-        # whole directory of dependent DLLs, so it's served pre-zipped and
-        # extracted here instead of written straight to disk like the above.
-        aim_dest = os.path.join(self.bin_dir, "arsenal", "aim_cli.exe")
-        if not os.path.exists(aim_dest):
-            zip_path = os.path.join(self.bin_dir, "arsenal.zip")
-            print("[ORCA Agent] Downloading arsenal.zip...", flush=True)
-            try:
-                if self._download_bin("arsenal.zip", zip_path):
-                    import zipfile
-                    extract_dir = os.path.join(self.bin_dir, "arsenal")
-                    os.makedirs(extract_dir, exist_ok=True)
-                    with zipfile.ZipFile(zip_path) as zf:
-                        zf.extractall(extract_dir)
-                    os.remove(zip_path)
-                    print("[ORCA Agent] arsenal (Arsenal Image Mounter) ready", flush=True)
-            except Exception as e:
-                print(f"[ORCA Agent] Warning: could not set up arsenal: {e}", flush=True)
+        # Each of these needs its whole directory (DLLs, and for clamav/
+        # grype-db a multi-hundred-MB-to-multi-GB database), not a single
+        # file -- served pre-zipped and extracted here instead of written
+        # straight to disk like the simple binaries above.
+        self._download_and_extract_zip("arsenal.zip", "aim_cli.exe", "arsenal", "arsenal (Arsenal Image Mounter)")
+        self._download_and_extract_zip("clamav.zip", "clamscan.exe", "clamav", "clamav (ClamAV + signatures)")
+        self._download_and_extract_zip("grype-db.zip", "vulnerability.db", os.path.join("grype-db", "6"), "grype-db (vulnerability database)")
 
     def run(self):
         self._bootstrap_binaries()
         self.capabilities = self._detect_capabilities()
-        self.register()
+
+        # Retry indefinitely instead of a single unguarded call -- this
+        # runs from a Startup-folder shortcut at logon, possibly before
+        # Docker Desktop (and therefore the ORCA server) has actually come
+        # up. An exception here used to kill the whole process immediately
+        # with no retry -- so one mistimed logon left the agent down until
+        # someone noticed and restarted it by hand. poll_and_execute()'s
+        # loop and the heartbeat thread below already retry on failure;
+        # this just extends the same behavior to the one call that happens
+        # before either of those exists yet.
+        while True:
+            try:
+                self.register()
+                break
+            except Exception as e:
+                print(f"[ORCA Agent] Registration failed, retrying in {self.poll_interval}s: {e}")
+                time.sleep(self.poll_interval)
 
         def heartbeat():
             while True:

@@ -552,6 +552,21 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
   const [drive, setDrive]               = useState('C:');
   const [remapEnabled, setRemapEnabled] = useState(false);
   const [remapMounted, setRemapMounted] = useState('N');
+  // Agent-dispatched collection: reaches any drive letter the agent can
+  // see (a locally attached physical disk, or anything mounted via
+  // Arsenal) -- not gated on analysisMode like the other tabs, since this
+  // is an additional option alongside the existing in-container path
+  // above, not a mode-swapped replacement for it.
+  const [agents, setAgents]             = useState([]);
+  const [selectedAgent, setSelectedAgent] = useState(null);
+  const [isCollectingAgent, setIsCollectingAgent] = useState(false);
+
+  useEffect(() => {
+    fetch(`${import.meta.env.VITE_API_URL}/api/agent/list`, { headers: getAuth() })
+      .then(r => r.ok ? r.json() : [])
+      .then(data => setAgents((data || []).filter(a => a.status === 'ONLINE')))
+      .catch(() => setAgents([]));
+  }, []);
   // Remote execution state
   const [notes, setNotes]               = useState([]);
   const [noteIn, setNoteIn]             = useState('');
@@ -758,6 +773,34 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
     } finally { setIsCollecting(false); }
   };
 
+  // Same action, dispatched to selectedAgent instead of running
+  // in-container -- reaches any drive letter that agent can see (a
+  // locally attached physical disk, or anything mounted via Arsenal),
+  // not just what's bind-mounted into the backend container.
+  const runCollectionViaAgent = async () => {
+    if (!selectedAgent) return;
+    setIsCollectingAgent(true);
+    if (onCollectionStarted) onCollectionStarted('COLLECTION_RUNNING (agent) — Velociraptor executing...');
+    try {
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/execute`, {
+        method: 'POST', headers: getAuth(),
+        body: JSON.stringify({ action: 'Surgical Collection', asset_id: assetId, tsource: drive, agent_id: selectedAgent }),
+      });
+      const d = await r.json();
+      if (r.ok && d.status === 'initiated') {
+        if (onCollectionStarted) onCollectionStarted(`COLLECTING (agent) — ${d.target_count || '?'} techniques queued`);
+        refreshTactics();
+        startPoll();
+      } else {
+        if (onCollectionStarted) onCollectionStarted(null);
+        alert('EXECUTION_ERROR: ' + (d.detail || 'Failed to initiate.'));
+      }
+    } catch {
+      if (onCollectionStarted) onCollectionStarted(null);
+      alert('CRITICAL: Cannot reach backend.');
+    } finally { setIsCollectingAgent(false); }
+  };
+
   const commitNote = async () => {
     if (!noteIn.trim() || !sel) return;
     if (collab && assetId) await collab.claimTechnique(assetId, sel);
@@ -870,6 +913,32 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
       {/* ── Sidebar ── */}
       <aside style={{ borderRight: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
+        {/* Collection controls — run in-container (existing) or dispatch
+            to an agent to reach any drive letter that agent can see */}
+        <div style={{ padding: '8px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <span style={{ ...Lbl, minWidth: 40 }}>DRIVE:</span>
+            <input value={drive} onChange={e => setDrive(e.target.value)} placeholder="C: or E:\"
+              style={{ ...Inp, flex: 1, fontSize: 10 }} />
+          </div>
+          <button onClick={runCollection} disabled={isCollecting || isCollectingAgent}
+            style={{ ...Btn, width: '100%', opacity: isCollecting ? 0.6 : 1 }}>
+            {isCollecting ? '⟳ RUNNING...' : '▶ RUN (IN-CONTAINER)'}
+          </button>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <select value={selectedAgent || ''} onChange={e => setSelectedAgent(e.target.value)}
+              style={{ ...Inp, flex: 1, fontSize: 10 }}>
+              <option value="">SELECT AGENT...</option>
+              {agents.map(a => (
+                <option key={a.agent_id} value={a.agent_id}>{a.hostname} ({a.analyst})</option>
+              ))}
+            </select>
+          </div>
+          <button onClick={runCollectionViaAgent} disabled={!selectedAgent || isCollecting || isCollectingAgent}
+            style={{ ...Btn, width: '100%', background: C.amber || '#ffaa00', opacity: (!selectedAgent || isCollectingAgent) ? 0.5 : 1 }}>
+            {isCollectingAgent ? '⟳ RUNNING ON AGENT...' : '▶ RUN ON AGENT'}
+          </button>
+        </div>
 
         <div style={{ padding: '4px 12px', fontSize: 9, color: C.greyDim, borderBottom: `1px solid #0a0a0a`, letterSpacing: 1 }}>TECHNIQUE_INDEX</div>
 

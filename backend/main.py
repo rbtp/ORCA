@@ -138,6 +138,10 @@ class AssetActionRequest(BaseModel):
     action: str
     asset_id: Optional[Union[str, int]] = None
     tsource: Optional[str] = "C:/"
+    # When set, collection runs on this agent (any drive letter it can see --
+    # a locally attached physical disk, or anything it mounted via Arsenal)
+    # instead of in-container. See run_vr_via_agent().
+    agent_id: Optional[str] = None
 
 class RemoteExecuteRequest(BaseModel):
     asset_id:        Union[str, int]
@@ -562,6 +566,90 @@ def run_vr_orchestrator(target_list, tsource, output_root, asset_id):
             del active[pid]
 
 
+async def run_vr_via_agent(target_list, tsource, agent_id, asset_id):
+    """Agent-dispatched counterpart to run_vr_orchestrator() above -- runs
+    each technique's collection on `agent_id` (reaching any drive letter
+    that agent can see: a locally attached physical disk, or anything it
+    mounted via Arsenal) instead of in-container, via the existing agent
+    job queue (dispatch_and_wait, same mechanism /api/assets/mount uses).
+    Writes to the same evidence/artifact_results tables run_technique.py's
+    normalize()/write_no_artifacts() write to -- that happens here, in the
+    backend process, since the agent itself has no DB access of its own;
+    the agent only streams back raw rows (see orca_agent.py's
+    _run_artifact_collection).
+    """
+    for item in target_list:
+        t_code = item["t_code"]
+        try:
+            lines = await dispatch_and_wait(agent_id, "artifact_collection", {
+                "t_code":        t_code,
+                "tsource":       tsource,
+                "custom_vql":    item.get("custom_vql") or "",
+                "surgical_yaml": item.get("surgical_yaml") or "",
+            }, timeout=300.0)
+        except Exception as e:
+            print(f"[VR_AGENT] {t_code}: dispatch failed -- {e}")
+            continue
+
+        raw_rows, fallback_used = [], False
+        for raw_line in lines:
+            try:
+                evt = json.loads(raw_line)
+            except Exception:
+                continue
+            if evt.get("type") == "row":
+                raw_rows.append(evt["data"]["row"])
+            elif evt.get("type") == "done":
+                fallback_used = evt["data"].get("fallback_used", False)
+            elif evt.get("type") == "error":
+                print(f"[VR_AGENT] {t_code}: agent error -- {evt['data'].get('message')}")
+
+        clean_rows = []
+        for raw in raw_rows:
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                continue
+            if "_Source" in obj and len(obj) == 1:
+                continue
+            clean = {k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in obj.items()}
+            if fallback_used:
+                clean["_orca_fallback"] = True
+                clean["_orca_fallback_note"] = "Primary query returned 0 hits — broad EventID collection for analyst review"
+            clean_rows.append(clean)
+
+        with db.engine.connect() as conn:
+            if clean_rows:
+                msg = (
+                    f"Broad Collection (Fallback): {len(clean_rows)} entries — primary query returned 0 hits. Review for relevance."
+                    if fallback_used else
+                    f"Forensic Hit: {len(clean_rows)} system entries found via {t_code}"
+                )
+                conn.execute(text("""
+                    INSERT INTO artifact_results (asset_id, t_code, verdict, evidence_summary, evidence_imported)
+                    VALUES (:aid, :t, 'Evidence Found', :s, TRUE)
+                    ON CONFLICT (asset_id, t_code)
+                    DO UPDATE SET verdict = 'Evidence Found', evidence_summary = EXCLUDED.evidence_summary, evidence_imported = TRUE
+                """), {"aid": asset_id, "t": t_code, "s": json.dumps({"message": msg})})
+                for row in clean_rows:
+                    display_name = row.get("Name") or row.get("EventID") or row.get("ID") or t_code
+                    display_path = row.get("Key") or row.get("OSPath") or row.get("FullPath") or "System"
+                    conn.execute(text("""
+                        INSERT INTO evidence (asset_id, t_code, file_name, file_path, raw_data)
+                        VALUES (:aid, :t, :fname, :fpath, :raw)
+                    """), {"aid": asset_id, "t": t_code, "fname": display_name, "fpath": display_path, "raw": json.dumps(row)})
+                print(f"[VR_AGENT] {t_code}: ingested {len(clean_rows)} rows{' [FALLBACK]' if fallback_used else ''}")
+            else:
+                conn.execute(text("""
+                    INSERT INTO artifact_results (asset_id, t_code, verdict, evidence_summary, evidence_imported)
+                    VALUES (:aid, :t, 'NO_ARTIFACTS', :s, FALSE)
+                    ON CONFLICT (asset_id, t_code)
+                    DO UPDATE SET verdict = 'NO_ARTIFACTS', evidence_summary = EXCLUDED.evidence_summary
+                """), {"aid": asset_id, "t": t_code, "s": json.dumps({"message": "Collection executed — no artifacts found on this host for this technique. Manual evidence upload recommended."})})
+                print(f"[VR_AGENT] {t_code}: NO_ARTIFACTS")
+            conn.commit()
+
+
 @app.post("/api/assets/execute")
 async def execute_asset_action(
     request: AssetActionRequest,
@@ -617,8 +705,16 @@ async def execute_asset_action(
         output_root = os.path.join(DATA_ROOT, case_row.case_name.replace(" ", "_"), run_id)
         os.makedirs(output_root, exist_ok=True)
 
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, run_vr_orchestrator, target_list, request.tsource, output_root, asset_id)
+        if request.agent_id:
+            # Runs on the agent instead of in-container -- reaches any
+            # drive letter that agent can see (a locally attached physical
+            # disk, or anything mounted via Arsenal), not just what's
+            # bind-mounted into this container. In addition to the
+            # existing in-container path above, not a replacement for it.
+            asyncio.create_task(run_vr_via_agent(target_list, request.tsource, request.agent_id, asset_id))
+        else:
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, run_vr_orchestrator, target_list, request.tsource, output_root, asset_id)
 
         return {"status": "initiated", "target_count": len(target_list), "run_id": run_id}
 
@@ -692,13 +788,29 @@ async def vuln_scan(
                 "--file", vuln_path,
                 "-v",
             ]
+            grype_env = os.environ.copy()
+            # Grype's own default cache dir is empty inside this container
+            # (some per-user home directory) -- without this it finds no
+            # DB at all and refuses to run, regardless of the offline flag.
+            grype_env["GRYPE_DB_CACHE_DIR"] = cfg.GRYPE_DB_DIR
             if offline:
                 grype_cmd.append("--only-fixed")
+                # Without these, grype still tries to reach the internet to
+                # check for a newer DB on every run (slow/hangs offline),
+                # and -- confirmed live -- outright REFUSES to run at all
+                # once the bundled DB is older than its default 5-day
+                # max-allowed-built-age, erroring instead of just warning.
+                # An offline kit's DB is only ever going to get older from
+                # the moment it's built, so this isn't optional for an
+                # offline deployment to keep working past its first few days.
+                grype_env["GRYPE_DB_AUTO_UPDATE"] = "false"
+                grype_env["GRYPE_DB_VALIDATE_AGE"] = "false"
 
             grype_proc = await asyncio.create_subprocess_exec(
                 *grype_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=grype_env,
             )
 
             async for raw in grype_proc.stderr:
@@ -889,11 +1001,16 @@ async def mount_image(
         }.get(ext, "None")
 
     try:
+        # dispatch_and_wait()'s default (120s) is tuned for quick jobs --
+        # mounting a large disk image (DiscUtils parsing/onlining a
+        # multi-GB VHDX, say) can legitimately take longer than that, and
+        # the job itself was still running fine server-side; only the
+        # caller's wait gave up early.
         lines = await dispatch_and_wait(request.agent_id, "mount", {
             "image_path": request.image_path,
             "provider": provider,
             "readonly": request.readonly,
-        })
+        }, timeout=900.0)
         result = _extract_job_result(lines)
 
         parsed = {
