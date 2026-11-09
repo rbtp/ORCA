@@ -175,7 +175,7 @@ async def login(request: Request, response: Response, login_data: LoginRequest):
     """Verifies user credentials and sets an HttpOnly session cookie."""
     try:
         with db.engine.connect() as conn:
-            query = text("SELECT id, username, password_hash, initials, role FROM users WHERE username = :u")
+            query = text("SELECT id, username, password_hash, initials, role, is_active FROM users WHERE username = :u")
             user_record = conn.execute(query, {"u": login_data.username}).fetchone()
 
         if not user_record:
@@ -187,16 +187,26 @@ async def login(request: Request, response: Response, login_data: LoginRequest):
             verify_password(login_data.password, _DUMMY_PASSWORD_HASH)
             raise HTTPException(status_code=401, detail="INVALID_CREDENTIALS")
 
-        db_id, db_username, db_password_hash, db_initials, db_role = user_record
+        db_id, db_username, db_password_hash, db_initials, db_role, db_is_active = user_record
 
         if not verify_password(login_data.password, db_password_hash):
             raise HTTPException(status_code=401, detail="INVALID_CREDENTIALS")
+
+        if not db_is_active:
+            # Deliberately after the password check, not before -- an
+            # attacker probing for deactivated-but-guessable accounts
+            # shouldn't be able to distinguish "wrong password" from
+            # "account disabled" without already knowing the password.
+            raise HTTPException(status_code=403, detail="ACCOUNT_DEACTIVATED")
 
         from datetime import timedelta as _td
         import time as _time
         token_data = {"sub": db_username, "id": db_id, "role": db_role, "initials": db_initials}
         token = create_access_token(data=token_data)
         expires_at = int(_time.time()) + (60 * 60)  # 60-minute expiry in unix seconds
+
+        with db.engine.begin() as conn:
+            conn.execute(text("UPDATE users SET last_login = NOW() WHERE id = :id"), {"id": db_id})
 
         response.set_cookie(
             key="orca_token",
@@ -220,17 +230,87 @@ async def login(request: Request, response: Response, login_data: LoginRequest):
 
 @app.get("/api/auth/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
-    """Returns the current user's profile from the validated session cookie."""
-    import time as _time
+    """Returns the current user's profile from the validated session cookie,
+    enriched with the fields that only live in the DB (the JWT itself is
+    deliberately kept small -- email/last_login aren't worth re-issuing
+    every token for)."""
+    email, last_login = None, None
+    with db.engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT email, last_login FROM users WHERE id = :id"
+        ), {"id": current_user["id"]}).fetchone()
+        if row:
+            email, last_login = row
     return {
         "user": {
-            "username": current_user["sub"],
-            "role":     current_user["role"],
-            "initials": current_user["initials"],
-            "id":       current_user["id"],
+            "username":   current_user["sub"],
+            "role":       current_user["role"],
+            "initials":   current_user["initials"],
+            "id":         current_user["id"],
+            "email":      email,
+            "last_login": last_login.isoformat() if last_login else None,
         },
         "expires_at": current_user.get("exp"),
     }
+
+
+class UpdateMeRequest(BaseModel):
+    initials: Optional[str] = None
+    email: Optional[str] = None
+
+
+@app.patch("/api/auth/me")
+async def update_me(body: UpdateMeRequest, current_user: dict = Depends(get_current_user)):
+    """Self-service profile edit -- initials and email only. Role and
+    username are admin-only (routes/admin.py), never self-service: a user
+    escalating their own role, or an analyst becoming unrecognizable to
+    the rest of the team by renaming themselves, are both things only an
+    admin should be able to do."""
+    fields, params = [], {"id": current_user["id"]}
+    if body.initials is not None:
+        initials = body.initials.strip().upper()
+        if not initials or len(initials) > 5:
+            raise HTTPException(status_code=400, detail="INITIALS_MUST_BE_1_TO_5_CHARS")
+        fields.append("initials = :initials")
+        params["initials"] = initials
+    if body.email is not None:
+        fields.append("email = :email")
+        params["email"] = body.email.strip() or None
+    if not fields:
+        raise HTTPException(status_code=400, detail="NO_FIELDS_TO_UPDATE")
+
+    with db.engine.begin() as conn:
+        conn.execute(text(f"UPDATE users SET {', '.join(fields)} WHERE id = :id"), params)  # nosec B608 — fields built from a fixed allowlist above, values parameterized
+    return {"status": "OK"}
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/api/auth/change-password")
+@limiter.limit("5/minute")
+async def change_password(request: Request, body: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
+    """Self-service password change -- requires the current password,
+    unlike an admin-initiated or token-based reset, since the caller is
+    already proving who they are via an active session, not recovering
+    access to one."""
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="PASSWORD_TOO_SHORT")
+
+    with db.engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT password_hash FROM users WHERE id = :id"
+        ), {"id": current_user["id"]}).fetchone()
+    if not row or not verify_password(body.current_password, row[0]):
+        raise HTTPException(status_code=401, detail="CURRENT_PASSWORD_INCORRECT")
+
+    with db.engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE users SET password_hash = :p WHERE id = :id"
+        ), {"p": hash_password(body.new_password), "id": current_user["id"]})
+    return {"status": "OK"}
 
 
 @app.post("/api/auth/logout")
@@ -238,6 +318,171 @@ async def logout(response: Response):
     """Clears the session cookie."""
     response.delete_cookie(key="orca_token", httponly=True, secure=True, samesite="strict", path="/")
     return {"ok": True}
+
+
+# --- ENROLLMENT & PASSWORD RESET (public — no session required, gated by
+# single-use, expiring tokens instead) -----------------------------------
+
+def _get_orca_base_url(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-Proto")
+    host = request.headers.get("X-Forwarded-Host") or request.headers.get("host")
+    if forwarded and host:
+        return f"{forwarded}://{host}".rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+@app.get("/api/auth/enroll/{token}")
+@limiter.limit("20/minute")
+async def get_enrollment(request: Request, token: str):
+    """Validates an enrollment token and returns the account details an
+    admin already chose (username/initials/role) for display on the
+    enrollment form -- the invitee only ever supplies a password."""
+    with db.engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT username, initials, role, email FROM enrollment_tokens
+            WHERE token = :t AND used_at IS NULL AND expires_at > NOW()
+        """), {"t": token}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="INVALID_OR_EXPIRED_INVITE")
+    return dict(row)
+
+
+class CompleteEnrollmentRequest(BaseModel):
+    password: str
+
+
+@app.post("/api/auth/enroll/{token}")
+@limiter.limit("10/minute")
+async def complete_enrollment(request: Request, token: str, body: CompleteEnrollmentRequest):
+    """Completes enrollment: the invitee sets their own password (an admin
+    never learns it, unlike the old create-user flow), the real `users`
+    row is created from the details stored on the token at invite time,
+    and the token is consumed."""
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="PASSWORD_TOO_SHORT")
+
+    with db.engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT username, initials, role, email FROM enrollment_tokens
+            WHERE token = :t AND used_at IS NULL AND expires_at > NOW()
+            FOR UPDATE
+        """), {"t": token}).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="INVALID_OR_EXPIRED_INVITE")
+
+        exists = conn.execute(text(
+            "SELECT 1 FROM users WHERE username = :u"
+        ), {"u": row["username"]}).first()
+        if exists:
+            raise HTTPException(status_code=409, detail="USERNAME_ALREADY_ENROLLED")
+
+        conn.execute(text("""
+            INSERT INTO users (username, password_hash, initials, role, email, is_active)
+            VALUES (:u, :p, :i, :r, :e, TRUE)
+        """), {
+            "u": row["username"], "p": hash_password(body.password),
+            "i": row["initials"], "r": row["role"], "e": row["email"],
+        })
+        conn.execute(text(
+            "UPDATE enrollment_tokens SET used_at = NOW() WHERE token = :t"
+        ), {"t": token})
+
+    return {"status": "ENROLLED", "username": row["username"]}
+
+
+class ForgotPasswordRequest(BaseModel):
+    username_or_email: str
+
+
+@app.post("/api/auth/forgot-password")
+@limiter.limit("5/minute")
+async def forgot_password(request: Request, body: ForgotPasswordRequest):
+    """Self-service reset request. Only actually works when SMTP is
+    configured -- with no way to deliver the link, self-service is a dead
+    end and the honest answer is "ask your admin," not a generated link
+    with nowhere to go. Always returns the same generic message regardless
+    of whether the account exists, so this can't be used to enumerate
+    valid usernames/emails."""
+    import email_utils
+
+    GENERIC_MSG = "If that account exists, a password reset link has been sent."
+
+    if not email_utils.SMTP_CONFIGURED:
+        return {
+            "status": "OK",
+            "message": "Self-service password reset isn't available on this instance. Contact your administrator.",
+        }
+
+    with db.engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT id, email FROM users
+            WHERE (username = :q OR email = :q) AND is_active = TRUE
+        """), {"q": body.username_or_email.strip()}).mappings().first()
+
+        if row and row["email"]:
+            from datetime import timedelta as _td
+            token_row = conn.execute(text("""
+                INSERT INTO password_reset_tokens (user_id, expires_at)
+                VALUES (:uid, NOW() + INTERVAL '1 hour')
+                RETURNING token
+            """), {"uid": row["id"]}).fetchone()
+            base_url = _get_orca_base_url(request)
+            link = f"{base_url}/reset-password/{token_row[0]}"
+            email_utils.send_email(
+                row["email"], "ORCA password reset",
+                f"A password reset was requested for your ORCA account.\n\n"
+                f"Reset your password: {link}\n\n"
+                f"This link expires in 1 hour. If you didn't request this, ignore this email.",
+            )
+        # else: silently do nothing -- same generic response either way
+
+    return {"status": "OK", "message": GENERIC_MSG}
+
+
+@app.get("/api/auth/reset-password/{token}")
+@limiter.limit("20/minute")
+async def get_reset_token(request: Request, token: str):
+    """Validates a reset token (admin-initiated or self-service — same
+    table, same shape) before the frontend shows the "set new password"
+    form."""
+    with db.engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT u.username FROM password_reset_tokens t
+            JOIN users u ON u.id = t.user_id
+            WHERE t.token = :t AND t.used_at IS NULL AND t.expires_at > NOW()
+        """), {"t": token}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="INVALID_OR_EXPIRED_TOKEN")
+    return dict(row)
+
+
+class CompleteResetRequest(BaseModel):
+    password: str
+
+
+@app.post("/api/auth/reset-password/{token}")
+@limiter.limit("10/minute")
+async def complete_reset(request: Request, token: str, body: CompleteResetRequest):
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="PASSWORD_TOO_SHORT")
+
+    with db.engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT user_id FROM password_reset_tokens
+            WHERE token = :t AND used_at IS NULL AND expires_at > NOW()
+            FOR UPDATE
+        """), {"t": token}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="INVALID_OR_EXPIRED_TOKEN")
+
+        conn.execute(text(
+            "UPDATE users SET password_hash = :p WHERE id = :id"
+        ), {"p": hash_password(body.password), "id": row[0]})
+        conn.execute(text(
+            "UPDATE password_reset_tokens SET used_at = NOW() WHERE token = :t"
+        ), {"t": token})
+
+    return {"status": "OK"}
 
 # --- VELOCIRAPTOR ORCHESTRATION ---
 def run_vr_orchestrator(target_list, tsource, output_root, asset_id):

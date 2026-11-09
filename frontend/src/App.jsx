@@ -11,6 +11,7 @@ import UserManagement from "./components/management/UserManagement";
 import AuditTrail from "./components/management/AuditTrail";
 import NetworkSettings from "./components/Options/NetworkSettings";
 import GeneralSettings from "./components/Options/GeneralSettings";
+import MyAccount from "./components/Options/MyAccount";
 import VelociraptorModal from "./components/VelociraptorModal";
 import AgentDeployModal from "./components/AgentDeployModal";
 
@@ -350,6 +351,9 @@ export default function App() {
             {['General', 'Network'].map(item => (
               <div key={item} onClick={() => setActiveOptionNav(item)} style={{ padding: '12px 30px', cursor: 'pointer', fontSize: '11px', color: activeOptionNav === item ? '#eee' : '#333', background: activeOptionNav === item ? 'rgba(0, 255, 65, 0.03)' : 'transparent', borderLeft: activeOptionNav === item ? '2px solid #00ff41' : '2px solid transparent' }}>{item.toUpperCase()}</div>
             ))}
+            <div onClick={() => setActiveOptionNav('My Account')} style={{ padding: '12px 30px', cursor: 'pointer', fontSize: '11px', color: activeOptionNav === 'My Account' ? '#eee' : '#333', background: activeOptionNav === 'My Account' ? 'rgba(0, 255, 65, 0.03)' : 'transparent', borderLeft: activeOptionNav === 'My Account' ? '2px solid #00ff41' : '2px solid transparent' }}>
+              MY_ACCOUNT
+            </div>
             {user?.role === 'admin' && (
               <div onClick={() => setActiveOptionNav('User Management')} style={{ padding: '12px 30px', cursor: 'pointer', fontSize: '11px', color: activeOptionNav === 'User Management' ? '#00ff41' : '#ffb400', background: activeOptionNav === 'User Management' ? 'rgba(0, 255, 65, 0.03)' : 'transparent', borderLeft: activeOptionNav === 'User Management' ? '2px solid #00ff41' : '2px solid transparent' }}>
                 USER_REGISTRY
@@ -387,6 +391,7 @@ export default function App() {
               activeOptionNav === 'Audit Trail' ? <AuditTrail /> :
               activeOptionNav === 'Network' ? <NetworkSettings /> :
               activeOptionNav === 'General' ? <GeneralSettings /> :
+              activeOptionNav === 'My Account' ? <MyAccount /> :
               renderStaging(activeOptionNav.toUpperCase())
               ) :
               activeNav !== 'Tools' ? renderStaging(activeNav.toUpperCase()) :
