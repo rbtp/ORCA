@@ -2,6 +2,11 @@ name: orcaweb
 
 services:
   orca-backend:
+    # Fixed image name: the offline kit loads prebuilt images under this name,
+    # and compose must use them as-is whatever the project is called (without
+    # this, compose derives the name from the project and builds instead,
+    # which needs internet). `docker compose build` still tags this name.
+    image: orcaweb-orca-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -60,6 +65,11 @@ services:
         condition: service_healthy
 
   orca-frontend:
+    # Fixed image name: the offline kit loads prebuilt images under this name,
+    # and compose must use them as-is whatever the project is called (without
+    # this, compose derives the name from the project and builds instead,
+    # which needs internet). `docker compose build` still tags this name.
+    image: orcaweb-orca-frontend:latest
     build:
       context: ./frontend
       dockerfile: Dockerfile
