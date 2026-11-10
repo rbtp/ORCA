@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 import logging
 import subprocess
 import asyncio
@@ -22,7 +23,7 @@ from pydantic import BaseModel
 from typing import Optional, Any, Union
 
 # --- AUTH IMPORTS ---
-from auth_utils import verify_password, create_access_token, get_current_user, hash_password
+from auth_utils import verify_password, create_access_token, get_current_user, hash_password, user_can_access_case
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -506,6 +507,74 @@ async def complete_reset(request: Request, token: str, body: CompleteResetReques
     return {"status": "OK"}
 
 # --- VELOCIRAPTOR ORCHESTRATION ---
+
+# Live progress of the artifact collection running for each asset, keyed by
+# asset id: what the ARTIFACT ANALYSIS tab polls (GET
+# /api/assets/{id}/collection-status) to show a progress bar and which
+# technique is running right now. In memory only: the backend is a single
+# process, and finished results live in artifact_results anyway.
+import threading as _threading
+import time as _time
+COLLECTION_PROGRESS: dict = {}
+_BACKGROUND_TASKS: set = set()  # strong refs so asyncio doesn't GC running tasks
+_COLLECTION_LOCK = _threading.Lock()
+
+
+def _progress_start(asset_id, mode, t_codes, agent_label=None):
+    with _COLLECTION_LOCK:
+        COLLECTION_PROGRESS[asset_id] = {
+            "state": "RUNNING", "mode": mode, "agent": agent_label,
+            "total": len(t_codes), "done": 0, "hits": 0, "empty": 0, "failed": 0, "na": 0,
+            "queued": list(t_codes), "running": {}, "failures": [],
+            "started_at": _time.time(), "finished_at": None,
+        }
+
+
+def _progress_begin(asset_id, t_code):
+    with _COLLECTION_LOCK:
+        p = COLLECTION_PROGRESS.get(asset_id)
+        if p:
+            if t_code in p["queued"]:
+                p["queued"].remove(t_code)
+            p["running"][t_code] = _time.time()
+
+
+def _progress_end(asset_id, t_code, outcome=None, detail=None):
+    """outcome: 'hit' | 'empty' | 'failed' | 'na' (not applicable to a disk
+    image) | None (unknown: in-container)."""
+    with _COLLECTION_LOCK:
+        p = COLLECTION_PROGRESS.get(asset_id)
+        if not p:
+            return
+        p["running"].pop(t_code, None)
+        p["done"] += 1
+        if outcome == "hit":
+            p["hits"] += 1
+        elif outcome == "empty":
+            p["empty"] += 1
+        elif outcome == "na":
+            p["na"] += 1
+        elif outcome == "failed":
+            p["failed"] += 1
+            p["failures"].append({"t_code": t_code, "detail": (detail or "")[:300]})
+
+
+def _progress_finish(asset_id, state="DONE", detail=None):
+    with _COLLECTION_LOCK:
+        p = COLLECTION_PROGRESS.get(asset_id)
+        if p:
+            p["state"] = state
+            p["finished_at"] = _time.time()
+            p["running"] = {}
+            if detail:
+                p["failures"].append({"t_code": "-", "detail": detail[:300]})
+
+
+def _collection_running(asset_id) -> bool:
+    with _COLLECTION_LOCK:
+        p = COLLECTION_PROGRESS.get(asset_id)
+        return bool(p and p["state"] == "RUNNING")
+
 def run_vr_orchestrator(target_list, tsource, output_root, asset_id):
     import logging
     import json
@@ -564,9 +633,12 @@ def run_vr_orchestrator(target_list, tsource, output_root, asset_id):
                 drain_thread = threading.Thread(target=drain_stdout, args=(proc, out_lines), daemon=True)
                 drain_thread.start()
                 active[proc.pid] = (proc, t_code, out_lines, drain_thread)
+                _progress_begin(asset_id, t_code)
                 logging.info(f"[VR] {t_code}: worker spawned (pid {proc.pid})")
             except Exception as e:
                 logging.error(f"[VR] {t_code}: spawn failed — {e}")
+                _progress_begin(asset_id, t_code)
+                _progress_end(asset_id, t_code, "failed", f"worker spawn failed: {e}")
 
         time.sleep(0.5)
         done_pids = []
@@ -579,8 +651,96 @@ def run_vr_orchestrator(target_list, tsource, output_root, asset_id):
                     if line_str.strip():
                         logging.info(line_str)
                 done_pids.append(pid)
+                _progress_end(asset_id, t_code)
         for pid in done_pids:
             del active[pid]
+
+
+# Techniques dispatched to one agent at a time. The agent runs every job it
+# receives in its own thread, so more than one keeps the disk busy without
+# starting a dozen velociraptor processes on the analyst's machine at once.
+AGENT_COLLECTION_PARALLEL = int(os.environ.get("ORCA_AGENT_COLLECTION_PARALLEL", "3"))
+# Per technique. A full-drive glob or an event-log parse over a mounted image
+# can legitimately take many minutes; the old 300s marked slow ones as failed
+# while they were still running.
+AGENT_COLLECTION_TIMEOUT = float(os.environ.get("ORCA_AGENT_COLLECTION_TIMEOUT", "1200"))
+
+
+def _ingest_agent_technique(asset_id, t_code, lines):
+    """Writes one technique's agent output to artifact_results/evidence.
+    Returns (outcome, detail) for the progress tracker."""
+    raw_rows, fallback_used, agent_errors, notices = [], False, [], []
+    for raw_line in lines:
+        try:
+            evt = json.loads(raw_line)
+        except Exception:
+            continue
+        if evt.get("type") == "row":
+            raw_rows.append(evt["data"]["row"])
+        elif evt.get("type") == "done":
+            fallback_used = evt["data"].get("fallback_used", False)
+        elif evt.get("type") == "error":
+            agent_errors.append(str(evt["data"].get("message")))
+            print(f"[VR_AGENT] {t_code}: agent error -- {evt['data'].get('message')}")
+        elif evt.get("type") == "notice":
+            notices.append(str(evt["data"].get("message")))
+
+    clean_rows = []
+    for raw in raw_rows:
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            continue
+        if "_Source" in obj and len(obj) == 1:
+            continue
+        clean = {k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in obj.items()}
+        if fallback_used:
+            clean["_orca_fallback"] = True
+            clean["_orca_fallback_note"] = "Primary query returned 0 hits — broad EventID collection for analyst review"
+        clean_rows.append(clean)
+
+    with db.engine.begin() as conn:
+        if clean_rows:
+            msg = (
+                f"Broad Collection (Fallback): {len(clean_rows)} entries — primary query returned 0 hits. Review for relevance."
+                if fallback_used else
+                f"Forensic Hit: {len(clean_rows)} system entries found via {t_code}"
+            )
+            conn.execute(text("""
+                INSERT INTO artifact_results (asset_id, t_code, verdict, evidence_summary, evidence_imported)
+                VALUES (:aid, :t, 'Evidence Found', :s, TRUE)
+                ON CONFLICT (asset_id, t_code)
+                DO UPDATE SET verdict = 'Evidence Found', evidence_summary = EXCLUDED.evidence_summary, evidence_imported = TRUE
+            """), {"aid": asset_id, "t": t_code, "s": json.dumps({"message": msg})})
+            conn.execute(text("""
+                INSERT INTO evidence (asset_id, t_code, file_name, file_path, raw_data)
+                VALUES (:aid, :t, :fname, :fpath, :raw)
+            """), [{
+                "aid": asset_id, "t": t_code,
+                "fname": row.get("Name") or row.get("EventID") or row.get("ID") or t_code,
+                "fpath": row.get("Key") or row.get("OSPath") or row.get("FullPath") or "System",
+                "raw": json.dumps(row),
+            } for row in clean_rows])
+            print(f"[VR_AGENT] {t_code}: ingested {len(clean_rows)} rows{' [FALLBACK]' if fallback_used else ''}")
+            return "hit", None
+        conn.execute(text("""
+            INSERT INTO artifact_results (asset_id, t_code, verdict, evidence_summary, evidence_imported)
+            VALUES (:aid, :t, 'NO_ARTIFACTS', :s, FALSE)
+            ON CONFLICT (asset_id, t_code)
+            DO UPDATE SET verdict = 'NO_ARTIFACTS', evidence_summary = EXCLUDED.evidence_summary
+        """), {"aid": asset_id, "t": t_code, "s": json.dumps({"message": (
+            "Collection failed on agent: " + " | ".join(agent_errors)[:800]
+            if agent_errors else
+            " | ".join(notices)[:800]
+            if notices else
+            "Collection executed — no artifacts found on this host for this technique. Manual evidence upload recommended."
+        )})})
+        print(f"[VR_AGENT] {t_code}: NO_ARTIFACTS")
+        if agent_errors:
+            return "failed", " | ".join(agent_errors)
+        if notices:
+            return "na", " | ".join(notices)
+        return "empty", None
 
 
 async def run_vr_via_agent(target_list, tsource, agent_id, asset_id):
@@ -593,85 +753,55 @@ async def run_vr_via_agent(target_list, tsource, agent_id, asset_id):
     normalize()/write_no_artifacts() write to -- that happens here, in the
     backend process, since the agent itself has no DB access of its own;
     the agent only streams back raw rows (see orca_agent.py's
-    _run_artifact_collection).
+    _run_artifact_collection). Progress goes to COLLECTION_PROGRESS.
     """
-    for item in target_list:
+    from agent_routes import _job_streams
+    sem = asyncio.Semaphore(max(1, AGENT_COLLECTION_PARALLEL))
+
+    async def one(item):
         t_code = item["t_code"]
-        try:
-            lines = await dispatch_and_wait(agent_id, "artifact_collection", {
-                "t_code":        t_code,
-                "tsource":       tsource,
-                "custom_vql":    item.get("custom_vql") or "",
-                "surgical_yaml": item.get("surgical_yaml") or "",
-            }, timeout=300.0)
-        except Exception as e:
-            # Still record a result: skipping left the technique "pending"
-            # in the UI forever with no indication anything went wrong.
-            print(f"[VR_AGENT] {t_code}: dispatch failed -- {e}")
-            lines = [json.dumps({"type": "error", "data": {"message": f"dispatch to agent failed: {e}"}})]
-
-        raw_rows, fallback_used, agent_errors = [], False, []
-        for raw_line in lines:
+        async with sem:
+            _progress_begin(asset_id, t_code)
+            job_ref = {}
             try:
-                evt = json.loads(raw_line)
-            except Exception:
-                continue
-            if evt.get("type") == "row":
-                raw_rows.append(evt["data"]["row"])
-            elif evt.get("type") == "done":
-                fallback_used = evt["data"].get("fallback_used", False)
-            elif evt.get("type") == "error":
-                agent_errors.append(str(evt["data"].get("message")))
-                print(f"[VR_AGENT] {t_code}: agent error -- {evt['data'].get('message')}")
-
-        clean_rows = []
-        for raw in raw_rows:
+                lines = await dispatch_and_wait(agent_id, "artifact_collection", {
+                    "t_code":        t_code,
+                    "tsource":       tsource,
+                    "custom_vql":    item.get("custom_vql") or "",
+                    "surgical_yaml": item.get("surgical_yaml") or "",
+                }, timeout=AGENT_COLLECTION_TIMEOUT, job_ref=job_ref)
+            except Exception as e:
+                # Still record a result: skipping left the technique "pending"
+                # in the UI forever with no indication anything went wrong.
+                print(f"[VR_AGENT] {t_code}: dispatch failed -- {e}")
+                lines = [json.dumps({"type": "error", "data": {"message": f"dispatch to agent failed: {e}"}})]
+            finally:
+                # Rows can be large and nothing replays an artifact_collection
+                # job's stream afterwards, so don't keep it in memory.
+                if job_ref.get("job_id"):
+                    _job_streams.pop(job_ref["job_id"], None)
             try:
-                obj = json.loads(raw)
-            except Exception:
-                continue
-            if "_Source" in obj and len(obj) == 1:
-                continue
-            clean = {k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in obj.items()}
-            if fallback_used:
-                clean["_orca_fallback"] = True
-                clean["_orca_fallback_note"] = "Primary query returned 0 hits — broad EventID collection for analyst review"
-            clean_rows.append(clean)
+                outcome, detail = await asyncio.to_thread(_ingest_agent_technique, asset_id, t_code, lines)
+            except Exception as e:
+                print(f"[VR_AGENT] {t_code}: ingest failed -- {e}")
+                outcome, detail = "failed", f"saving results failed: {e}"
+            _progress_end(asset_id, t_code, outcome, detail)
 
-        with db.engine.connect() as conn:
-            if clean_rows:
-                msg = (
-                    f"Broad Collection (Fallback): {len(clean_rows)} entries — primary query returned 0 hits. Review for relevance."
-                    if fallback_used else
-                    f"Forensic Hit: {len(clean_rows)} system entries found via {t_code}"
-                )
-                conn.execute(text("""
-                    INSERT INTO artifact_results (asset_id, t_code, verdict, evidence_summary, evidence_imported)
-                    VALUES (:aid, :t, 'Evidence Found', :s, TRUE)
-                    ON CONFLICT (asset_id, t_code)
-                    DO UPDATE SET verdict = 'Evidence Found', evidence_summary = EXCLUDED.evidence_summary, evidence_imported = TRUE
-                """), {"aid": asset_id, "t": t_code, "s": json.dumps({"message": msg})})
-                for row in clean_rows:
-                    display_name = row.get("Name") or row.get("EventID") or row.get("ID") or t_code
-                    display_path = row.get("Key") or row.get("OSPath") or row.get("FullPath") or "System"
-                    conn.execute(text("""
-                        INSERT INTO evidence (asset_id, t_code, file_name, file_path, raw_data)
-                        VALUES (:aid, :t, :fname, :fpath, :raw)
-                    """), {"aid": asset_id, "t": t_code, "fname": display_name, "fpath": display_path, "raw": json.dumps(row)})
-                print(f"[VR_AGENT] {t_code}: ingested {len(clean_rows)} rows{' [FALLBACK]' if fallback_used else ''}")
-            else:
-                conn.execute(text("""
-                    INSERT INTO artifact_results (asset_id, t_code, verdict, evidence_summary, evidence_imported)
-                    VALUES (:aid, :t, 'NO_ARTIFACTS', :s, FALSE)
-                    ON CONFLICT (asset_id, t_code)
-                    DO UPDATE SET verdict = 'NO_ARTIFACTS', evidence_summary = EXCLUDED.evidence_summary
-                """), {"aid": asset_id, "t": t_code, "s": json.dumps({"message": (
-                    "Collection failed on agent: " + " | ".join(agent_errors)[:800]
-                    if agent_errors else
-                    "Collection executed — no artifacts found on this host for this technique. Manual evidence upload recommended."
-                )})})
-                print(f"[VR_AGENT] {t_code}: NO_ARTIFACTS")
-            conn.commit()
+    try:
+        await asyncio.gather(*(one(item) for item in target_list))
+        _progress_finish(asset_id, "DONE")
+    except Exception as e:
+        print(f"[VR_AGENT] collection aborted -- {e}")
+        _progress_finish(asset_id, "FAILED", str(e))
+
+
+def _run_vr_orchestrator_tracked(target_list, tsource, output_root, asset_id):
+    try:
+        run_vr_orchestrator(target_list, tsource, output_root, asset_id)
+        _progress_finish(asset_id, "DONE")
+    except Exception as e:
+        logging.error(f"[VR] collection aborted -- {e}")
+        _progress_finish(asset_id, "FAILED", str(e))
 
 
 @app.post("/api/assets/execute")
@@ -729,22 +859,70 @@ async def execute_asset_action(
         output_root = os.path.join(DATA_ROOT, case_row.case_name.replace(" ", "_"), run_id)
         os.makedirs(output_root, exist_ok=True)
 
+        if _collection_running(asset_id):
+            raise HTTPException(status_code=409, detail="A collection is already running for this asset")
+
+        if not request.agent_id:
+            # The server is a Linux container: "C:" or a mounted image's
+            # "E:" don't exist in here, and every technique used to come
+            # back as a misleading "no artifacts".
+            src = (request.tsource or "").strip()
+            if not src or re.match(r"^[A-Za-z]:", src) or not os.path.exists(src):
+                raise HTTPException(status_code=400, detail=(
+                    f"RUN ON SERVER can't see '{src}': the ORCA server runs in a Linux container and "
+                    "has no access to Windows drives or mounted images. Use RUN ON ANALYST WORKSTATION (AGENT) "
+                    "with the drive letter instead."))
+
         if request.agent_id:
             # Runs on the agent instead of in-container -- reaches any
             # drive letter that agent can see (a locally attached physical
             # disk, or anything mounted via Arsenal), not just what's
             # bind-mounted into this container. In addition to the
             # existing in-container path above, not a replacement for it.
-            asyncio.create_task(run_vr_via_agent(target_list, request.tsource, request.agent_id, asset_id))
+            with db.engine.connect() as conn:
+                ag = conn.execute(text(
+                    "SELECT hostname FROM agent_registrations WHERE agent_id = :id"
+                ), {"id": request.agent_id}).fetchone()
+            _progress_start(asset_id, "agent", [t["t_code"] for t in target_list],
+                            ag[0] if ag else request.agent_id)
+            task = asyncio.create_task(run_vr_via_agent(target_list, request.tsource, request.agent_id, asset_id))
+            _BACKGROUND_TASKS.add(task)
+            task.add_done_callback(_BACKGROUND_TASKS.discard)
         else:
+            _progress_start(asset_id, "container", [t["t_code"] for t in target_list])
             loop = asyncio.get_event_loop()
-            loop.run_in_executor(None, run_vr_orchestrator, target_list, request.tsource, output_root, asset_id)
+            loop.run_in_executor(None, _run_vr_orchestrator_tracked, target_list, request.tsource, output_root, asset_id)
 
         return {"status": "initiated", "target_count": len(target_list), "run_id": run_id}
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[ERROR] execute_asset_action asset_id={request.asset_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/assets/{asset_id}/collection-status")
+async def collection_status(asset_id: int, current_user: dict = Depends(get_current_user)):
+    """Progress of the artifact collection started for this asset (RUN
+    or RUN ON AGENT). state is IDLE when none has run since the backend
+    started."""
+    with db.engine.connect() as conn:
+        row = conn.execute(text("SELECT case_name FROM assets WHERE id = :id"), {"id": asset_id}).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if not user_can_access_case(current_user, row[0]):
+        raise HTTPException(status_code=403, detail="Not assigned to this investigation")
+    now = _time.time()
+    with _COLLECTION_LOCK:
+        p = COLLECTION_PROGRESS.get(asset_id)
+        if not p:
+            return {"state": "IDLE"}
+        out = {k: v for k, v in p.items() if k not in ("running", "queued")}
+        out["running"] = [{"t_code": t, "seconds": int(now - st)} for t, st in sorted(p["running"].items(), key=lambda x: x[1])]
+        out["queued"] = len(p["queued"])
+        out["elapsed"] = int((p["finished_at"] or now) - p["started_at"])
+    return out
 
 
 @app.post("/api/assets/vuln-scan")
@@ -969,7 +1147,10 @@ def _extract_job_result(lines: list) -> dict:
         except Exception:
             continue
         if evt.get("type") == "error":
-            raise HTTPException(status_code=500, detail=str(evt.get("data")))
+            # The agent ran the job and reported why it failed (image not
+            # found, aim_cli error...): a request error, not a server crash.
+            msg = (evt.get("data") or {}).get("message") if isinstance(evt.get("data"), dict) else evt.get("data")
+            raise HTTPException(status_code=422, detail=str(msg))
         if evt.get("type") == "done":
             return evt.get("data") or {}
     raise HTTPException(status_code=500, detail="Agent job completed with no result")
@@ -1034,6 +1215,7 @@ async def mount_image(
             "image_path": request.image_path,
             "provider": provider,
             "readonly": request.readonly,
+            "drive_letter": request.drive_letter,
         }, timeout=900.0)
         result = _extract_job_result(lines)
 
@@ -1043,7 +1225,11 @@ async def mount_image(
             "drive_letter":   result.get("drive_letter"),
         }
         output = result.get("output", "")
-        drive_letter = parsed["drive_letter"] or request.drive_letter
+        # Only the letter Windows actually assigned on the agent. Falling back
+        # to the analyst's typed letter recorded a drive that didn't exist.
+        drive_letter = parsed["drive_letter"]
+        if not parsed["device_number"]:
+            raise HTTPException(status_code=500, detail="AIM_MOUNT_FAILED: agent reported no device")
 
         with db.engine.connect() as conn:
             row = conn.execute(text("""
@@ -1074,6 +1260,11 @@ async def mount_image(
             "drive_letter":   drive_letter,
             "physical_drive": parsed["physical_drive"],
             "provider":       provider,
+            "volumes":        result.get("volumes") or [],
+            "root_listing":   result.get("root_listing") or [],
+            "warning":        None if drive_letter else
+                              "The image is attached on the agent but Windows assigned it no drive letter "
+                              "(no readable file system: encrypted, damaged or unsupported).",
             "output":         output,
         }
 

@@ -129,6 +129,40 @@ class OrcaAgent:
         except Exception as e:
             print(f"[ORCA Agent] Stream error: {e}")
 
+    @staticmethod
+    def _require_path(path):
+        """Fail loudly when a scan target doesn't exist on this machine (e.g.
+        a mounted image's drive letter that Windows never assigned) -- the
+        tools otherwise report a clean "0 files scanned"/"no artifacts"."""
+        p = (path or "").strip()
+        if re.match(r"^[A-Za-z]:$", p):
+            p += "\\"
+        if not os.path.exists(p):
+            raise RuntimeError(f"PATH_NOT_FOUND: {path} does not exist on this machine "
+                               f"(if it is a mounted image, check it is mounted and has that drive letter)")
+        return p
+
+    def _stream_batch(self, job_id, lines):
+        """Sends many already-encoded NDJSON lines in one request, retrying
+        so a transient network error doesn't silently drop evidence rows."""
+        body = "".join(line + "\n" for line in lines)
+        for attempt in range(3):
+            try:
+                r = requests.post(
+                    f"{self.server}/api/agent/{self.agent_id}/jobs/{job_id}/stream",
+                    data=body.encode("utf-8"),
+                    headers={**self.headers, "Content-Type": "application/x-ndjson"},
+                    verify=False,
+                    timeout=120,
+                )
+                if r.status_code < 400:
+                    return
+                print(f"[ORCA Agent] Stream batch HTTP {r.status_code}")
+            except Exception as e:
+                print(f"[ORCA Agent] Stream batch error: {e}")
+            time.sleep(2 * (attempt + 1))
+        raise RuntimeError(f"could not upload {len(lines)} result rows to the server")
+
     def _complete(self, job_id, status, summary):
         try:
             requests.post(
@@ -195,14 +229,49 @@ class OrcaAgent:
     )
 
     @classmethod
+    def _evtx_path(cls, name):
+        """Channel name ("Security", "Microsoft-Windows-Sysmon/Operational"),
+        file name ("Security.evtx") or full path -> full .evtx path."""
+        name = (name or "").strip()
+        if not name:
+            return None
+        if re.match(r"^[A-Za-z]:[\\/]", name):
+            return name.replace("\\", "/")
+        known = cls._LOCAL_CHANNEL_MAP.get(name.lower())
+        if known:
+            return known
+        fname = name if name.lower().endswith(".evtx") else name.replace("/", "%4") + ".evtx"
+        return "C:/Windows/System32/winevt/Logs/" + fname
+
+    @classmethod
     def _convert_source_to_parse_evtx(cls, vql_text):
-        def replacer(m):
-            path = cls._LOCAL_CHANNEL_MAP.get(m.group(1).lower())
+        """Makes library queries runnable in a standalone (client-side)
+        collection. Many were written for a Velociraptor server, where
+        source(artifact=...) reads results an earlier collection stored;
+        standalone there are no stored results, so those calls failed or
+        silently returned nothing. Also fixes the common bare `EventID`
+        (parse_evtx rows have System.EventID.Value), which failed every run
+        with "Symbol EventID not found"."""
+        evtx = r"source\s*\(\s*artifact\s*=\s*['\"]Windows\.EventLogs\.Evtx['\"]\s*,\s*(?:channel|source|file)\s*=\s*['\"]([^'\"]+)['\"]\s*\)"
+
+        def evtx_repl(m):
+            path = cls._evtx_path(m.group(1))
             return f"parse_evtx(filename='{path}')" if path else m.group(0)
-        return re.sub(
-            r"source\s*\(\s*artifact\s*=\s*['\"]Windows\.EventLogs\.Evtx['\"]\s*,\s*channel\s*=\s*['\"]([^'\"]+)['\"]\s*\)",
-            replacer, vql_text, flags=re.IGNORECASE
-        )
+        vql_text = re.sub(evtx, evtx_repl, vql_text, flags=re.IGNORECASE)
+        # source(artifact='Windows.X.Y'[, extra args]) -> Artifact.Windows.X.Y([extra args])
+        vql_text = re.sub(
+            r"source\s*\(\s*artifact\s*=\s*['\"]((?:Windows|Generic)\.[A-Za-z0-9_.]+)['\"]\s*(,\s*)?",
+            lambda m: f"Artifact.{m.group(1)}(", vql_text)
+        # FROM Windows.Registry.NTUser  (bare artifact name as a plugin)
+        vql_text = re.sub(r"(\bFROM\s+)((?:Windows|Generic)\.[A-Za-z0-9_.]+)(?!\s*\()",
+                          lambda m: f"{m.group(1)}Artifact.{m.group(2)}()", vql_text)
+        vql_text = re.sub(r"(?<![.\w])EventID(?=\s*(?:=|!=|<|>|\bIN\b|\bin\b))", "System.EventID.Value", vql_text)
+        # watch_evtx() is an event monitor: it waits forever for NEW events
+        # and never returns, so a collection using it hung until the server
+        # gave up (and left velociraptor.exe running here). Collection wants
+        # what's already in the log.
+        vql_text = re.sub(r"\bwatch_evtx\s*\(", "parse_evtx(", vql_text)
+        return vql_text
 
     @classmethod
     def _build_fallback_vql(cls, custom_vql):
@@ -211,12 +280,118 @@ class OrcaAgent:
         eid_match = cls._EVENTID_FILTER.search(custom_vql)
         if not eid_match:
             return None
-        channel_match = re.search(r"channel\s*=\s*['\"]([^'\"]+)['\"]", custom_vql, re.IGNORECASE)
-        channel = channel_match.group(1).lower() if channel_match else None
-        evtx_path = cls._LOCAL_CHANNEL_MAP.get(channel) if channel else None
+        evtx_path = None
+        m = re.search(r"parse_evtx\s*\(\s*filename\s*=\s*['\"]([^'\"]+)['\"]", custom_vql, re.IGNORECASE)
+        if m:
+            evtx_path = m.group(1)
+        else:
+            channel_match = re.search(r"channel\s*=\s*['\"]([^'\"]+)['\"]", custom_vql, re.IGNORECASE)
+            evtx_path = cls._evtx_path(channel_match.group(1)) if channel_match else None
         if not evtx_path:
             return None
         return f"SELECT *\nFROM parse_evtx(filename='{evtx_path}')\nWHERE {eid_match.group(0).strip()}\nLIMIT 10000"
+
+    # ── Dead-disk (mounted image) collection ─────────────────────────────────
+    # The technique library is written for a live Windows host: C:/Windows/...
+    # paths, the live registry (HKEY_LOCAL_MACHINE, HKEY_USERS, CurrentControlSet),
+    # %APPDATA%. Pointed at a mounted image on E:, those queries used to read
+    # THIS machine's C: drive and registry. Velociraptor's own dead-disk
+    # remapping fixes that without rewriting the library: with
+    # `--config <deaddisk.yaml>`, C: is the image's drive, the registry
+    # accessors read the image's hive files (SYSTEM/SOFTWARE/SAM/SECURITY,
+    # every user's NTUSER.DAT), and live-only plugins (pslist, netstat, wmi...)
+    # are disabled so they can't report this machine instead.
+
+    # Per velociraptor run; the server gives each technique 20 minutes.
+    VR_QUERY_TIMEOUT = 15 * 60
+
+    _LIVE_ONLY_PLUGINS = ("pslist", "netstat", "wmi", "handles", "modules", "vad", "interfaces",
+                          "users", "certificates", "proc_dump", "proc_yara", "winobj", "partitions",
+                          "execve", "amsi", "lookupSID", "token")
+    _remap_lock = threading.Lock()
+    _remap_cache = {}
+
+    @staticmethod
+    def _drive_of(path):
+        m = re.match(r"^\s*([A-Za-z]):", path or "")
+        return m.group(1).upper() if m else None
+
+    def _is_dead_disk(self, tsource):
+        drive = self._drive_of(tsource)
+        system = self._drive_of(os.environ.get("SystemDrive", "C:")) or "C"
+        return bool(drive) and drive != system
+
+    def _deaddisk_config(self, drive, vr_exe):
+        """Returns (remap_yaml_path, control_set) for a mounted drive, cached
+        per drive and keyed on the image's SYSTEM hive + user profiles so a
+        different image mounted at the same letter gets a fresh config."""
+        root = f"{drive}:\\"
+        sys_hive = os.path.join(root, "Windows", "System32", "config", "SYSTEM")
+        try:
+            st = os.stat(sys_hive)
+            key_bits = f"{st.st_size}-{st.st_mtime}"
+        except OSError:
+            key_bits = "nohive"
+        try:
+            users = ",".join(sorted(os.listdir(os.path.join(root, "Users"))))
+        except OSError:
+            users = ""
+        cache_key = (drive, key_bits, users)
+        with self._remap_lock:
+            hit = self._remap_cache.get(drive)
+            if hit and hit[0] == cache_key and os.path.exists(hit[1]):
+                return hit[1], hit[2]
+            remap_dir = os.path.join(self.bin_dir, "deaddisk")
+            os.makedirs(remap_dir, exist_ok=True)
+            remap = os.path.join(remap_dir, f"{drive}.yaml")
+            proc = subprocess.run(
+                [vr_exe, "deaddisk", f"--add_windows_directory={root}", "--hostname=MOUNTED-IMAGE", remap],
+                capture_output=True, creationflags=0x08000000 if os.name == "nt" else 0,
+            )
+            if proc.returncode != 0 or not os.path.exists(remap):
+                raise RuntimeError("could not build dead-disk config for "
+                                   f"{root}: {proc.stderr.decode('utf-8', errors='replace')[-400:]}")
+            control_set = "ControlSet001"
+            q = subprocess.run(
+                [vr_exe, "--config", remap, "query",
+                 "SELECT Current FROM read_reg_key(globs='HKEY_LOCAL_MACHINE/System/Select')", "--format", "jsonl"],
+                capture_output=True, creationflags=0x08000000 if os.name == "nt" else 0,
+            )
+            for line in q.stdout.decode("utf-8", errors="replace").splitlines():
+                try:
+                    cur = int(json.loads(line).get("Current"))
+                    control_set = f"ControlSet{cur:03d}"
+                    break
+                except Exception:
+                    continue
+            self._remap_cache[drive] = (cache_key, remap, control_set)
+            return remap, control_set
+
+    @staticmethod
+    def _rewrite_for_image(text, control_set):
+        """Things the remap can't cover: CurrentControlSet only exists on a
+        running system (a hive has ControlSet00N + Select\\Current), there is
+        no "current user" on an image, and %APPDATA%-style variables expand
+        to the analyst's own profile."""
+        text = re.sub(r"CurrentControlSet", control_set, text, flags=re.IGNORECASE)
+        text = re.sub(r"HKEY_CURRENT_USER(?=([\\/]+))", lambda m: "HKEY_USERS" + m.group(1) + "*", text, flags=re.IGNORECASE)
+        text = re.sub(r"HKCU(?=([\\/]+))", lambda m: "HKEY_USERS" + m.group(1) + "*", text)
+        for var, repl in (("%APPDATA%", "C:/Users/*/AppData/Roaming"),
+                          ("%LOCALAPPDATA%", "C:/Users/*/AppData/Local"),
+                          ("%USERPROFILE%", "C:/Users/*"),
+                          ("%TEMP%", "C:/Users/*/AppData/Local/Temp"),
+                          ("%TMP%", "C:/Users/*/AppData/Local/Temp"),
+                          ("%SYSTEMROOT%", "C:/Windows"),
+                          ("%WINDIR%", "C:/Windows"),
+                          ("%PROGRAMDATA%", "C:/ProgramData"),
+                          ("%PROGRAMFILES%", "C:/Program Files"),
+                          ("%SYSTEMDRIVE%", "C:")):
+            text = re.sub(re.escape(var), repl, text, flags=re.IGNORECASE)
+        return text
+
+    @classmethod
+    def _live_only_plugins_used(cls, text):
+        return sorted({p for p in cls._LIVE_ONLY_PLUGINS if re.search(r"\b" + re.escape(p) + r"\s*\(", text or "")})
 
     def _run_artifact_collection(self, job_id, params):
         """Runs one MITRE-technique artifact collection locally against
@@ -233,18 +408,40 @@ class OrcaAgent:
         custom_vql     = params.get("custom_vql") or ""
         surgical_yaml  = params.get("surgical_yaml") or ""
         clean_tsource  = tsource.replace("\\", "/").rstrip("/")
+        self._require_path(clean_tsource + "/")
         vr_exe = os.path.join(self.bin_dir, "velociraptor.exe")
+
+        # A drive other than this machine's own system drive is a mounted
+        # image: collect through Velociraptor's dead-disk remapping (see
+        # _deaddisk_config) so C:, HKLM and HKEY_USERS mean the image.
+        dead_disk = self._is_dead_disk(tsource)
+        vr_base = [vr_exe]
+        if dead_disk:
+            remap, control_set = self._deaddisk_config(self._drive_of(tsource), vr_exe)
+            vr_base = [vr_exe, "--config", remap]
+            custom_vql = self._rewrite_for_image(custom_vql, control_set)
+            surgical_yaml = self._rewrite_for_image(surgical_yaml, control_set)
+            clean_tsource = "C:"  # the remap presents the image as C:
+        live_only = self._live_only_plugins_used(custom_vql + "\n" + surgical_yaml) if dead_disk else []
         work_dir = tempfile.mkdtemp(prefix=f"orca_art_{t_code}_")
+
+        def vr_run(args):
+            """velociraptor with a hard time limit (below the server's own
+            per-technique limit), so a query that never ends can't leave a
+            velociraptor.exe running on this machine indefinitely."""
+            try:
+                return subprocess.run(vr_base + args, capture_output=True, timeout=self.VR_QUERY_TIMEOUT,
+                                      creationflags=0x08000000 if os.name == "nt" else 0)
+            except subprocess.TimeoutExpired:
+                return subprocess.CompletedProcess(args, 1, b"", (
+                    f"stopped after {self.VR_QUERY_TIMEOUT // 60} minutes without finishing").encode())
 
         def run_vql(vql_text, label):
             vql_file = os.path.join(work_dir, f"{label}.vql")
             out_file = os.path.join(work_dir, f"{label}.jsonl")
             with open(vql_file, "w", encoding="utf-8") as f:
                 f.write(vql_text)
-            proc = subprocess.run(
-                [vr_exe, "query", "-f", vql_file, "--format", "jsonl", "--output", out_file],
-                capture_output=True,
-            )
+            proc = vr_run(["query", "-f", vql_file, "--format", "jsonl", "--output", out_file])
             if proc.returncode != 0:
                 return [], proc.stderr.decode("utf-8", errors="replace")[:500]
             rows = []
@@ -268,19 +465,40 @@ class OrcaAgent:
                 if not re.match(r'^[A-Za-z0-9._\-/ ]+$', artifact_name):
                     raise RuntimeError("invalid artifact name")
                 out_file = os.path.join(work_dir, "artifact.jsonl")
-                proc = subprocess.run(
-                    [vr_exe, "--definitions", work_dir, "artifacts", "collect", artifact_name, "--format", "jsonl"],
-                    capture_output=True,
-                )
+                proc = vr_run(["--definitions", work_dir, "artifacts", "collect", artifact_name, "--format", "jsonl"])
                 rows = []
                 if proc.returncode != 0:
                     errors.append("artifact collect failed: " + proc.stderr.decode("utf-8", errors="replace")[-500:])
                 if proc.returncode == 0:
-                    with open(out_file, "w", encoding="utf-8") as f:
-                        f.write(proc.stdout.decode("utf-8", errors="replace"))
-                    if os.path.getsize(out_file) > 0:
-                        with open(out_file, "r", encoding="utf-8-sig", errors="ignore") as f:
-                            rows = [line.strip() for line in f if line.strip()]
+                    # `artifacts collect` prints its own log lines ("[ERROR] ...
+                    # While compiling artifact ...") on stdout and still exits 0.
+                    # Those used to be counted as evidence rows (a false "hit")
+                    # and the real failure was never reported.
+                    for line in proc.stdout.decode("utf-8", errors="replace").lstrip("﻿").splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith("{"):
+                            try:
+                                if isinstance(json.loads(line), dict):
+                                    rows.append(line)
+                                    continue
+                            except ValueError:
+                                pass
+                        if line.startswith("[ERROR]"):
+                            errors.append("artifact collect failed: " + line[:500])
+                if errors and not rows and custom_vql.strip():
+                    # The artifact definition is broken (syntax error, undefined
+                    # symbol...): the technique's plain VQL query usually isn't,
+                    # so run that rather than giving up on the technique.
+                    vql_rows, err = run_vql(
+                        self._convert_source_to_parse_evtx(custom_vql.replace(":tsource", clean_tsource)), "query")
+                    if vql_rows:
+                        rows, errors = vql_rows, []
+                    elif not err:
+                        errors = []  # the query ran fine and found nothing
+                    else:
+                        errors.append("query failed: " + err)
                 if not rows and custom_vql.strip():
                     fb = self._build_fallback_vql(custom_vql)
                     if fb:
@@ -302,13 +520,28 @@ class OrcaAgent:
                 rows, err = run_vql(glob_vql, "query")
                 if err: errors.append("query failed: " + err)
 
-            if not rows and errors:
+            if not rows and live_only:
+                # Disabled on purpose in dead-disk mode: there is no running
+                # system in an image. Not a failure, not "nothing found".
+                self._stream_line(job_id, "notice", {"message":
+                    f"Not applicable to a disk image: this technique reads live-system state "
+                    f"({', '.join(live_only)}), which only exists on a running host."})
+            elif not rows and errors:
                 # Collection failed rather than finding nothing: say so, so the
                 # backend doesn't record a silent "no artifacts".
                 self._stream_line(job_id, "error", {"message": f"{t_code}: " + " | ".join(errors)[:1000]})
 
+            # Rows go up in batches: one HTTP request per row made a 10,000-row
+            # event-log hit take minutes to upload, long enough to hit the
+            # server's per-technique timeout.
+            batch = []
             for line in rows:
-                self._stream_line(job_id, "row", {"row": line, "t_code": t_code})
+                batch.append(json.dumps({"type": "row", "data": {"row": line, "t_code": t_code}}))
+                if len(batch) >= 500:
+                    self._stream_batch(job_id, batch)
+                    batch = []
+            if batch:
+                self._stream_batch(job_id, batch)
             self._stream_line(job_id, "done", {"total_rows": len(rows), "fallback_used": fallback_used, "t_code": t_code})
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -318,7 +551,7 @@ class OrcaAgent:
         exe = os.path.join(clamav_dir, "clamscan.exe")
         if not os.path.exists(exe):
             raise RuntimeError(f"clamscan.exe not found at {exe}")
-        path = params["scan_path"]
+        path = self._require_path(params["scan_path"])
         # --database explicit, not left to clamscan's own default search --
         # main.cvd/daily.cld live in this same bundled folder, not
         # wherever clamscan would otherwise look by default.
@@ -349,78 +582,214 @@ class OrcaAgent:
             {"scanned_files": scanned, "infected_files": infected, "threats": threats},
         )
 
-    @staticmethod
-    def _parse_aim_output(output):
-        """Parse aim_cli stdout into structured dict. Mirrors main.py's
-        _parse_aim_output -- kept in sync manually since this runs on the
-        remote/local Windows side, not in the backend container."""
-        result = {"device_number": None, "physical_drive": None, "drive_letter": None}
-        for line in output.splitlines():
-            line = line.strip()
-            if line.startswith("Device number"):
-                result["device_number"] = line.split()[-1]
-            elif line.startswith("Device is"):
-                result["physical_drive"] = line.split()[-1]
-            elif "Drive letter" in line or (len(line) == 2 and line[1] == ":"):
-                result["drive_letter"] = line.replace("Drive letter:", "").replace(":", "").strip()
-        return result
+    # ── Disk image mounting (Arsenal Image Mounter CLI) ──────────────────────
+    # aim_cli without --background keeps the virtual disk only while that
+    # process keeps running ("Press Ctrl+C to dismount"), so waiting for it
+    # either hung the job or the disk vanished with the process. Without
+    # --online the partitions stay offline with no drive letter. Both meant
+    # the image never showed up in Windows, so anything pointed at its
+    # "drive letter" (ClamAV, Syft, artifact collection) found nothing.
 
-    def _run_mount(self, job_id, params):
+    def _aim_exe(self):
         exe = os.path.join(self.bin_dir, "arsenal", "aim_cli.exe")
         if not os.path.exists(exe):
             raise RuntimeError(f"aim_cli.exe not found at {exe}")
+        return exe
 
-        cmd = [exe, "--mount"]
-        if params.get("readonly", True):
-            cmd.append("--readonly")
-        cmd += [f"--filename={params['image_path']}", f"--provider={params.get('provider', 'auto')}"]
+    def _aim_run(self, args, timeout=900):
+        """Runs aim_cli with output to a file, not a pipe: with --background
+        the detached child inherits the handles, so reading a pipe to EOF
+        would wait until the image is dismounted."""
+        exe = self._aim_exe()
+        fd, out_path = tempfile.mkstemp(prefix="orca_aim_", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w") as out:
+                proc = subprocess.Popen(
+                    [exe] + args, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                    cwd=os.path.dirname(exe), creationflags=0x08000000 if os.name == "nt" else 0,
+                )
+                try:
+                    rc = proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    rc = -1
+            time.sleep(0.5)
+            with open(out_path, "r", encoding="utf-8", errors="replace") as f:
+                return rc, f.read()
+        finally:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass  # still held by a detached aim_cli; it's a few bytes in %TEMP%
 
+    def _aim_devices(self):
+        """{device_number: {"physical_drive": ..., "disk_number": int|None}} from aim_cli --list."""
+        _, out = self._aim_run(["--list"], timeout=60)
+        devices, cur = {}, None
+        for line in out.splitlines():
+            line = line.strip()
+            m = re.match(r"Device number\s+(\d+)", line)
+            if m:
+                cur = m.group(1)
+                devices[cur] = {"physical_drive": None, "disk_number": None}
+                continue
+            m = re.match(r"Device is\s+(\S+)", line)
+            if m and cur:
+                devices[cur]["physical_drive"] = m.group(1)
+                n = re.search(r"PhysicalDrive(\d+)", m.group(1), re.IGNORECASE)
+                if n:
+                    devices[cur]["disk_number"] = int(n.group(1))
+        return devices
+
+    @staticmethod
+    def _powershell(script, timeout=120):
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=os.path.join(self.bin_dir, "arsenal"),
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+            creationflags=0x08000000 if os.name == "nt" else 0,
         )
-        output = (proc.stdout or "") + (proc.stderr or "")
+        return proc.returncode, (proc.stdout or ""), (proc.stderr or "")
+
+    def _online_and_letter(self, disk_number, wanted_letter=None):
+        """Brings the mounted disk's partitions online and makes sure every
+        partition with a readable file system has a drive letter (Windows
+        policy on forensic workstations often leaves new disks offline or
+        unlettered). Returns [{"letter", "label", "fs", "size"}], largest first."""
+        wanted = (wanted_letter or "").strip().rstrip(":\\/").upper()[:1]
+        script = r"""
+$ErrorActionPreference = 'Continue'
+$n = %d
+$wanted = '%s'
+$d = Get-Disk -Number $n
+if ($d.IsOffline) { Set-Disk -Number $n -IsOffline $false }
+Start-Sleep -Seconds 1
+$parts = Get-Partition -DiskNumber $n | Where-Object { $_.Type -notin @('Reserved','Unknown') -and $_.Size -gt 50MB } | Sort-Object Size -Descending
+$first = $true
+foreach ($p in $parts) {
+  $v = $p | Get-Volume -ErrorAction SilentlyContinue
+  if (-not $v -or -not $v.FileSystem) { $first = $false; continue }
+  $has = $p.DriveLetter -and $p.DriveLetter -ne [char]0
+  $used = (Get-PSDrive -PSProvider FileSystem).Name
+  if ($first -and $wanted -and ([string]$p.DriveLetter -ne $wanted) -and ($used -notcontains $wanted)) {
+    # The analyst asked for this letter for the main volume (Windows may
+    # have handed out a different or remembered one).
+    $p | Set-Partition -NewDriveLetter $wanted -ErrorAction SilentlyContinue
+  } elseif (-not $has) {
+    $p | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue
+  }
+  $first = $false
+}
+Start-Sleep -Seconds 1
+Get-Partition -DiskNumber $n | Where-Object { $_.DriveLetter -and $_.DriveLetter -ne [char]0 } | Sort-Object Size -Descending | ForEach-Object {
+  $v = $_ | Get-Volume -ErrorAction SilentlyContinue
+  [pscustomobject]@{ letter = [string]$_.DriveLetter; label = [string]$v.FileSystemLabel; fs = [string]$v.FileSystem; size = [int64]$_.Size }
+} | ConvertTo-Json -Compress
+""" % (int(disk_number), wanted if re.match(r"^[D-Z]$", wanted or "") else "")
+        rc, out, err = self._powershell(script)
+        out = out.strip()
+        if not out:
+            return [], err.strip()[-500:]
+        data = json.loads(out)
+        if isinstance(data, dict):
+            data = [data]
+        return data, err.strip()[-500:]
+
+    def _run_mount(self, job_id, params):
+        image = params["image_path"]
+        if not os.path.exists(image):
+            raise RuntimeError(f"AIM_MOUNT_FAILED: image file not found on this machine: {image}")
+
+        before = self._aim_devices()
+        cmd = ["--mount"]
+        cmd.append("--readonly" if params.get("readonly", True) else "--writable")
+        cmd += ["--online", f"--filename={image}", f"--provider={params.get('provider', 'auto')}", "--background"]
+        rc, output = self._aim_run(cmd)
         self._stream_line(job_id, "log", {"message": output})
 
-        if proc.returncode != 0:
-            raise RuntimeError(f"AIM_MOUNT_FAILED: {output[:500]}")
+        # The detached aim_cli finishes attaching after the launcher exits.
+        new_dev = None
+        for _ in range(60):
+            after = self._aim_devices()
+            added = [d for d in after if d not in before]
+            if added:
+                new_dev = added[0]
+                break
+            time.sleep(1)
+        if not new_dev:
+            raise RuntimeError(f"AIM_MOUNT_FAILED: no new virtual disk appeared. aim_cli output: {output[-800:]}")
 
-        parsed = self._parse_aim_output(output)
+        info = after[new_dev]
+        volumes, ps_err = [], ""
+        if info["disk_number"] is not None:
+            for _ in range(3):
+                volumes, ps_err = self._online_and_letter(info["disk_number"], params.get("drive_letter"))
+                if volumes:
+                    break
+                time.sleep(2)
+
+        letters = [v["letter"] for v in volumes]
+        primary = letters[0] if letters else None
+        listing = []
+        if primary:
+            try:
+                listing = sorted(os.listdir(f"{primary}:\\"))[:25]
+            except Exception as e:
+                listing = [f"(could not list {primary}:\\ -- {e})"]
+        if not letters:
+            self._stream_line(job_id, "log", {"message":
+                "Disk attached but Windows assigned no drive letter (no readable file system found, "
+                "e.g. BitLocker-encrypted or unsupported). " + ps_err})
+
         self._stream_line(job_id, "done", {
-            "device_number": parsed["device_number"],
-            "physical_drive": parsed["physical_drive"],
-            "drive_letter": parsed["drive_letter"],
-            "output": output,
+            "device_number":  new_dev,
+            "physical_drive": info["physical_drive"],
+            "drive_letter":   primary,
+            "volumes":        volumes,
+            "root_listing":   listing,
+            "output":         output,
         })
 
     def _run_dismount(self, job_id, params):
-        exe = os.path.join(self.bin_dir, "arsenal", "aim_cli.exe")
-        if not os.path.exists(exe):
-            raise RuntimeError(f"aim_cli.exe not found at {exe}")
-
-        cmd = [exe, f"--dismount={params['device_number']}", "--force"]
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=os.path.join(self.bin_dir, "arsenal"),
-        )
-        output = (proc.stdout or "") + (proc.stderr or "")
+        dev = str(params.get("device_number") or "").strip()
+        if not dev or dev.lower() == "none":
+            # A session recorded by the old mount code, which often never
+            # really attached a disk: nothing to dismount, let ORCA clear it.
+            self._stream_line(job_id, "done", {"output": "No device recorded for this mount session; nothing to dismount."})
+            return
+        rc, output = self._aim_run([f"--dismount={dev}", "--force"], timeout=120)
         self._stream_line(job_id, "log", {"message": output})
-
-        if proc.returncode != 0:
+        # "No device mounted with device number N": already gone (e.g. a
+        # session from the old mount code, or the machine rebooted) -- the
+        # goal state, so let ORCA clear the session instead of keeping it stuck.
+        if rc != 0 and "dismounted" not in output.lower() and "no device mounted" not in output.lower():
             raise RuntimeError(f"AIM_DISMOUNT_FAILED: {output[:500]}")
-
         self._stream_line(job_id, "done", {"output": output})
 
     def _run_grype(self, job_id, params):
         syft_exe = os.path.join(self.bin_dir, "syft.exe")
         grype_exe = os.path.join(self.bin_dir, "grype.exe")
-        path = params["scan_path"]
+        path = self._require_path(params["scan_path"])
+        # Never phone home: syft/grype check for a newer release on every run
+        # by default (an outbound HTTPS attempt that just times out offline).
+        tool_env = os.environ.copy()
+        tool_env.update({
+            "SYFT_CHECK_FOR_APP_UPDATE": "false",
+            "GRYPE_CHECK_FOR_APP_UPDATE": "false",
+            "SYFT_JAVA_USE_NETWORK": "false",
+            "SYFT_GOLANG_SEARCH_REMOTE_LICENSES": "false",
+            "SYFT_JAVASCRIPT_SEARCH_REMOTE_LICENSES": "false",
+            "SYFT_PYTHON_SEARCH_REMOTE_LICENSES": "false",
+        })
+        # dir: makes syft treat a bare drive root ("E:\\") as a directory to
+        # catalog instead of guessing (it otherwise also tries image sources).
+        source = path if os.path.isfile(path) else "dir:" + path
 
         self._stream_line(job_id, "log", {"message": f"Running Syft on {path}"})
         sbom = subprocess.run(
-            [syft_exe, path, "-o", "json"],
+            [syft_exe, source, "-o", "json"],
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
+            env=tool_env,
         )
         if sbom.returncode != 0:
             raise RuntimeError(f"Syft failed: {sbom.stderr[:500]}")
@@ -434,7 +803,7 @@ class OrcaAgent:
         # the backend's equivalent (gated on an analyst-facing "offline"
         # toggle there) -- this agent has no such toggle, and exists
         # specifically for offline/standalone deployments.
-        grype_env = os.environ.copy()
+        grype_env = tool_env.copy()
         grype_env["GRYPE_DB_AUTO_UPDATE"] = "false"
         grype_env["GRYPE_DB_VALIDATE_AGE"] = "false"
         # Grype's own default cache dir is some per-user profile path that

@@ -66,6 +66,7 @@ export default function CaseDetail({
   const [mountExpanded, setMountExpanded] = useState({});
   const [mountForms, setMountForms]       = useState({});
   const [mountLoading, setMountLoading]   = useState({});
+  const [mountResults, setMountResults]   = useState({});  // last mount's volumes/listing per asset
   const [mountAgents, setMountAgents]     = useState([]);
 
   // Deploy state
@@ -434,7 +435,8 @@ export default function CaseDetail({
       const d = await r.json();
       if (r.ok) {
         setAssetModes(prev => ({ ...prev, [String(assetId)]: 'DEAD_DISK_LOCAL' }));
-        if (d.drive_letter) setMountForms(prev => ({ ...prev, [String(assetId)]: { ...form, driveLetter: d.drive_letter } }));
+        setMountResults(prev => ({ ...prev, [String(assetId)]: d }));
+        if (d.warning) alert('MOUNT_WARNING: ' + d.warning);
         await loadMountSessions(assetId);
         if (onRefresh) onRefresh();
       } else { alert('MOUNT_ERROR: ' + (d.detail || 'Unknown error')); }
@@ -997,6 +999,26 @@ export default function CaseDetail({
                                   style={{ marginLeft: 'auto', background: 'transparent', border: '1px solid #ff4141', color: '#ff4141', fontFamily: 'monospace', fontSize: 9, padding: '4px 10px', cursor: 'pointer', letterSpacing: 1 }}>
                                   {loading ? 'DISMOUNTING...' : '[ DISMOUNT ]'}
                                 </button>
+                              </div>
+                            )}
+                            {activeMount && !activeMount.drive_letter && (
+                              <div style={{ color: '#ff4141', fontSize: 9, marginBottom: 8 }}>
+                                NO DRIVE LETTER — Windows on the agent did not assign one, so scans and collection cannot reach this image. Dismount and check the image (encrypted / damaged / unsupported file system).
+                              </div>
+                            )}
+                            {activeMount && mountResults[aId] && mountResults[aId].mount_id === activeMount.id && (
+                              <div style={{ fontSize: 9, color: '#bbb', marginBottom: 8, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                {(mountResults[aId].volumes || []).map(v => (
+                                  <div key={v.letter}>
+                                    <span style={{ color: '#9b59ff' }}>{v.letter}:</span> {v.fs || '?'} {v.label ? `"${v.label}"` : ''} {v.size ? `${(v.size / 1073741824).toFixed(1)} GB` : ''}
+                                    {v.letter === mountResults[aId].drive_letter ? <span style={{ color: '#666' }}> (main volume — use this as DRIVE / scan target)</span> : null}
+                                  </div>
+                                ))}
+                                {(mountResults[aId].root_listing || []).length > 0 && (
+                                  <div style={{ color: '#666' }}>
+                                    {`${mountResults[aId].drive_letter}:\\ contains: `}{mountResults[aId].root_listing.join(', ')}
+                                  </div>
+                                )}
                               </div>
                             )}
                             {sessions.filter(s => s.status === 'DISMOUNTED').length > 0 && (

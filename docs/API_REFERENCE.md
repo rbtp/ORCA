@@ -150,7 +150,28 @@ Trigger local Velociraptor collection for an asset (inline — runs inside the c
 }
 ```
 
-If `agent_id` is set, each technique is dispatched to that agent as an `artifact_collection` job (5-minute timeout per technique) instead of running in-container. This reaches any drive the agent can see (local physical disks or Arsenal-mounted images). The server ingests the returned rows into `evidence` / `artifact_results` exactly as for in-container runs.
+If `agent_id` is set, each technique is dispatched to that agent as an `artifact_collection` job instead of running in-container: up to 3 at a time (`ORCA_AGENT_COLLECTION_PARALLEL`), 20 minutes each (`ORCA_AGENT_COLLECTION_TIMEOUT`, seconds). This reaches any drive the agent can see (local physical disks or Arsenal-mounted images). When `tsource` is not the agent's own system drive, the agent collects in dead-disk mode (Velociraptor `deaddisk` remapping: `C:`, `HKEY_LOCAL_MACHINE` and `HKEY_USERS` read from the image). The server ingests the returned rows into `evidence` / `artifact_results` exactly as for in-container runs.
+
+**Response 409** if a collection is already running for the asset.
+
+### GET /api/assets/{asset_id}/collection-status
+
+Progress of the collection last started for this asset (in memory; `{"state": "IDLE"}` if none since the backend started).
+
+```json
+{
+  "state": "RUNNING",
+  "mode": "agent",
+  "agent": "WORKSTATION-1",
+  "total": 18, "done": 7, "hits": 2, "empty": 3, "na": 1, "failed": 1,
+  "queued": 8,
+  "running": [{"t_code": "T1112", "seconds": 41}],
+  "failures": [{"t_code": "T1078", "detail": "..."}],
+  "elapsed": 212
+}
+```
+
+`state` is `RUNNING`, `DONE` or `FAILED`. `na` counts techniques not applicable to a disk image (they need a running system). For in-container runs only `done`/`running` are tracked.
 
 **Response 200**
 ```json
@@ -236,27 +257,35 @@ Mount a disk image via Arsenal Image Mounter CLI.
 ```json
 {
   "asset_id": 12,
-  "image_path": "/evidence/disk.e01",
-  "drive_letter": null,
+  "agent_id": "a1b2c3d4e5f6a7b8",
+  "image_path": "D:\\evidence\\disk.E01",
+  "drive_letter": "E",
   "provider": "auto",
   "readonly": true
 }
 ```
 
-`provider` values: `"auto"` (detect by extension), `"LibEwf"`, `"DiscUtils"`, `"LibQcow"`, `"None"`.
+`provider` values: `"auto"` (detect by extension), `"LibEwf"`, `"DiscUtils"`, `"LibQcow"`, `"None"`. `drive_letter` is the preferred letter for the main volume (applied on the agent if free; `null` = let Windows choose).
+
+The agent runs `aim_cli --mount --online --background`, brings the new disk's partitions online and assigns letters. `drive_letter` in the response is the letter Windows actually assigned (`null` plus a `warning` if none could be).
 
 **Response 200**
 ```json
 {
   "status": "MOUNTED",
   "mount_id": 5,
-  "device_number": "0",
+  "device_number": "000100",
   "drive_letter": "E",
-  "physical_drive": "\\\\.\\PhysicalDrive2",
+  "physical_drive": "\\\\?\\PhysicalDrive2",
   "provider": "LibEwf",
+  "volumes": [{"letter": "E", "fs": "NTFS", "label": "Windows", "size": 255060746240}],
+  "root_listing": ["Program Files", "Users", "Windows", "pagefile.sys"],
+  "warning": null,
   "output": "..."
 }
 ```
+
+**Response 422** with the agent's reason when the mount fails (e.g. image file not found on the agent).
 
 ---
 

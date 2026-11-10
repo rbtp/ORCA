@@ -161,9 +161,21 @@ The **PKG** panel on each asset shows live collection progress:
    - **Notes** — add analyst annotations at the technique level
    - **Status** — change the lifecycle status (UNCLAIMED → IN_PROGRESS → PENDING_REVIEW → CLOSED)
 5. Any technique with no evidence yet shows a **manual upload** option (JSON/JSONL/CSV/TXT) — use it to attach evidence that wasn't collected automatically, regardless of whether a collection was ever attempted for that technique.
-6. **Running collection from the Evidence Window**: enter a **DRIVE** (e.g. `C:` or `E:\`), then either:
-   - **▶ RUN (IN-CONTAINER)** runs collection inside the ORCA server against that drive (only drives visible to the container), or
-   - pick an online agent under **SELECT AGENT...** and click **▶ RUN ON AGENT**. Collection then runs on that agent's machine and can reach any drive it sees: a locally attached physical disk, or a disk image it mounted via [Disk Image Mounting](#disk-image-mounting). Results land in the same technique rows as any other collection.
+6. **Running collection from the Evidence Window**: enter a **DRIVE** (e.g. `C:` or `E:`), then either:
+   - **▶ RUN ON SERVER** runs collection inside the ORCA server (a Linux container). It cannot see Windows drives, mounted images, Windows event logs or the registry; it only sees the folders ORCA shares with it (cases, memory dumps).
+   - pick an online agent under **SELECT AGENT...** and click **▶ RUN ON ANALYST WORKSTATION (AGENT)**. Collection runs on that agent's Windows computer and can reach any drive it sees: its own C:, or a disk image mounted via [Disk Image Mounting](#disk-image-mounting).
+
+   Hover over either button for the same explanation.
+
+   | | Run on server | Run on analyst workstation (agent) |
+   |---|---|---|
+   | Where it runs | Linux container on the ORCA server | Windows computer running the agent |
+   | Can see a mounted image | No | Yes, by its drive letter |
+   | Windows event logs / registry | No | Yes |
+
+   **Collecting from a mounted image:** set DRIVE to the image's drive letter (shown in the mount panel). When DRIVE is not the agent computer's own system drive, the agent collects in *dead-disk mode* (Velociraptor's remapping): every technique's `C:\...` paths, event logs, `HKEY_LOCAL_MACHINE` (SYSTEM / SOFTWARE / SAM / SECURITY hives) and `HKEY_USERS` (each user's `NTUSER.DAT`) are read **from the image**, `CurrentControlSet` is resolved to the image's active control set, and `%APPDATA%`-style paths cover every user profile on the image. Techniques that need a running system (process list, network connections, WMI) are marked **not applicable to a disk image** instead of reporting the workstation's own state.
+
+   **Progress:** while a collection runs, a panel under the buttons shows done / total, hits, empty, not-applicable and failed counts, which techniques are running and for how long, and at the end the failed techniques with the reason. Up to 3 techniques run at once on the agent (20-minute limit each). Only one collection can run per asset at a time.
 7. **Admins only**: a technique that already has evidence shows a red **⚠ FLUSH_EVIDENCE** button next to the verdict selector. This permanently deletes the evidence collected for that technique and is logged — see [Audit Trail (Admin Only)](#audit-trail-admin-only) below.
 
 ### Timeline View
@@ -257,6 +269,8 @@ From the asset action panel:
 
 Results stream back in real time. Any malware hits are logged per asset with the malware name and file path.
 
+**On a mounted image:** use **RUN ON ANALYST WORKSTATION (AGENT)** with the image's drive letter as the scan path (e.g. `E:\`). If the path doesn't exist on the agent computer the scan fails with `PATH_NOT_FOUND` rather than reporting 0 files. Windows Defender on the workstation may block reading malware on the mounted image (ClamAV then never sees those files); add a Defender exclusion for the mounted drive letter while you scan.
+
 ### Update Signatures
 
 Click **Update ClamAV Signatures** to trigger a `freshclam` run. ClamAV signatures are also updated automatically on each container start. For air-gapped deployments, copy the `.cvd`/`.cld` files into `backend/bin/clamav/` manually.
@@ -279,17 +293,18 @@ ORCA runs **Syft** first to generate a CycloneDX SBOM, then feeds it to **Grype*
 
 From the asset action panel or the **MOUNTS** section of an asset:
 
-1. Enter the **image path** (accessible from the ORCA server).
-2. Select a **provider** (auto-detected by extension) or override:
+1. Enter the **image path** as seen from the agent computer (e.g. `D:\evidence\suspect.E01`).
+2. Pick the agent under **MOUNT_VIA_AGENT** (it needs Arsenal Image Mounter, installed with the agent, and must run as administrator).
+3. Optionally pick a **DRIVE_LETTER** for the image's main volume (AUTO lets Windows choose). The letter is applied if it is free.
+4. Select a **provider** (auto-detected by extension) or override:
    - `.e01`, `.ex01`, `.s01` → LibEwf
    - `.vmdk`, `.vhd`, `.vhdx` → DiscUtils
    - `.qcow`, `.qcow2` → LibQcow
-3. Toggle **Read-only** (default: on).
-4. Click **Mount**.
+5. Click **MOUNT_IMAGE**. The image is mounted read-only.
 
-The asset's analysis mode changes to `DEAD_DISK_LOCAL` on successful mount. Use the drive letter returned by Arsenal Image Mounter as the source path for Velociraptor collection (`tsource` parameter).
+The image becomes a real Windows disk on the agent computer: it appears in File Explorer and Disk Management, its partitions are brought online and each readable volume gets a drive letter. The mount panel shows the letters Windows actually assigned, each volume's file system, label and size, and the files at the top of the main volume so you can confirm it is the right image. Use that letter as DRIVE for collection and as the scan path for ClamAV / Grype. If Windows can't give the image a letter (BitLocker, damaged or unsupported file system), the panel says so in red.
 
-To dismount, click **Dismount** next to the active mount session.
+The asset's analysis mode changes to `DEAD_DISK_LOCAL` on successful mount. To dismount, click **DISMOUNT** next to the active mount session; the drive letter disappears from the agent computer.
 
 ---
 

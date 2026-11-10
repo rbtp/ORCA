@@ -522,6 +522,88 @@ const DeleteEvidenceModal = ({ tCode, deleting, onCancel, onConfirm }) => {
 // ARTIFACT ANALYSIS TAB
 // ══════════════════════════════════════════════════════════════════════════════
 // Artifacts that use server-side pagination (row counts too large for client-side)
+const fmtDur = (s) => {
+  s = Math.max(0, Math.floor(s || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}h ${m}m` : m ? `${m}m ${String(sec).padStart(2, '0')}s` : `${sec}s`;
+};
+
+// Live progress of RUN / RUN ON AGENT (GET /api/assets/{id}/collection-status).
+const CollectionProgressPanel = ({ p }) => {
+  if (!p || p.state === 'IDLE') return null;
+  const running = p.state === 'RUNNING';
+  const total = p.total || 0;
+  const pct = total ? Math.round((p.done / total) * 100) : 0;
+  const isAgent = p.mode === 'agent';
+  const head = running
+    ? `COLLECTING${isAgent ? ` ON ${p.agent || 'AGENT'}` : ' ON SERVER'}`
+    : p.state === 'FAILED' ? 'COLLECTION ABORTED'
+    : p.failed ? `COLLECTION FINISHED — ${p.failed} FAILED` : 'COLLECTION COMPLETE';
+  const headCol = running ? '#ffaa00' : (p.state === 'FAILED' || p.failed) ? C.red : C.green;
+  return (
+    <div style={{ border: `1px solid ${headCol}`, padding: 8, display: 'flex', flexDirection: 'column', gap: 5, fontFamily: 'monospace' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10 }}>
+        <span style={{ color: headCol, fontWeight: 'bold' }}>{running ? '⟳ ' : ''}{head}</span>
+        <span style={{ color: C.grey }}>{p.done}/{total} · {fmtDur(p.elapsed)}</span>
+      </div>
+      <div style={{ background: '#1a1a1a', height: 6, position: 'relative', overflow: 'hidden' }}>
+        <div style={{ background: headCol, height: '100%', width: `${pct}%`, transition: 'width 0.5s ease' }} />
+      </div>
+      {isAgent && (
+        <div style={{ fontSize: 9, color: C.greyDim }}>
+          <span style={{ color: C.green }}>{p.hits} hits</span> · {p.empty} empty
+          {p.na ? <span title="Techniques that read live-system state (running processes, network connections, WMI), which a disk image does not have."> · {p.na} n/a to image</span> : null}
+          {p.failed ? <> · <span style={{ color: C.red }}>{p.failed} failed</span></> : null}
+          {running && p.queued ? ` · ${p.queued} queued` : ''}
+        </div>
+      )}
+      {running && (p.running || []).map(r => (
+        <div key={r.t_code} style={{ fontSize: 9, color: C.grey, display: 'flex', justifyContent: 'space-between' }}>
+          <span>▸ {r.t_code}</span><span style={{ color: r.seconds > 600 ? '#ffaa00' : C.greyDim }}>{fmtDur(r.seconds)}</span>
+        </div>
+      ))}
+      {running && (p.running || []).length === 0 && p.done < total && (
+        <div style={{ fontSize: 9, color: C.greyDim }}>waiting for {isAgent ? 'agent' : 'worker'}…</div>
+      )}
+      {!running && (p.failures || []).length > 0 && (
+        <div style={{ maxHeight: 90, overflowY: 'auto' }}>
+          {p.failures.map((f, i) => (
+            <div key={i} title={f.detail} style={{ fontSize: 9, color: C.red, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              ✕ {f.t_code}: {f.detail}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const RUN_SERVER_TIP = [
+  'RUN ON SERVER',
+  '',
+  'Where it runs: inside the ORCA server (Linux container in Docker).',
+  'Can see a mounted image: NO.',
+  'Can see Windows event logs / registry: NO.',
+  'It only sees the folders ORCA shares with it (cases, memory dumps).',
+  'Use RUN ON ANALYST WORKSTATION for live hosts and mounted images.',
+].join('\n');
+const RUN_AGENT_TIP = [
+  'RUN ON ANALYST WORKSTATION (AGENT)',
+  '',
+  'Where it runs: the Windows computer running the selected ORCA agent.',
+  'Can see a mounted image: YES, by its drive letter (set DRIVE above).',
+  "Can see Windows event logs / registry: YES, that computer's own.",
+  'Use this to collect from a mounted image or the agent computer itself.',
+].join('\n');
+
+const RUN_AGENT_TOOL_TIP = [
+  'RUN ON ANALYST WORKSTATION (AGENT)',
+  '',
+  'Runs on the Windows computer running the selected ORCA agent.',
+  "The scan path is a path on THAT computer, e.g. the mounted image's drive letter (E:\\).",
+  'The ORCA server itself cannot see Windows drives or mounted images.',
+].join('\n');
+
 const PAGINATED_TCODES = new Set([
   'EVENT_LOGS_SECURITY','EVENT_LOGS_APPLICATION','EVENT_LOGS_SYSMON',
   'EVENT_LOGS_POWERSHELL','EVENT_LOGS_SYSTEM','EVENT_LOGS_TASKSCHEDULER',
@@ -529,7 +611,7 @@ const PAGINATED_TCODES = new Set([
 ]);
 const EV_PAGE_SIZE = 100;
 
-const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, caseName, onCollectionStarted, collab, analysisMode = 'UNKNOWN', assetIp = '', isNetworkDevice = false, netConfigText = '', netConfigFile = '' }) => {
+const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, caseName, onCollectionStarted, onTacticsUpdate, collab, analysisMode = 'UNKNOWN', assetIp = '', isNetworkDevice = false, netConfigText = '', netConfigFile = '' }) => {
   const [tactics, setTactics]           = useState(initTactics || []);
   const [sel, setSel]                   = useState(null);
   const [protocol, setProtocol]         = useState(null);
@@ -560,6 +642,30 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
   const [agents, setAgents]             = useState([]);
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [isCollectingAgent, setIsCollectingAgent] = useState(false);
+  const [collProgress, setCollProgress] = useState(null);
+  const progressRef = useRef(null);
+  const lastProgressRef = useRef(null);
+  const collectionRunning = collProgress?.state === 'RUNNING';
+
+  const stopProgressPoll = () => { clearInterval(progressRef.current); progressRef.current = null; };
+  const pollProgress = async () => {
+    if (!assetId) return;
+    try {
+      const r = await fetch(`${import.meta.env.VITE_API_URL}/api/assets/${assetId}/collection-status`, { headers: getAuth() });
+      if (!r.ok) return;
+      const d = await r.json();
+      // Pull fresh results into the technique list whenever a technique
+      // finishes, and once more at the end.
+      const prev = lastProgressRef.current;
+      if (d.state !== 'IDLE' && (!prev || prev.done !== d.done || prev.state !== d.state)) refreshTactics();
+      lastProgressRef.current = d;
+      setCollProgress(d);
+      if (d.state !== 'RUNNING') { stopProgressPoll(); stopPoll(); }
+      else if (!progressRef.current) progressRef.current = setInterval(pollProgress, 3000);
+    } catch {}
+  };
+  // Picks up a collection that was already running (window reopened, page reloaded).
+  useEffect(() => { pollProgress(); return () => stopProgressPoll(); }, [assetId]);
 
   useEffect(() => {
     fetch(`${import.meta.env.VITE_API_URL}/api/agent/list`, { headers: getAuth() })
@@ -613,7 +719,7 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/threat-profile/${encodeURIComponent(caseName)}?asset_id=${assetId}`, { headers: getAuth() });
       if (r.status === 401) { stopPoll(); handle401(); return; }
       const d = await r.json();
-      if (Array.isArray(d)) setTactics(d);
+      if (Array.isArray(d)) { setTactics(d); if (onTacticsUpdate) onTacticsUpdate(d); }
     } catch {}
   };
 
@@ -763,6 +869,7 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
         if (onCollectionStarted) onCollectionStarted(`COLLECTING — ${d.target_count || '?'} techniques queued`);
         refreshTactics();   // immediate refresh so OVERVIEW updates without waiting for first poll tick
         startPoll();
+        pollProgress();
       } else {
         if (onCollectionStarted) onCollectionStarted(null);
         alert('EXECUTION_ERROR: ' + (d.detail || 'Failed to initiate.'));
@@ -791,6 +898,7 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
         if (onCollectionStarted) onCollectionStarted(`COLLECTING (agent) — ${d.target_count || '?'} techniques queued`);
         refreshTactics();
         startPoll();
+        pollProgress();
       } else {
         if (onCollectionStarted) onCollectionStarted(null);
         alert('EXECUTION_ERROR: ' + (d.detail || 'Failed to initiate.'));
@@ -921,23 +1029,26 @@ const ArtifactAnalysisTab = ({ assetId, assetName, tacticList: initTactics, case
             <input value={drive} onChange={e => setDrive(e.target.value)} placeholder="C: or E:\"
               style={{ ...Inp, flex: 1, fontSize: 10 }} />
           </div>
-          <button onClick={runCollection} disabled={isCollecting || isCollectingAgent}
-            style={{ ...Btn, width: '100%', opacity: isCollecting ? 0.6 : 1 }}>
-            {isCollecting ? '⟳ RUNNING...' : '▶ RUN (IN-CONTAINER)'}
+          <button onClick={runCollection} disabled={isCollecting || isCollectingAgent || collectionRunning}
+            title={RUN_SERVER_TIP}
+            style={{ ...Btn, width: '100%', opacity: (isCollecting || collectionRunning) ? 0.6 : 1 }}>
+            {isCollecting ? '⟳ STARTING...' : '▶ RUN ON SERVER'}
           </button>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <select value={selectedAgent || ''} onChange={e => setSelectedAgent(e.target.value)}
               style={{ ...Inp, flex: 1, fontSize: 10 }}>
               <option value="">SELECT AGENT...</option>
               {agents.map(a => (
-                <option key={a.agent_id} value={a.agent_id}>{a.hostname} ({a.analyst})</option>
+                <option key={a.agent_id} value={a.agent_id}>{a.hostname}{a.analyst ? ` (${a.analyst})` : ''}</option>
               ))}
             </select>
           </div>
-          <button onClick={runCollectionViaAgent} disabled={!selectedAgent || isCollecting || isCollectingAgent}
-            style={{ ...Btn, width: '100%', background: C.amber || '#ffaa00', opacity: (!selectedAgent || isCollectingAgent) ? 0.5 : 1 }}>
-            {isCollectingAgent ? '⟳ RUNNING ON AGENT...' : '▶ RUN ON AGENT'}
+          <button onClick={runCollectionViaAgent} disabled={!selectedAgent || isCollecting || isCollectingAgent || collectionRunning}
+            title={selectedAgent ? RUN_AGENT_TIP : RUN_AGENT_TIP + '\n\nSelect an agent first.'}
+            style={{ ...Btn, width: '100%', background: C.amber || '#ffaa00', opacity: (!selectedAgent || isCollectingAgent || collectionRunning) ? 0.5 : 1 }}>
+            {isCollectingAgent ? '⟳ STARTING...' : '▶ RUN ON ANALYST WORKSTATION (AGENT)'}
           </button>
+          <CollectionProgressPanel p={collProgress} />
         </div>
 
         <div style={{ padding: '4px 12px', fontSize: 9, color: C.greyDim, borderBottom: `1px solid #0a0a0a`, letterSpacing: 1 }}>TECHNIQUE_INDEX</div>
@@ -3109,13 +3220,14 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
                           <option value="">SELECT AGENT...</option>
                           {agents.map(a => (
                             <option key={a.agent_id} value={a.agent_id}>
-                              {a.hostname} ({a.analyst})
+                              {a.hostname}{a.analyst ? ` (${a.analyst})` : ''}
                             </option>
                           ))}
                         </select>
                         <button onClick={handleDispatchToAgent} disabled={!selectedAgent}
+                          title={RUN_AGENT_TOOL_TIP}
                           style={{ ...Btn, background: C.green, color: '#000', opacity: selectedAgent ? 1 : 0.5 }}>
-                          ▶ RUN ON AGENT
+                          ▶ RUN ON ANALYST WORKSTATION (AGENT)
                         </button>
                       </div>
                     : <button onClick={handleRun} style={Btn}>▶ EXECUTE</button>
@@ -3426,13 +3538,14 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
                     <option value="">SELECT AGENT...</option>
                     {agents.map(a => (
                       <option key={a.agent_id} value={a.agent_id}>
-                        {a.hostname} ({a.analyst})
+                        {a.hostname}{a.analyst ? ` (${a.analyst})` : ''}
                       </option>
                     ))}
                   </select>
                   <button onClick={handleDispatchToAgent} disabled={!selectedAgent}
+                    title={RUN_AGENT_TOOL_TIP}
                     style={{ ...Btn, background: C.green, color: '#000', opacity: selectedAgent ? 1 : 0.5 }}>
-                    ▶ RUN ON AGENT
+                    ▶ RUN ON ANALYST WORKSTATION (AGENT)
                   </button>
                 </div>
               : <button onClick={handleScan} style={Btn}>▶ RUN_CLAMSCAN</button>
@@ -3711,13 +3824,14 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
                       <option value="">SELECT AGENT...</option>
                       {agents.map(a => (
                         <option key={a.agent_id} value={a.agent_id}>
-                          {a.hostname} ({a.analyst})
+                          {a.hostname}{a.analyst ? ` (${a.analyst})` : ''}
                         </option>
                       ))}
                     </select>
                     <button onClick={handleDispatchToAgent} disabled={!selectedAgent}
+                      title={RUN_AGENT_TOOL_TIP}
                       style={{ ...Btn, background: C.green, color: '#000', opacity: selectedAgent ? 1 : 0.5 }}>
-                      ▶ RUN ON AGENT
+                      ▶ RUN ON ANALYST WORKSTATION (AGENT)
                     </button>
                   </div>
                 : <button onClick={handleScan} style={Btn}>▶ RUN_VULN_SCAN</button>
@@ -4117,6 +4231,12 @@ const EvidenceWindow = ({ assetId, assetName, tCode, isOpen, onClose, tacticList
   const [netConfigSaving, setNetConfigSaving] = useState(false);
   const [tab, setTab]                 = useState('OVERVIEW');
   const [progressLabel, setProgressLabel] = useState(null);
+  // Technique results refreshed by the ARTIFACT ANALYSIS tab while a
+  // collection runs, so the status bar and OVERVIEW don't keep showing the
+  // list as it was when the window opened.
+  const [liveTactics, setLiveTactics] = useState(null);
+  useEffect(() => { setLiveTactics(null); }, [assetId, tacticList]);
+  const shownTactics = liveTactics || tacticList;
   // Summary state — initialized from lifted props, updates propagate back up
   const [memSummary, setMemSummaryLocal]          = useState(memSummaryProp);
   const [avSummary, setAvSummaryLocal]            = useState(avSummaryProp);
@@ -4247,7 +4367,7 @@ useEffect(() => {
         )}
 
         {/* Collection status bar — shows real progress while collection runs */}
-        <CollectionStatusBar tacticList={tacticList} />
+        <CollectionStatusBar tacticList={shownTactics} />
 
         {/* Tab bar */}
         <div style={{ display: 'flex', background: C.bg, borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
@@ -4267,7 +4387,7 @@ useEffect(() => {
         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
 
           <div style={tabStyle('OVERVIEW')}>
-            <OverviewTab tacticList={tacticList || []} memSummary={memSummary} avSummary={avSummary} vulnSummary={vulnSummary} behavioralSummary={behavioralSummary} capaIdentifiedTechniques={capaIdentifiedTechniques} isNetworkDevice={isNetworkDevice} netConfigText={netConfigText} netConfigFile={netConfigFile} netConfigSaving={netConfigSaving} onConfigLoad={handleConfigLoad} />
+            <OverviewTab tacticList={shownTactics || []} memSummary={memSummary} avSummary={avSummary} vulnSummary={vulnSummary} behavioralSummary={behavioralSummary} capaIdentifiedTechniques={capaIdentifiedTechniques} isNetworkDevice={isNetworkDevice} netConfigText={netConfigText} netConfigFile={netConfigFile} netConfigSaving={netConfigSaving} onConfigLoad={handleConfigLoad} />
           </div>
 
           <div style={tabStyle('ARTIFACT_ANALYSIS')}>
@@ -4278,6 +4398,7 @@ useEffect(() => {
                 assetId={assetId} assetName={assetName}
                 tacticList={tacticList || []} caseName={caseName}
                 onCollectionStarted={setProgressLabel}
+                onTacticsUpdate={setLiveTactics}
                 collab={collab} analysisMode={analysisMode} assetIp={assetIp}
                 isNetworkDevice={isNetworkDevice} netConfigText={netConfigText} netConfigFile={netConfigFile}
               />

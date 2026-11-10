@@ -284,6 +284,7 @@ def _require_agent_ownership(agent_id: str, current_user: dict):
 @router.get("/{agent_id}/jobs")
 async def poll_jobs(
     agent_id: str,
+    request: Request,
     current_user: dict = Depends(get_current_user)
 ):
     _require_agent_ownership(agent_id, current_user)
@@ -330,9 +331,22 @@ async def poll_jobs(
             "params": {"paths": sync_paths},
         }
 
-    # Nothing queued — long-poll up to 30s for new analysis jobs
-    try:
-        job = await asyncio.wait_for(_job_queues[agent_id].get(), timeout=30.0)
+    # Nothing queued — long-poll up to 30s for new analysis jobs. Polled
+    # rather than `await wait_for(queue.get())`: that kept waiting after the
+    # agent had gone (restarted, network drop) and then took the next job off
+    # the queue for a connection nobody was reading -- the job was lost and
+    # its caller timed out. Only take a job while the agent is still there.
+    q = _job_queues[agent_id]
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + 30.0
+    while loop.time() < deadline:
+        if await request.is_disconnected():
+            return None
+        try:
+            job = q.get_nowait()
+        except asyncio.QueueEmpty:
+            await asyncio.sleep(0.5)
+            continue
         with db.engine.connect() as conn:
             conn.execute(text("""
                 UPDATE agent_jobs SET status = 'RUNNING', started_at = NOW()
@@ -340,8 +354,7 @@ async def poll_jobs(
             """), {"job_id": job["job_id"]})
             conn.commit()
         return job
-    except asyncio.TimeoutError:
-        return None
+    return None
 
 
 @router.post("/{agent_id}/jobs/{job_id}/stream")
@@ -399,9 +412,13 @@ async def complete_job(
     return {"ok": True}
 
 
-async def dispatch_and_wait(agent_id: str, job_type: str, params: dict, timeout: float = 120.0) -> list:
-    """Dispatch a job to an agent, block until complete, return accumulated stream lines."""
+async def dispatch_and_wait(agent_id: str, job_type: str, params: dict, timeout: float = 120.0,
+                            job_ref: Optional[dict] = None) -> list:
+    """Dispatch a job to an agent, block until complete, return accumulated stream lines.
+    job_ref, if given, receives the job_id (so the caller can free its buffered stream)."""
     job_id = uuid.uuid4().hex[:24]
+    if job_ref is not None:
+        job_ref["job_id"] = job_id
 
     with db.engine.connect() as conn:
         conn.execute(text("""
