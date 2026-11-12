@@ -295,16 +295,18 @@ ORCA runs **Syft** first to generate a CycloneDX SBOM, then feeds it to **Grype*
 
 From the asset action panel or the **MOUNTS** section of an asset:
 
-1. Enter the **image path** as seen from the agent computer (e.g. `D:\evidence\suspect.E01`).
-2. Pick the agent under **MOUNT_VIA_AGENT** (it needs Arsenal Image Mounter, installed with the agent, and must run as administrator).
+1. Pick the agent under **MOUNT_VIA_AGENT** (it needs Arsenal Image Mounter, installed with the agent, and must run as administrator).
+2. Enter the **image path** as seen from the agent computer (e.g. `D:\evidence\suspect.E01`), or click **📂 BROWSE** to pick it from that computer's drives and folders (disk-image files are shown in amber). You can also type a folder or UNC path (`\\server\share`) in the dialog's path bar.
 3. Optionally pick a **DRIVE_LETTER** for the image's main volume (AUTO lets Windows choose). The letter is applied if it is free.
 4. Select a **provider** (auto-detected by extension) or override:
    - `.e01`, `.ex01`, `.s01` → LibEwf
    - `.vmdk`, `.vhd`, `.vhdx` → DiscUtils
    - `.qcow`, `.qcow2` → LibQcow
+   - `.001`, `.002`, ... (a raw image split into parts, e.g. by FTK Imager or `split`) → MultiPartRaw: all parts are mounted together as one disk. Pick any part; ORCA mounts from the first (`.001`, or `.000`). If a part in the middle of the set is missing, the mount is refused (it would cut the disk short). The mount panel shows how many parts were mounted.
+   - E01 sets: pick any segment; the set is opened from the `.E01` and the remaining segments are found automatically.
 5. Click **MOUNT_IMAGE**. The image is mounted read-only.
 
-The image becomes a real Windows disk on the agent computer: it appears in File Explorer and Disk Management, its partitions are brought online and each readable volume gets a drive letter. The mount panel shows the letters Windows actually assigned, each volume's file system, label and size, and the files at the top of the main volume so you can confirm it is the right image. Use that letter as DRIVE for collection and as the scan path for ClamAV / Grype. If Windows can't give the image a letter (BitLocker, damaged or unsupported file system), the panel says so in red.
+The image becomes a real Windows disk on the agent computer: it appears in File Explorer and Disk Management, its partitions are brought online and each readable volume gets a drive letter. The mount panel shows the letters Windows actually assigned, each volume's file system, label and size, and the files at the top of the main volume so you can confirm it is the right image. Use that letter as DRIVE for collection and as the scan path for ClamAV / Grype. On the **KNOWN MALWARE SIGNATURES** and **VULN SCAN** tabs, once an agent is selected, **📂 BROWSE** next to the path picks a folder (or, for ClamAV, a single file) on that agent's computer, including the mounted image's drive. If Windows can't give the image a letter (BitLocker, damaged or unsupported file system), the panel says so in red.
 
 The asset's analysis mode changes to `DEAD_DISK_LOCAL` on successful mount. To dismount, click **DISMOUNT** next to the active mount session; the drive letter disappears from the agent computer.
 

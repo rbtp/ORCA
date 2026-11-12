@@ -265,7 +265,7 @@ Mount a disk image via Arsenal Image Mounter CLI.
 }
 ```
 
-`provider` values: `"auto"` (detect by extension), `"LibEwf"`, `"DiscUtils"`, `"LibQcow"`, `"None"`. `drive_letter` is the preferred letter for the main volume (applied on the agent if free; `null` = let Windows choose).
+`provider` values: `"auto"` (detect by extension; `.001`/`.002`/... = `MultiPartRaw`), `"LibEwf"`, `"DiscUtils"`, `"LibQcow"`, `"MultiPartRaw"`, `"None"`. For a split raw image any part may be given: the agent mounts all parts from the first one, and refuses a set with a missing part (422). For an E01 set any segment may be given (mounted from `.E01`). `drive_letter` is the preferred letter for the main volume (applied on the agent if free; `null` = let Windows choose).
 
 The agent runs `aim_cli --mount --online --background`, brings the new disk's partitions online and assigns letters. `drive_letter` in the response is the letter Windows actually assigned (`null` plus a `warning` if none could be).
 
@@ -278,6 +278,8 @@ The agent runs `aim_cli --mount --online --background`, brings the new disk's pa
   "drive_letter": "E",
   "physical_drive": "\\\\?\\PhysicalDrive2",
   "provider": "LibEwf",
+  "image_path": "D:\\evidence\\disk.E01",
+  "segments": 1,
   "volumes": [{"letter": "E", "fs": "NTFS", "label": "Windows", "size": 255060746240}],
   "root_listing": ["Program Files", "Users", "Windows", "pagefile.sys"],
   "warning": null,
@@ -570,6 +572,30 @@ Dispatch a job to a specific agent.
 ```
 
 **Response 200**: `{ "job_id": "f3e2d1c0b9a8..." }`
+
+---
+
+### POST /api/agent/{agent_id}/browse
+
+Lists a folder on the agent's computer, for the BROWSE dialogs (image path, ClamAV target, vuln-scan path). Not available to agent tokens. If `asset_id` is given, the caller must have access to that asset's case.
+
+**Request body**: `{ "path": "E:\\Users", "asset_id": 12 }`. An empty `path` lists the drives.
+
+**Response 200**
+```json
+{
+  "path": "E:\\Users",
+  "parent": "E:\\",
+  "entries": [
+    {"name": "jdoe", "path": "E:\\Users\\jdoe", "type": "dir", "size": null, "mtime": 1793500000},
+    {"name": "notes.txt", "path": "E:\\Users\\notes.txt", "type": "file", "size": 1204, "mtime": 1793500000}
+  ],
+  "truncated": false
+}
+```
+Drive entries (empty `path`) have `type: "drive"`, `label`, `kind` (Local Disk, Removable, Network...) and `ready`. `parent` is `""` at a drive root (= the drive list) and `null` for the drive list. Folders come first; at most 5000 entries (`truncated: true` beyond that).
+
+Errors: `409` agent offline, `422` `PATH_NOT_FOUND`, `504` agent didn't answer within 30 s.
 
 ---
 

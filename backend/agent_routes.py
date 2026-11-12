@@ -412,6 +412,51 @@ async def complete_job(
     return {"ok": True}
 
 
+class BrowseRequest(BaseModel):
+    path: str = ""
+    asset_id: Optional[int] = None
+
+
+@router.post("/{agent_id}/browse")
+async def browse_agent(agent_id: str, body: BrowseRequest, current_user: dict = Depends(get_current_user)):
+    """Lists a folder on the agent's computer (empty path = its drives) for the
+    BROWSE dialogs (image path, ClamAV target, vuln-scan path)."""
+    if current_user.get("role") == "agent":
+        raise HTTPException(status_code=403, detail="Not available to agent tokens")
+    if body.asset_id is not None:
+        with db.engine.connect() as conn:
+            asset_row = conn.execute(
+                text("SELECT case_name FROM assets WHERE id = :id"), {"id": body.asset_id}
+            ).fetchone()
+        if asset_row and not user_can_access_case(current_user, asset_row[0]):
+            raise HTTPException(status_code=403, detail="Not assigned to this investigation")
+    with db.engine.connect() as conn:
+        online = conn.execute(text("""
+            SELECT 1 FROM agent_registrations
+            WHERE agent_id = :a AND last_seen > NOW() - INTERVAL '90 seconds'
+        """), {"a": agent_id}).fetchone()
+    if not online:
+        raise HTTPException(status_code=409, detail="That agent is offline")
+    job_ref = {}
+    try:
+        lines = await dispatch_and_wait(agent_id, "list_dir", {"path": body.path}, timeout=30.0, job_ref=job_ref)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="The agent did not answer within 30s (offline or busy?)")
+    finally:
+        _job_streams.pop(job_ref.get("job_id"), None)
+    for line in lines:
+        try:
+            evt = json.loads(line)
+        except Exception:
+            continue
+        data = evt.get("data") or {}
+        if evt.get("type") == "error":
+            raise HTTPException(status_code=422, detail=str(data.get("message")))
+        if evt.get("type") == "done":
+            return data
+    raise HTTPException(status_code=502, detail="Agent returned no listing (agent version too old? Reinstall/update the agent)")
+
+
 async def dispatch_and_wait(agent_id: str, job_type: str, params: dict, timeout: float = 120.0,
                             job_ref: Optional[dict] = None) -> list:
     """Dispatch a job to an agent, block until complete, return accumulated stream lines.

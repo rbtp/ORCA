@@ -105,6 +105,8 @@ class OrcaAgent:
                 self._run_vql_test(job_id, params)
             elif jtype == "artifact_collection":
                 self._run_artifact_collection(job_id, params)
+            elif jtype == "list_dir":
+                self._run_list_dir(job_id, params)
             elif jtype == "folder_sync":
                 self._run_folder_sync(params)
                 return  # fire-and-forget — no DB tracking for sync jobs
@@ -694,15 +696,104 @@ Get-Partition -DiskNumber $n | Where-Object { $_.DriveLetter -and $_.DriveLetter
             data = [data]
         return data, err.strip()[-500:]
 
+    def _run_list_dir(self, job_id, params):
+        """Directory listing for the UI's BROWSE dialog. Empty path = the drives."""
+        path = (params.get("path") or "").strip()
+        limit = 5000
+        if not path:
+            entries = []
+            if os.name == "nt":
+                import ctypes
+                k32 = ctypes.windll.kernel32
+                mask = k32.GetLogicalDrives()
+                kinds = {2: "Removable", 3: "Local Disk", 4: "Network", 5: "CD/DVD", 6: "RAM Disk"}
+                for i in range(26):
+                    if not mask & (1 << i):
+                        continue
+                    root = f"{chr(65 + i)}:\\"
+                    label = ctypes.create_unicode_buffer(261)
+                    ok = k32.GetVolumeInformationW(root, label, 261, None, None, None, None, 0)
+                    entries.append({"name": root, "path": root, "type": "drive",
+                                    "label": label.value if ok else "",
+                                    "kind": kinds.get(k32.GetDriveTypeW(root), ""),
+                                    "ready": bool(ok)})
+            else:
+                entries.append({"name": "/", "path": "/", "type": "drive", "label": "", "kind": "", "ready": True})
+            self._stream_line(job_id, "done", {"path": "", "parent": None, "entries": entries, "truncated": False})
+            return
+
+        if re.fullmatch(r"[A-Za-z]:", path):
+            path += "\\"
+        path = os.path.normpath(path)
+        if re.fullmatch(r"[A-Za-z]:", path):
+            path += "\\"
+        if not os.path.isdir(path):
+            raise RuntimeError(f"PATH_NOT_FOUND: no such folder on this machine: {path}")
+        entries, truncated = [], False
+        with os.scandir(path) as it:
+            for e in it:
+                try:
+                    is_dir = e.is_dir()
+                    st = e.stat()
+                    entries.append({"name": e.name, "path": e.path, "type": "dir" if is_dir else "file",
+                                    "size": None if is_dir else st.st_size, "mtime": int(st.st_mtime)})
+                except OSError:
+                    entries.append({"name": e.name, "path": e.path, "type": "file", "size": None, "mtime": None})
+        entries.sort(key=lambda x: (x["type"] != "dir", x["name"].casefold()))
+        if len(entries) > limit:
+            entries, truncated = entries[:limit], True
+        parent = os.path.dirname(path.rstrip("\\/")) if path.rstrip("\\/") else ""
+        if parent == path or re.fullmatch(r"[A-Za-z]:\\?", path):
+            parent = ""   # at a drive root: "up" goes to the drive list
+        elif re.fullmatch(r"[A-Za-z]:", parent):
+            parent += "\\"
+        self._stream_line(job_id, "done", {"path": path, "parent": parent, "entries": entries, "truncated": truncated})
+
+    @staticmethod
+    def _image_segments(image, provider):
+        """Split images: a raw image cut into image.001, .002, ... (FTK Imager,
+        dd | split) must be mounted from its FIRST part with the MultiPartRaw
+        provider, which then reads every part. E01 sets are opened from the
+        .E01 and libewf finds the rest. Returns (path_to_mount, provider, parts)."""
+        m = re.match(r"^(.*)\.(\d{3})$", image)
+        if m and provider in ("auto", "MultiPartRaw"):
+            stem = m.group(1)
+            first = next((f"{stem}.{n:03d}" for n in (0, 1) if os.path.exists(f"{stem}.{n:03d}")), image)
+            n0 = int(first[-3:])
+            parts, n = [], n0
+            while os.path.exists(f"{stem}.{n:03d}"):
+                parts.append(f"{stem}.{n:03d}")
+                n += 1
+            folder = os.path.dirname(stem) or "."
+            base = os.path.basename(stem)
+            later = sorted(int(f[len(base) + 1:]) for f in os.listdir(folder)
+                           if f.lower().startswith(base.lower() + ".") and re.fullmatch(r"\d{3}", f[len(base) + 1:]))
+            if later and later[-1] >= n:
+                raise RuntimeError(f"AIM_MOUNT_FAILED: split image is missing part {stem}.{n:03d} "
+                                   f"(found parts up to .{later[-1]:03d}); mounting would cut the disk short")
+            return first, "MultiPartRaw", parts
+        m = re.match(r"^(.*)\.([EeLlSs])(\d{2})$", image)
+        if m and provider in ("auto", "LibEwf") and m.group(3) != "01":
+            first = f"{m.group(1)}.{m.group(2)}01"
+            if os.path.exists(first):
+                return first, "LibEwf", [first]
+        return image, provider, [image]
+
     def _run_mount(self, job_id, params):
         image = params["image_path"]
         if not os.path.exists(image):
             raise RuntimeError(f"AIM_MOUNT_FAILED: image file not found on this machine: {image}")
+        image, provider, parts = self._image_segments(image, params.get("provider", "auto"))
+        if len(parts) > 1:
+            total = sum(os.path.getsize(p) for p in parts)
+            self._stream_line(job_id, "log", {"message":
+                f"Split image: {len(parts)} parts ({os.path.basename(parts[0])} .. {os.path.basename(parts[-1])}), "
+                f"{total / 1024 ** 3:.2f} GB, mounted with MultiPartRaw from {image}"})
 
         before = self._aim_devices()
         cmd = ["--mount"]
         cmd.append("--readonly" if params.get("readonly", True) else "--writable")
-        cmd += ["--online", f"--filename={image}", f"--provider={params.get('provider', 'auto')}", "--background"]
+        cmd += ["--online", f"--filename={image}", f"--provider={provider}", "--background"]
         rc, output = self._aim_run(cmd)
         self._stream_line(job_id, "log", {"message": output})
 
@@ -746,6 +837,9 @@ Get-Partition -DiskNumber $n | Where-Object { $_.DriveLetter -and $_.DriveLetter
             "drive_letter":   primary,
             "volumes":        volumes,
             "root_listing":   listing,
+            "image_path":     image,
+            "provider":       provider,
+            "segments":       len(parts),
             "output":         output,
         })
 

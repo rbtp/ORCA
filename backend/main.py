@@ -1199,7 +1199,7 @@ async def mount_image(
     provider = request.provider
     if provider == "auto":
         ext = os.path.splitext(request.image_path)[1].lower()
-        provider = {
+        provider = "MultiPartRaw" if re.fullmatch(r"\.\d{3}", ext) else {  # image.001, .002, ...
             ".e01": "LibEwf", ".ex01": "LibEwf", ".s01": "LibEwf",
             ".vmdk": "DiscUtils", ".vhd": "DiscUtils", ".vhdx": "DiscUtils",
             ".qcow": "LibQcow", ".qcow2": "LibQcow",
@@ -1228,6 +1228,10 @@ async def mount_image(
         # Only the letter Windows actually assigned on the agent. Falling back
         # to the analyst's typed letter recorded a drive that didn't exist.
         drive_letter = parsed["drive_letter"]
+        # The agent mounts a split image from its first part whichever part
+        # was picked, and reports the provider it really used.
+        image_path = result.get("image_path") or request.image_path
+        provider = result.get("provider") or provider
         if not parsed["device_number"]:
             raise HTTPException(status_code=500, detail="AIM_MOUNT_FAILED: agent reported no device")
 
@@ -1240,7 +1244,7 @@ async def mount_image(
             """), {
                 "asset_id":       asset_id,
                 "agent_id":       request.agent_id,
-                "image_path":     request.image_path,
+                "image_path":     image_path,
                 "device_number":  parsed["device_number"],
                 "drive_letter":   drive_letter,
                 "physical_drive": parsed["physical_drive"],
@@ -1260,6 +1264,8 @@ async def mount_image(
             "drive_letter":   drive_letter,
             "physical_drive": parsed["physical_drive"],
             "provider":       provider,
+            "image_path":     image_path,
+            "segments":       result.get("segments") or 1,
             "volumes":        result.get("volumes") or [],
             "root_listing":   result.get("root_listing") or [],
             "warning":        None if drive_letter else

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import BehavioralAnalysisTab from '../BehavioralAnalysisTab';
+import PathBrowseButton from '../AgentPathBrowser';
 import { useAuth } from '../../context/AuthContext';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
@@ -3523,6 +3524,10 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
           <span style={Lbl}>SCAN_TARGET:</span>
           <input value={scanPath} onChange={e => setScanPath(e.target.value)} placeholder="C:\Users\"
             style={{ ...Inp, flex: 1, minWidth: 200 }} />
+          {analysisMode === 'DEAD_DISK_LOCAL' && (
+            <PathBrowseButton agentId={selectedAgent} assetId={assetId} mode="any" value={scanPath}
+              title="SELECT SCAN TARGET (folder or file)" onSelect={setScanPath} />
+          )}
           <label style={{ color: C.grey, fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', fontFamily: 'monospace' }}>
             <input type="checkbox" checked={recursive} onChange={e => setRecursive(e.target.checked)} style={{ marginRight: 4 }} /> RECURSIVE
           </label>
@@ -3810,6 +3815,10 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
             <span style={Lbl}>SCAN_PATH:</span>
             <input value={scanPath} onChange={e => setScanPath(e.target.value)}
               placeholder="N:\\" style={{ ...Inp, flex: 1, minWidth: 200 }} />
+            {analysisMode === 'DEAD_DISK_LOCAL' && (
+              <PathBrowseButton agentId={selectedAgent} assetId={assetId} mode="dir" value={scanPath}
+                title="SELECT FOLDER TO SCAN" onSelect={setScanPath} />
+            )}
             <label style={{ color: offline ? C.amber : C.greyDim, fontSize: 11, cursor: 'pointer',
               display: 'flex', alignItems: 'center', fontFamily: 'monospace' }}>
               <input type="checkbox" checked={offline} onChange={e => setOffline(e.target.checked)}

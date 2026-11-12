@@ -4,6 +4,7 @@ import AssetActionTab from './AssetActionTab';
 import EvidenceWindow from './EvidenceWindow';
 import { TimelineViewer } from './EvidenceWindow';
 import CollabNotificationTray from './CollabNotificationTray';
+import PathBrowseButton, { DISK_IMAGE_RX } from '../AgentPathBrowser';
 import { useCollaboration } from './useCollaboration';
 
 // FORM_FACTOR is never read by /threat-profile's technique filtering (only
@@ -958,7 +959,12 @@ export default function CaseDetail({
                             <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 10 }}>
                               <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 2, minWidth: 250 }}>
                                 <span style={{ color: '#666', fontSize: 9 }}>IMAGE_PATH</span>
-                                <input value={form.imagePath || ''} onChange={e => setMountForms(prev => ({ ...prev, [aId]: { ...form, imagePath: e.target.value } }))} placeholder="C:\images\suspect.E01 or \\fileserver\evidence\suspect.E01" style={{ background: '#000', border: '1px solid #2a2a2a', color: '#00ff41', fontFamily: 'monospace', fontSize: 10, padding: '5px 8px', outline: 'none' }} />
+                                <div style={{ display: 'flex', gap: 6 }}>
+                                  <PathBrowseButton agentId={form.agentId} assetId={a.id} mode="file" value={form.imagePath} highlight={DISK_IMAGE_RX}
+                                    title="SELECT DISK IMAGE (split image: pick the .001)"
+                                    onSelect={p => setMountForms(prev => ({ ...prev, [aId]: { ...(prev[aId] || {}), imagePath: p } }))} />
+                                <input value={form.imagePath || ''} onChange={e => setMountForms(prev => ({ ...prev, [aId]: { ...form, imagePath: e.target.value } }))} placeholder="C:\images\suspect.E01 or \\fileserver\evidence\suspect.E01" style={{ flex: 1, order: -1, background: '#000', border: '1px solid #2a2a2a', color: '#00ff41', fontFamily: 'monospace', fontSize: 10, padding: '5px 8px', outline: 'none' }} />
+                                </div>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 140 }}>
                                 <span style={{ color: '#666', fontSize: 9 }}>MOUNT_VIA_AGENT</span>
@@ -977,7 +983,7 @@ export default function CaseDetail({
                               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                                 <span style={{ color: '#666', fontSize: 9 }}>PROVIDER</span>
                                 <select value={form.provider || 'auto'} onChange={e => setMountForms(prev => ({ ...prev, [aId]: { ...form, provider: e.target.value } }))} style={{ background: '#000', border: '1px solid #2a2a2a', color: '#00ff41', fontFamily: 'monospace', fontSize: 10, padding: '5px 6px', outline: 'none' }}>
-                                  {['auto', 'LibEwf', 'DiscUtils', 'LibQcow', 'None'].map(p => <option key={p} value={p}>{p}</option>)}
+                                  {['auto', 'LibEwf', 'DiscUtils', 'LibQcow', 'MultiPartRaw', 'None'].map(p => <option key={p} value={p}>{p}</option>)}
                                 </select>
                               </div>
                               <button onClick={() => handleMount(a.id)} disabled={loading || !form.imagePath || !form.agentId || !!activeMount}
@@ -1008,6 +1014,9 @@ export default function CaseDetail({
                             )}
                             {activeMount && mountResults[aId] && mountResults[aId].mount_id === activeMount.id && (
                               <div style={{ fontSize: 9, color: '#bbb', marginBottom: 8, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                {mountResults[aId].segments > 1 && (
+                                  <div data-testid="mount-segments">Split image: all <span style={{ color: '#9b59ff' }}>{mountResults[aId].segments}</span> parts mounted together ({mountResults[aId].provider}, from {mountResults[aId].image_path})</div>
+                                )}
                                 {(mountResults[aId].volumes || []).map(v => (
                                   <div key={v.letter}>
                                     <span style={{ color: '#9b59ff' }}>{v.letter}:</span> {v.fs || '?'} {v.label ? `"${v.label}"` : ''} {v.size ? `${(v.size / 1073741824).toFixed(1)} GB` : ''}
