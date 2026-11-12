@@ -376,12 +376,124 @@ async def receive_job_stream(
         line = line.strip()
         if not line:
             continue
-        _job_streams[job_id].append(line)
+        if '"type": "progress"' in line:
+            # Only the latest progress event is kept for replay: a scan of a
+            # whole disk sends thousands of them.
+            stream = _job_streams[job_id]
+            if stream and '"type": "progress"' in stream[-1]:
+                stream[-1] = line
+            else:
+                stream.append(line)
+        else:
+            _job_streams[job_id].append(line)
+        if '"type": "done"' in line:
+            # Saved here, server-side, so a long scan's results are kept even
+            # if nobody has the Evidence Window open when it finishes.
+            try:
+                await run_in_threadpool(_persist_scan_result, job_id, line)
+            except Exception as e:
+                print(f"[AGENT] could not save results of job {job_id}: {e}")
         if job_id in _job_subscribers:
             for q in _job_subscribers[job_id]:
                 await q.put(line)
 
-    return {"ok": True}
+    return {"ok": True, "cancel": job_id in _cancel_requests}
+
+
+_cancel_requests: set = set()
+
+
+def _persist_scan_result(job_id: str, line: str):
+    """Stores a finished agent ClamAV / Grype job's results the same way the
+    server-side scans do (clam_results / vuln_results), per asset."""
+    with db.engine.connect() as conn:
+        row = conn.execute(text("SELECT job_type, params FROM agent_jobs WHERE job_id = :id"), {"id": job_id}).fetchone()
+    if not row or row[0] not in ("clamav", "grype"):
+        return
+    params = row[1] or {}
+    asset_id = params.get("asset_id")
+    if asset_id is None:
+        return
+    data = (json.loads(line).get("data") or {})
+    with db.engine.begin() as conn:
+        if row[0] == "clamav":
+            conn.execute(text("""
+                INSERT INTO clam_results (asset_id, scan_path, scanned, infected, threats)
+                VALUES (:aid, :path, :scanned, :infected, CAST(:threats AS jsonb))
+                ON CONFLICT (asset_id) DO UPDATE
+                SET scan_path = EXCLUDED.scan_path, scanned = EXCLUDED.scanned,
+                    infected = EXCLUDED.infected, threats = EXCLUDED.threats, scanned_at = NOW()
+            """), {"aid": int(asset_id), "path": params.get("scan_path"), "scanned": int(data.get("scanned_files") or 0),
+                   "infected": int(data.get("infected_files") or 0), "threats": json.dumps(data.get("threats") or [])})
+        else:
+            conn.execute(text("DELETE FROM vuln_results WHERE asset_id = :id"), {"id": int(asset_id)})
+            rows = []
+            for m in data.get("vulnerabilities") or []:
+                v, a = m.get("vulnerability") or {}, m.get("artifact") or {}
+                fix = v.get("fix") or {}
+                rows.append({"asset_id": int(asset_id), "cve_id": (v.get("id") or "")[:50],
+                             "severity": (v.get("severity") or "Unknown")[:20], "package": (a.get("name") or "")[:255],
+                             "version": (a.get("version") or "")[:100],
+                             "fix_version": ((fix.get("versions") or [""])[0] or "")[:100],
+                             "fix_state": (fix.get("state") or "")[:50],
+                             "sbom_path": f"agent:{params.get('scan_path')}", "vuln_path": None})
+            if rows:
+                conn.execute(text("""
+                    INSERT INTO vuln_results
+                        (asset_id, cve_id, severity, package, version, fix_version, fix_state, sbom_path, vuln_path)
+                    VALUES (:asset_id, :cve_id, :severity, :package, :version, :fix_version, :fix_state, :sbom_path, :vuln_path)
+                """), rows)
+
+
+def _job_access(job_id: str, current_user: dict):
+    """The job row, after checking the caller may see that job's asset."""
+    if current_user.get("role") == "agent":
+        raise HTTPException(status_code=403, detail="Not available to agent tokens")
+    with db.engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT job_id, job_type, status, params->>'asset_id' FROM agent_jobs WHERE job_id = :id"
+        ), {"id": job_id}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="No such job")
+        if row[3] is not None:
+            asset_row = conn.execute(text("SELECT case_name FROM assets WHERE id = :id"), {"id": int(row[3])}).fetchone()
+            if asset_row and not user_can_access_case(current_user, asset_row[0]):
+                raise HTTPException(status_code=403, detail="Not assigned to this investigation")
+    return row
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, current_user: dict = Depends(get_current_user)):
+    """STOP for a running agent scan: the agent is told on its next progress
+    update (every few seconds) and stops its scanner."""
+    row = _job_access(job_id, current_user)
+    if row[2] not in ("PENDING", "RUNNING"):
+        return {"ok": True, "status": row[2]}
+    _cancel_requests.add(job_id)
+    return {"ok": True, "status": "CANCELLING"}
+
+
+@router.get("/jobs/active")
+async def active_job(asset_id: int, job_type: str, current_user: dict = Depends(get_current_user)):
+    """The scan of this type still running for this asset, if any, so a
+    reopened Evidence Window can re-attach to its progress."""
+    if current_user.get("role") == "agent":
+        raise HTTPException(status_code=403, detail="Not available to agent tokens")
+    with db.engine.connect() as conn:
+        asset_row = conn.execute(text("SELECT case_name FROM assets WHERE id = :id"), {"id": asset_id}).fetchone()
+        if asset_row and not user_can_access_case(current_user, asset_row[0]):
+            raise HTTPException(status_code=403, detail="Not assigned to this investigation")
+        rows = conn.execute(text("""
+            SELECT j.job_id, j.agent_id, j.params->>'scan_path', j.created_at, ar.hostname
+            FROM agent_jobs j LEFT JOIN agent_registrations ar ON ar.agent_id = j.agent_id
+            WHERE j.job_type = :t AND j.params->>'asset_id' = :aid AND j.status IN ('PENDING', 'RUNNING')
+            ORDER BY j.created_at DESC LIMIT 5
+        """), {"t": job_type, "aid": str(asset_id)}).fetchall()
+    # Only jobs this server process is still receiving (a restart loses them).
+    for r in rows:
+        if r[0] in _job_streams and r[0] not in _cancel_requests:
+            return {"job_id": r[0], "agent_id": r[1], "scan_path": r[2], "started": str(r[3]), "hostname": r[4]}
+    return None
 
 
 @router.post("/{agent_id}/jobs/{job_id}/complete")
@@ -405,6 +517,7 @@ async def complete_job(
         })
         conn.commit()
 
+    _cancel_requests.discard(job_id)
     if job_id in _job_subscribers:
         for q in _job_subscribers[job_id]:
             await q.put(None)

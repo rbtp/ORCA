@@ -575,6 +575,25 @@ Dispatch a job to a specific agent.
 
 ---
 
+### Agent scan progress, cancel, re-attach
+
+Agent `clamav` and `grype` jobs stream `{"type": "progress", "data": {...}}` events every ~5 s on `GET /api/agent/jobs/{job_id}/stream` (only the latest is kept for replay):
+
+- ClamAV: `phase` (`loading` | `scanning`), `elapsed`, `threads`, `found` / `found_bytes` (files listed so far), `walk_done`, `scanned`, `scanned_bytes`, `infected`, `errors`, `current` (`[{path, secs}]`), `defender`. Each threat is also sent at once as a `log` event `"THREAT: <path>: <signature> FOUND"`. `done` adds `errors`, `error_samples`, `unreadable_folders`, `data_scanned`, `elapsed`, `engine` (`clamd xN` or `clamscan` fallback).
+- Grype: `phase` (`syft` | `grype`), `elapsed`, `phase_elapsed`, `read_bytes`, `read_ops`, `catalogers_done`, `last_cataloger`, `last_log`, `target_files`, `target_bytes`, `target_counted`, `defender`. `done` carries `vulnerabilities` (deduplicated by CVE + package + version, trimmed to id/severity/fix + name/version/type/locations), `total`, `packages`, `elapsed`.
+
+When the agent sends `done`, the server saves the results (`clam_results` / `vuln_results` for the job's `asset_id`), so they're kept even if no browser is watching.
+
+### POST /api/agent/jobs/{job_id}/cancel
+
+Stops a running agent job. The agent learns it with its next progress update and stops its scanner; the job ends with an `error` event `"CANCELLED: ..."`. Response `{"ok": true, "status": "CANCELLING"}` (or the job's final status if already finished). `404` unknown job, `403` no access to the job's case or an agent token.
+
+### GET /api/agent/jobs/active?asset_id={id}&job_type={clamav|grype}
+
+The still-running job of that type for the asset (`{job_id, agent_id, scan_path, started, hostname}`) or `null`. Used by the Evidence Window to re-attach to a scan after it was closed or reloaded.
+
+---
+
 ### POST /api/agent/{agent_id}/browse
 
 Lists a folder on the agent's computer, for the BROWSE dialogs (image path, ClamAV target, vuln-scan path). Not available to agent tokens. If `asset_id` is given, the caller must have access to that asset's case.

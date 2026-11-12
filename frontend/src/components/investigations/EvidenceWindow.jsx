@@ -146,7 +146,7 @@ const LogCol = ({ logs, width = 270 }) => (
     <div style={{ flex: 1, overflowY: 'auto', padding: 4 }}>
       {logs.map((l, i) => (
         <div key={i} style={{ padding: '2px 5px', fontSize: 10, fontFamily: 'monospace', borderBottom: `1px solid #080808`,
-          color: l.type === 'error' ? C.red : l.type === 'success' ? C.green : C.greyDim }}>
+          color: l.type === 'error' ? C.red : l.type === 'success' ? C.green : l.type === 'warning' ? C.amber : C.greyDim }}>
           <span style={{ opacity: 0.5, marginRight: 5 }}>[{l.t}]</span>{l.m}
         </div>
       ))}
@@ -3359,6 +3359,117 @@ const MemoryAnalysisTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'U
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
+// LIVE PROGRESS OF AN AGENT SCAN (ClamAV / Syft+Grype)
+// ══════════════════════════════════════════════════════════════════════════════
+const fmtBytes = n => {
+  if (n == null) return '?';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i > 1 ? 1 : 0)} ${u[i]}`;
+};
+const fmtSecs = s => {
+  if (s == null || !isFinite(s)) return '?';
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+  return h ? `${h}h ${String(m).padStart(2, '0')}m` : m ? `${m}m ${String(x).padStart(2, '0')}s` : `${x}s`;
+};
+
+// Opens the agent job's event stream; returns the EventSource.
+const attachAgentJob = (jobId, onEvt, onLost) => {
+  const es = new EventSource(`${import.meta.env.VITE_API_URL}/api/agent/jobs/${jobId}/stream`);
+  es.onmessage = e => { try { onEvt(JSON.parse(e.data)); } catch {} };
+  es.onerror = () => { es.close(); onLost && onLost(); };
+  return es;
+};
+
+const AgentScanProgress = ({ kind, progress, lastEventAt, stopping }) => {
+  const [, tick] = useState(0);
+  useEffect(() => { const t = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(t); }, []);
+  if (!progress) return (
+    <div data-testid="scan-progress" style={{ padding: '10px 15px', borderBottom: `1px solid ${C.border}`, color: C.amber, fontFamily: 'monospace', fontSize: 11 }}>
+      Waiting for the agent to start the job...
+    </div>
+  );
+  const p = progress;
+  const silent = lastEventAt ? (Date.now() - lastEventAt) / 1000 : 0;
+  const elapsed = (p.elapsed || 0) + (lastEventAt ? silent : 0);
+  const box = { padding: '10px 15px', borderBottom: `1px solid ${C.border}`, background: 'rgba(0,255,65,0.03)', fontFamily: 'monospace', fontSize: 11, color: C.white, flexShrink: 0 };
+  const bar = pct => (
+    <div style={{ height: 6, background: '#111', border: `1px solid ${C.border}`, margin: '6px 0' }}>
+      <div style={{ height: '100%', width: `${Math.min(100, pct)}%`, background: C.green, transition: 'width 1s' }} />
+    </div>
+  );
+  const stale = (<>
+    {p.defender && (
+      <div style={{ color: C.amber, marginTop: 4, fontSize: 10 }}>
+        Windows Defender on the agent computer is also scanning every file this scan opens, which usually makes it several times slower.
+        Add a Defender exclusion for the scanned drive while you scan (see the log for the command); remove it afterwards.
+      </div>
+    )}
+    {silent > 60 && <div style={{ color: C.red, marginTop: 4 }}>No update from the agent for {fmtSecs(silent)}: is the agent computer asleep, offline or was the agent restarted?</div>}
+  </>);
+  const head = (txt) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', color: C.green, letterSpacing: 1 }}>
+      <span>{stopping ? '■ STOPPING... ' : '◉ '}{txt}</span><span style={{ color: C.grey }}>ELAPSED {fmtSecs(elapsed)}</span>
+    </div>
+  );
+
+  if (kind === 'clamav') {
+    if (p.phase === 'loading') return <div data-testid="scan-progress" style={box}>{head('LOADING CLAMAV SIGNATURES')}<div style={{ color: C.grey, marginTop: 4 }}>{p.message}</div>{stale}</div>;
+    const total = p.walk_done ? p.found : null;
+    const pct = total ? (100 * p.scanned / Math.max(1, total)) : null;
+    const rate = p.elapsed > 0 ? p.scanned / p.elapsed : 0;
+    const eta = total && rate > 0 ? (total - p.scanned) / rate : null;
+    return (
+      <div data-testid="scan-progress" style={box}>
+        {head(`SCANNING WITH CLAMAV (${p.threads} at a time)`)}
+        {pct != null ? bar(pct) : bar(0)}
+        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+          <span>FILES <b>{(p.scanned || 0).toLocaleString()}</b> / {total != null ? total.toLocaleString() : `${(p.found || 0).toLocaleString()}+ (still listing)`}{pct != null ? ` (${pct.toFixed(1)}%)` : ''}</span>
+          <span>DATA {fmtBytes(p.scanned_bytes)}{p.walk_done ? ` / ${fmtBytes(p.found_bytes)}` : ''}</span>
+          <span style={{ color: p.infected ? C.red : C.green }}>THREATS {p.infected || 0}</span>
+          <span style={{ color: p.errors ? C.amber : C.greyDim }} title="Files that could not be read: locked, access denied, or blocked by Windows Defender">UNREADABLE {p.errors || 0}</span>
+          <span style={{ color: C.grey }}>{rate ? `${Math.round(rate * 60).toLocaleString()} files/min` : ''}</span>
+          {eta != null && <span style={{ color: C.grey }}>~{fmtSecs(eta)} left</span>}
+        </div>
+        {(p.current || []).length > 0 && (
+          <div style={{ marginTop: 6, color: C.greyDim, fontSize: 10 }}>
+            {(p.current || []).slice(0, 4).map((c, i) => (
+              <div key={i} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: c.secs > 30 ? C.amber : C.greyDim }}>
+                ▸ {c.path}{c.secs != null ? `  (${c.secs}s)` : ''}
+              </div>
+            ))}
+            {(p.current || []).some(c => c.secs > 30) && (
+              <div style={{ color: C.greyDim, marginTop: 2 }}>Installers and archives are unpacked and scanned inside, so some files take up to 2 minutes; the others keep going meanwhile.</div>
+            )}
+          </div>
+        )}
+        {stale}
+      </div>
+    );
+  }
+
+  // Syft + Grype
+  const syft = p.phase === 'syft';
+  return (
+    <div data-testid="scan-progress" style={box}>
+      {head(syft ? 'STEP 1/2 SYFT: FINDING INSTALLED SOFTWARE' : 'STEP 2/2 GRYPE: MATCHING SOFTWARE AGAINST THE VULNERABILITY DATABASE')}
+      <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginTop: 6 }}>
+        {syft && <span>TARGET {p.target_files != null ? `${p.target_files.toLocaleString()}${p.target_counted ? '' : '+'} files, ${fmtBytes(p.target_bytes)}` : 'counting...'}</span>}
+        {p.read_bytes != null && <span title="Bytes the tool has read from disk so far: shows it is working">READ {fmtBytes(p.read_bytes)} ({(p.read_ops || 0).toLocaleString()} reads)</span>}
+        {syft && <span>CATALOGERS DONE {p.catalogers_done || 0}{p.last_cataloger ? ` (last: ${p.last_cataloger})` : ''}</span>}
+        <span style={{ color: C.grey }}>THIS STEP {fmtSecs(p.phase_elapsed)}</span>
+      </div>
+      {syft && (p.catalogers_done || 0) === 0 && (
+        <div style={{ color: C.greyDim, marginTop: 4, fontSize: 10 }}>Syft first indexes every file in the target (no count is reported during this stage), then runs its catalogers. On a whole Windows disk this stage alone can take well over 20 minutes; the READ figure shows it is working.</div>
+      )}
+      {p.last_log && <div style={{ color: C.greyDim, marginTop: 4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.last_log}</div>}
+      {stale}
+    </div>
+  );
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
 // KNOWN MALWARE SIGNATURES TAB
 // ══════════════════════════════════════════════════════════════════════════════
 const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode = 'UNKNOWN' }) => {
@@ -3377,6 +3488,11 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
   const evtSourceRef = useRef(null);
   const [agents, setAgents]               = useState([]);
   const [selectedAgent, setSelectedAgent] = useState(null);
+  const [agentJob, setAgentJob]           = useState(null);   // job id of a running agent scan
+  const [progress, setProgress]           = useState(null);
+  const [lastEventAt, setLastEventAt]     = useState(null);
+  const [stopping, setStopping]           = useState(false);
+  const [scanInfo, setScanInfo]           = useState(null);   // errors / time of the last agent scan
 
   useEffect(() => {
     if (!assetId) return;
@@ -3406,9 +3522,77 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
       .catch(() => {});
   }, [analysisMode]);
 
+  const endAgentScan = () => {
+    try { evtSourceRef.current?.close(); } catch {} evtSourceRef.current = null;
+    setIsScanning(false); setAgentJob(null); setProgress(null); setStopping(false);
+  };
+
+  // Follow an agent ClamAV job (new, or still running when the window opens).
+  const followAgentJob = (jobId, reattached = false) => {
+    setAgentJob(jobId); setIsScanning(true); setLastEventAt(Date.now());
+    let lostOnce = false;
+    const open = () => {
+      evtSourceRef.current = attachAgentJob(jobId, evt => {
+        setLastEventAt(Date.now());
+        if (evt.type === 'progress') {
+          setProgress(evt.data);
+          if (evt.data.phase === 'scanning') { setScanned(evt.data.scanned || 0); setInfected(evt.data.infected || 0); }
+        } else if (evt.type === 'log') {
+          const m = evt.data.message || String(evt.data);
+          if (m.startsWith('THREAT: ')) {
+            const t = m.slice(8);
+            setThreats(prev => prev.includes(t) ? prev : [...prev, t]);
+            addLog(m, 'error');
+          } else addLog(m);
+        } else if (evt.type === 'error') {
+          const m = evt.data.message || String(evt.data);
+          addLog(m.startsWith('CANCELLED') ? m : 'SCAN FAILED: ' + m, m.startsWith('CANCELLED') ? 'warning' : 'error');
+          endAgentScan();
+        } else if (evt.type === 'done') {
+          const d = evt.data;
+          setScanned(d.scanned_files); setInfected(d.infected_files); setThreats(d.threats || []);
+          setScanInfo({ errors: d.errors || 0, samples: d.error_samples || [], elapsed: d.elapsed, engine: d.engine, data: d.data_scanned, folders: d.unreadable_folders || 0 });
+          addLog(`SCAN COMPLETE — Scanned: ${d.scanned_files}, Infected: ${d.infected_files}${d.errors ? `, unreadable: ${d.errors}` : ''}${d.elapsed != null ? `, ${fmtSecs(d.elapsed)}` : ''}`,
+            d.infected_files > 0 ? 'error' : 'success');
+          if (onSummaryUpdate) onSummaryUpdate('av', { scanned: d.scanned_files, infected: d.infected_files });
+          endAgentScan();
+        }
+      }, () => {
+        // The browser's connection dropped (sleep, network): the scan goes on
+        // on the agent, so reconnect once and replay.
+        if (!lostOnce) { lostOnce = true; addLog('Connection to the server dropped; reconnecting...', 'warning'); setTimeout(open, 3000); }
+        else { addLog('Lost the connection to the server. The scan keeps running on the agent; reopen this window to follow it.', 'error'); setIsScanning(false); }
+      });
+    };
+    if (reattached) addLog(`Re-attached to the ClamAV scan still running on the agent (job ${jobId}).`);
+    open();
+  };
+
+  // Re-attach to a scan still running for this asset (window was closed/reopened).
+  useEffect(() => {
+    if (!assetId) return;
+    fetch(`${import.meta.env.VITE_API_URL}/api/agent/jobs/active?asset_id=${assetId}&job_type=clamav`, { headers: getAuth() })
+      .then(r => r.ok ? r.json() : null)
+      .then(j => {
+        if (!j || !j.job_id || evtSourceRef.current) return;
+        setSelectedAgent(j.agent_id); if (j.scan_path) setScanPath(j.scan_path);
+        setThreats([]); followAgentJob(j.job_id, true);
+      }).catch(() => {});
+    return () => { try { evtSourceRef.current?.close(); } catch {} evtSourceRef.current = null; };
+  }, [assetId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const stopAgentScan = async () => {
+    if (!agentJob) return stopScan();
+    setStopping(true);
+    addLog('Stopping the scan on the agent...');
+    try {
+      await fetch(`${import.meta.env.VITE_API_URL}/api/agent/jobs/${agentJob}/cancel`, { method: 'POST', headers: getAuth() });
+    } catch (e) { addLog('STOP failed: ' + e.message, 'error'); setStopping(false); }
+  };
+
   const handleDispatchToAgent = async () => {
     if (!scanPath.trim()) { addLog('Scan path required.', 'error'); return; }
-    setIsScanning(true); setThreats([]); setScanned(null); setInfected(null); setLogs([]);
+    setIsScanning(true); setThreats([]); setScanned(null); setInfected(null); setLogs([]); setProgress(null); setScanInfo(null);
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/agent/dispatch`, {
         method: 'POST', headers: getAuth(),
@@ -3420,27 +3604,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
       });
       const { job_id } = await r.json();
       addLog(`ClamAV job dispatched to agent: ${job_id}`);
-      const evtSource = new EventSource(
-        `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream`
-      );
-      evtSourceRef.current = evtSource;
-      evtSource.onmessage = (e) => {
-        try {
-          const evt = JSON.parse(e.data);
-          if (evt.type === 'log') addLog(evt.data.message || String(evt.data));
-          else if (evt.type === 'error') { addLog(evt.data.message || String(evt.data), 'error'); setIsScanning(false); evtSource.close(); evtSourceRef.current = null; }
-          else if (evt.type === 'done') {
-            setScanned(evt.data.scanned_files); setInfected(evt.data.infected_files);
-            setThreats(evt.data.threats || []);
-            addLog(`SCAN COMPLETE — Scanned: ${evt.data.scanned_files}, Infected: ${evt.data.infected_files}`,
-              evt.data.infected_files > 0 ? 'error' : 'success');
-            setIsScanning(false);
-            if (onSummaryUpdate) onSummaryUpdate('av', { scanned: evt.data.scanned_files, infected: evt.data.infected_files });
-            evtSource.close(); evtSourceRef.current = null;
-          }
-        } catch {}
-      };
-      evtSource.onerror = () => { addLog('Agent connection lost.', 'error'); setIsScanning(false); evtSource.close(); evtSourceRef.current = null; };
+      followAgentJob(job_id);
     } catch (e) { addLog('DISPATCH_ERROR: ' + e.message, 'error'); setIsScanning(false); }
   };
 
@@ -3535,7 +3699,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
             <input type="checkbox" checked={remove} onChange={e => setRemove(e.target.checked)} style={{ marginRight: 4 }} /> REMOVE_THREATS
           </label>
           {isScanning
-            ? <button onClick={stopScan} style={{ ...Btn, background: C.red, color: C.white }}>■ STOP_SCAN</button>
+            ? <button onClick={stopAgentScan} disabled={stopping} title={agentJob ? 'Stops the scan on the agent computer' : undefined} style={{ ...Btn, background: C.red, color: C.white, opacity: stopping ? 0.6 : 1 }}>{stopping ? 'STOPPING...' : '■ STOP_SCAN'}</button>
             : analysisMode === 'DEAD_DISK_LOCAL'
               ? <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                   <select value={selectedAgent || ''} onChange={e => setSelectedAgent(e.target.value)}
@@ -3578,11 +3742,21 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
         )}
       </div>
 
+      {agentJob && isScanning && <AgentScanProgress kind="clamav" progress={progress} lastEventAt={lastEventAt} stopping={stopping} />}
+      {!isScanning && scanInfo && (scanInfo.errors > 0 || scanInfo.folders > 0) && (
+        <details style={{ padding: '6px 15px', borderBottom: `1px solid ${C.border}`, color: C.amber, fontFamily: 'monospace', fontSize: 10, flexShrink: 0 }}>
+          <summary style={{ cursor: 'pointer' }}>
+            {scanInfo.errors} file(s){scanInfo.folders ? ` and ${scanInfo.folders} folder(s)` : ''} could not be read (locked, access denied, or blocked by Windows Defender: add a Defender exclusion for a mounted image's drive)
+          </summary>
+          {scanInfo.samples.map((s, i) => <div key={i} style={{ color: C.greyDim, wordBreak: 'break-all' }}>{s}</div>)}
+        </details>
+      )}
+
       {/* Summary bar */}
       {scanned !== null && (
         <div style={{ display: 'flex', background: '#0a0a0a', borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
           {[['SCANNED_FILES', scanned, C.white], ['INFECTED', infected, infected > 0 ? C.red : C.green],
-            ['STATUS', infected > 0 ? '⚠ THREATS_DETECTED' : '✓ CLEAN', infected > 0 ? C.red : C.green]
+            ['STATUS', isScanning ? (infected > 0 ? '⚠ SCANNING, THREATS FOUND' : 'SCANNING...') : infected > 0 ? '⚠ THREATS_DETECTED' : '✓ CLEAN', infected > 0 ? C.red : isScanning ? C.amber : C.green]
           ].map(([l, v, col]) => (
             <div key={l} style={{ padding: '10px 20px', borderRight: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
               <span style={{ color: C.greyDim, fontSize: 9, letterSpacing: 1 }}>{l}</span>
@@ -3604,7 +3778,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
           <div style={{ flex: 1, overflowY: 'auto', padding: 8 }}>
             {filteredThreats.length === 0 ? (
               <div style={{ color: C.greyDim, fontSize: 12, padding: 10 }}>
-                {isScanning ? 'SCANNING IN PROGRESS...' : scanned !== null ? 'NO_THREATS_DETECTED — System clean.' : 'AWAITING_SCAN_EXECUTION — Configure target and press RUN_CLAMSCAN.'}
+                {isScanning ? (agentJob ? 'SCANNING — no threats found so far (progress above).' : 'SCANNING IN PROGRESS...') : scanned !== null ? 'NO_THREATS_DETECTED — System clean.' : 'AWAITING_SCAN_EXECUTION — Configure target and press RUN_CLAMSCAN.'}
               </div>
             ) : filteredThreats.map((t, i) => (
               <div key={i} style={{ padding: '6px 10px', borderBottom: `1px solid #0a0a0a`, display: 'flex', alignItems: 'flex-start' }}>
@@ -3638,6 +3812,10 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
   const evtSourceRef                    = useRef(null);
   const [agents, setAgents]             = useState([]);
   const [selectedAgent, setSelectedAgent] = useState(null);
+  const [agentJob, setAgentJob]         = useState(null);
+  const [progress, setProgress]         = useState(null);
+  const [lastEventAt, setLastEventAt]   = useState(null);
+  const [stopping, setStopping]         = useState(false);
 
   const SEV_ORDER = { Critical: 0, High: 1, Medium: 2, Low: 3, Unknown: 4 };
   const handleSort = col => {
@@ -3660,9 +3838,84 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
       .catch(() => {});
   }, [analysisMode]);
 
+  // Results of an agent scan are saved server-side when the agent finishes;
+  // this loads them into the table (also used on mount, below).
+  const loadStoredVulns = () =>
+    fetch(`${import.meta.env.VITE_API_URL}/api/assets/${assetId}/vuln-results`, { headers: getAuth() })
+      .then(r => r.ok ? r.json() : [])
+      .then(data => {
+        setVulns(data);
+        const counts = { total: data.length, critical: 0, high: 0, medium: 0, low: 0 };
+        data.forEach(v => {
+          const s = (v.severity || '').toUpperCase();
+          if (s === 'CRITICAL') counts.critical++;
+          else if (s === 'HIGH') counts.high++;
+          else if (s === 'MEDIUM') counts.medium++;
+          else if (s === 'LOW') counts.low++;
+        });
+        setSummary(counts);
+        if (onScanComplete) onScanComplete(counts);
+        return counts;
+      })
+      .catch(() => null);
+
+  const endAgentScan = () => {
+    try { evtSourceRef.current?.close(); } catch {} evtSourceRef.current = null;
+    setIsScanning(false); setAgentJob(null); setProgress(null); setStopping(false);
+  };
+
+  const followAgentJob = (jobId, reattached = false) => {
+    setAgentJob(jobId); setIsScanning(true); setLastEventAt(Date.now());
+    let lostOnce = false;
+    const open = () => {
+      evtSourceRef.current = attachAgentJob(jobId, evt => {
+        setLastEventAt(Date.now());
+        if (evt.type === 'progress') setProgress(evt.data);
+        else if (evt.type === 'log') addLog(evt.data.message || String(evt.data));
+        else if (evt.type === 'error') {
+          const m = evt.data.message || String(evt.data);
+          addLog(m.startsWith('CANCELLED') ? m : 'SCAN FAILED: ' + m, m.startsWith('CANCELLED') ? 'warning' : 'error');
+          endAgentScan();
+        } else if (evt.type === 'done') {
+          const d = evt.data;
+          endAgentScan();
+          loadStoredVulns().then(c => addLog(
+            `GRYPE COMPLETE — ${c ? c.total : d.total} vulnerabilities in ${d.packages ?? '?'} packages${d.elapsed != null ? `, ${fmtSecs(d.elapsed)}` : ''}`,
+            (c ? c.total : d.total) > 0 ? 'error' : 'success'));
+        }
+      }, () => {
+        if (!lostOnce) { lostOnce = true; addLog('Connection to the server dropped; reconnecting...', 'warning'); setTimeout(open, 3000); }
+        else { addLog('Lost the connection to the server. The scan keeps running on the agent; reopen this window to follow it.', 'error'); setIsScanning(false); }
+      });
+    };
+    if (reattached) addLog(`Re-attached to the vulnerability scan still running on the agent (job ${jobId}).`);
+    open();
+  };
+
+  useEffect(() => {
+    if (!assetId) return;
+    fetch(`${import.meta.env.VITE_API_URL}/api/agent/jobs/active?asset_id=${assetId}&job_type=grype`, { headers: getAuth() })
+      .then(r => r.ok ? r.json() : null)
+      .then(j => {
+        if (!j || !j.job_id || evtSourceRef.current) return;
+        setSelectedAgent(j.agent_id); if (j.scan_path) setScanPath(j.scan_path);
+        followAgentJob(j.job_id, true);
+      }).catch(() => {});
+    return () => { try { evtSourceRef.current?.close(); } catch {} evtSourceRef.current = null; };
+  }, [assetId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const stopAgentScan = async () => {
+    if (!agentJob) return stopScan();
+    setStopping(true);
+    addLog('Stopping the scan on the agent...');
+    try {
+      await fetch(`${import.meta.env.VITE_API_URL}/api/agent/jobs/${agentJob}/cancel`, { method: 'POST', headers: getAuth() });
+    } catch (e) { addLog('STOP failed: ' + e.message, 'error'); setStopping(false); }
+  };
+
   const handleDispatchToAgent = async () => {
     if (!scanPath.trim()) { addLog('SCAN_PATH required', 'error'); return; }
-    setIsScanning(true); setLogs([]); setSummary(null);
+    setIsScanning(true); setLogs([]); setSummary(null); setProgress(null);
     addLog('Dispatching Grype scan to agent...');
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/agent/dispatch`, {
@@ -3675,34 +3928,7 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
       });
       const { job_id } = await r.json();
       addLog(`Grype job dispatched: ${job_id}`);
-      const evtSource = new EventSource(
-        `${import.meta.env.VITE_API_URL}/api/agent/jobs/${job_id}/stream`
-      );
-      evtSourceRef.current = evtSource;
-      evtSource.onmessage = (e) => {
-        try {
-          const evt = JSON.parse(e.data);
-          if (evt.type === 'log') addLog(evt.data.message || String(evt.data));
-          else if (evt.type === 'error') { addLog(evt.data.message || String(evt.data), 'error'); setIsScanning(false); evtSource.close(); evtSourceRef.current = null; }
-          else if (evt.type === 'done') {
-            const vulnData = evt.data.vulnerabilities || [];
-            const counts = { total: vulnData.length, critical: 0, high: 0, medium: 0, low: 0 };
-            vulnData.forEach(m => {
-              const s = ((m.vulnerability?.severity) || '').toLowerCase();
-              if (s === 'critical') counts.critical++;
-              else if (s === 'high') counts.high++;
-              else if (s === 'medium') counts.medium++;
-              else if (s === 'low') counts.low++;
-            });
-            setSummary(counts);
-            if (onScanComplete) onScanComplete(counts);
-            addLog(`GRYPE COMPLETE — ${vulnData.length} vulnerabilities found`, vulnData.length > 0 ? 'error' : 'success');
-            setIsScanning(false);
-            evtSource.close(); evtSourceRef.current = null;
-          }
-        } catch {}
-      };
-      evtSource.onerror = () => { addLog('Agent connection lost.', 'error'); setIsScanning(false); evtSource.close(); evtSourceRef.current = null; };
+      followAgentJob(job_id);
     } catch (e) { addLog('DISPATCH_ERROR: ' + e.message, 'error'); setIsScanning(false); }
   };
 
@@ -3825,7 +4051,7 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
                 style={{ marginRight: 4 }} /> OFFLINE_DB
             </label>
             {isScanning
-              ? <button onClick={stopScan} style={{ ...Btn, background: C.red, color: C.white }}>■ STOP</button>
+              ? <button onClick={stopAgentScan} disabled={stopping} title={agentJob ? 'Stops the scan on the agent computer' : undefined} style={{ ...Btn, background: C.red, color: C.white, opacity: stopping ? 0.6 : 1 }}>{stopping ? 'STOPPING...' : '■ STOP'}</button>
               : analysisMode === 'DEAD_DISK_LOCAL'
                 ? <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     <select value={selectedAgent || ''} onChange={e => setSelectedAgent(e.target.value)}
@@ -3848,6 +4074,8 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
           </div>
         )}
       </div>
+
+      {agentJob && isScanning && <AgentScanProgress kind="grype" progress={progress} lastEventAt={lastEventAt} stopping={stopping} />}
 
       {/* Summary bar */}
       {summary && (
@@ -3894,7 +4122,7 @@ const VulnScanTab = ({ assetId, analysisMode, collab, onScanComplete }) => {
           <div style={{ flex: 1, overflowY: 'auto' }}>
             {filtered.length === 0 ? (
               <div style={{ color: C.greyDim, fontSize: 12, padding: 20 }}>
-                {isScanning ? 'SCAN IN PROGRESS...' : vulns.length > 0 ? 'NO_RESULTS_MATCH_FILTER' : 'AWAITING_SCAN — Configure path and press RUN_VULN_SCAN'}
+                {isScanning ? (agentJob ? 'SCANNING — results appear here when Grype finishes (progress above).' : 'SCAN IN PROGRESS...') : vulns.length > 0 ? 'NO_RESULTS_MATCH_FILTER' : 'AWAITING_SCAN — Configure path and press RUN_VULN_SCAN'}
               </div>
             ) : (
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'monospace' }}>

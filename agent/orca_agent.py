@@ -15,6 +15,14 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
+class _ClamdUnavailable(Exception):
+    pass
+
+
+class _ScanCancelled(Exception):
+    pass
+
+
 class OrcaAgent:
     def __init__(self, config):
         self.server = config["server_url"].rstrip("/")
@@ -121,15 +129,82 @@ class OrcaAgent:
     def _stream_line(self, job_id, line_type, data):
         line = json.dumps({"type": line_type, "data": data})
         try:
-            requests.post(
+            r = requests.post(
                 f"{self.server}/api/agent/{self.agent_id}/jobs/{job_id}/stream",
                 data=line + "\n",
                 headers={**self.headers, "Content-Type": "application/x-ndjson"},
                 verify=False,
-                timeout=10,
+                timeout=30,
             )
+            # The server answers {"cancel": true} once the analyst pressed STOP.
+            try:
+                if r.ok and r.json().get("cancel"):
+                    self._cancelled_jobs().add(job_id)
+            except ValueError:
+                pass
         except Exception as e:
             print(f"[ORCA Agent] Stream error: {e}")
+
+    def _cancelled_jobs(self):
+        if not hasattr(self, "_cancelled"):
+            self._cancelled = set()
+        return self._cancelled
+
+    def _is_cancelled(self, job_id):
+        return job_id in self._cancelled_jobs()
+
+    @staticmethod
+    def _iter_files(root, errors):
+        """Yields (path, size) for every file under root. Never follows reparse
+        points (junctions/symlinks): on a mounted image they point at the
+        ANALYST'S OWN C: (e.g. "Application Data" -> C:\\Users\\..\\Roaming),
+        and on a live disk some loop forever. Unreadable folders are counted
+        in errors["dirs"]."""
+        if os.path.isfile(root):
+            try:
+                yield root, os.path.getsize(root)
+            except OSError:
+                yield root, 0
+            return
+        stack = [root]
+        while stack:
+            d = stack.pop()
+            try:
+                it = os.scandir(d)
+            except OSError:
+                errors["dirs"] = errors.get("dirs", 0) + 1
+                continue
+            with it:
+                for e in it:
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                        if getattr(st, "st_file_attributes", 0) & 0x400:   # FILE_ATTRIBUTE_REPARSE_POINT
+                            continue
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        else:
+                            yield e.path, st.st_size
+                    except OSError:
+                        errors["dirs"] = errors.get("dirs", 0) + 1
+
+    @staticmethod
+    def _proc_io(proc):
+        """(bytes read, read operations) by a child process so far (Windows), else None."""
+        if os.name != "nt":
+            return None
+        import ctypes
+
+        class IO(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+        c = IO()
+        try:
+            if ctypes.windll.kernel32.GetProcessIoCounters(ctypes.c_void_p(int(proc._handle)), ctypes.byref(c)):
+                return c.ReadTransferCount, c.ReadOperationCount
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _require_path(path):
@@ -548,41 +623,223 @@ class OrcaAgent:
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
+    PROGRESS_EVERY = 5  # seconds between progress events
+
     def _run_clamav(self, job_id, params):
+        """Scans with clamd (signatures loaded once, several files at a time)
+        fed file by file from here, so the UI gets live progress: files done /
+        found, current files, threats as they're found. clamscan.exe (one
+        thread, silent until the end) is only the fallback."""
         clamav_dir = os.path.join(self.bin_dir, "clamav")
+        path = self._require_path(params["scan_path"])
+        threads = int(params.get("threads") or min(8, max(2, (os.cpu_count() or 4) - 2)))
+        clamd_exe = os.path.join(clamav_dir, "clamd.exe")
+        if os.path.exists(clamd_exe):
+            try:
+                return self._clamav_clamd(job_id, clamav_dir, path, threads)
+            except _ClamdUnavailable as e:
+                self._stream_line(job_id, "log", {"message": f"clamd unavailable ({e}); falling back to clamscan (single-threaded)"})
+        return self._clamav_clamscan(job_id, clamav_dir, path)
+
+    def _start_clamd(self, clamav_dir, threads, job_id):
+        s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+        work = tempfile.mkdtemp(prefix="orca_clamd_")
+        conf = os.path.join(work, "clamd.conf")
+        with open(conf, "w", encoding="utf-8") as f:
+            f.write(f"TCPSocket {port}\nTCPAddr 127.0.0.1\nDatabaseDirectory {clamav_dir}\n"
+                    f"MaxThreads {threads}\nMaxQueue {threads * 4 + 10}\nForeground yes\n"
+                    "ReadTimeout 900\nCommandReadTimeout 30\nIdleTimeout 900\n")
+        log = open(os.path.join(work, "clamd.log"), "w", encoding="utf-8", errors="replace")
+        proc = subprocess.Popen([os.path.join(clamav_dir, "clamd.exe"), f"--config-file={conf}"],
+                                stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd=clamav_dir,
+                                creationflags=0x08000000 if os.name == "nt" else 0)
+        t0 = time.time()
+        while True:
+            if proc.poll() is not None:
+                log.close()
+                raise _ClamdUnavailable("clamd exited: " + open(log.name, encoding="utf-8", errors="replace").read()[-400:])
+            try:
+                if self._clamd_cmd(port, "PING", 5) == "PONG":
+                    return proc, port, log, work
+            except OSError:
+                pass
+            if time.time() - t0 > 300:
+                proc.kill(); log.close()
+                raise _ClamdUnavailable("clamd did not start within 300s")
+            if self._is_cancelled(job_id):
+                proc.kill(); log.close()
+                raise _ScanCancelled()
+            time.sleep(0.5)
+
+    @staticmethod
+    def _clamd_cmd(port, command, timeout=900):
+        s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        try:
+            s.sendall(b"z" + command.encode("utf-8") + b"\0")
+            buf = b""
+            while not buf.endswith(b"\0"):
+                d = s.recv(65536)
+                if not d:
+                    break
+                buf += d
+            return buf.rstrip(b"\0").decode("utf-8", "replace")
+        finally:
+            s.close()
+
+    def _clamav_clamd(self, job_id, clamav_dir, path, threads):
+        import queue as _queue
+        t0 = time.time()
+        self._stream_line(job_id, "progress", {"phase": "loading", "message": "Loading ClamAV signatures (about 15-60 s)...",
+                                               "elapsed": 0, "threads": threads})
+        defender = bool(self._defender_notice(job_id, path, ["clamd.exe"]))
+        try:
+            proc, port, log, work = self._start_clamd(clamav_dir, threads, job_id)
+        except _ScanCancelled:
+            raise RuntimeError("CANCELLED: scan stopped by the analyst")
+        st = {"found": 0, "found_bytes": 0, "walk_done": False, "scanned": 0, "scanned_bytes": 0,
+              "infected": 0, "errors": 0, "error_samples": [], "threats": [], "new_threats": []}
+        errs = {}
+        current = {}
+        lock = threading.Lock()
+        q = _queue.Queue(maxsize=5000)
+        stop = threading.Event()
+
+        def walker():
+            try:
+                for p, size in self._iter_files(path, errs):
+                    if stop.is_set():
+                        return
+                    with lock:
+                        st["found"] += 1; st["found_bytes"] += size
+                    while not stop.is_set():
+                        try:
+                            q.put((p, size), timeout=1)
+                            break
+                        except _queue.Full:
+                            pass
+            finally:
+                st["walk_done"] = True
+
+        def worker():
+            me = threading.get_ident()
+            while not stop.is_set():
+                try:
+                    p, size = q.get(timeout=1)
+                except _queue.Empty:
+                    if st["walk_done"] and q.empty():
+                        return
+                    continue
+                with lock:
+                    current[me] = (p, time.time())
+                try:
+                    r = self._clamd_cmd(port, "SCAN " + p)
+                except OSError as e:
+                    r = f"{p}: {e} ERROR"
+                with lock:
+                    current.pop(me, None)
+                    st["scanned"] += 1; st["scanned_bytes"] += size
+                    if r.endswith(" FOUND"):
+                        st["infected"] += 1; st["threats"].append(r); st["new_threats"].append(r)
+                    elif r.endswith("ERROR"):
+                        st["errors"] += 1
+                        if len(st["error_samples"]) < 20:
+                            st["error_samples"].append(r)
+
+        tw = threading.Thread(target=walker, daemon=True); tw.start()
+        workers = [threading.Thread(target=worker, daemon=True) for _ in range(threads)]
+        for w in workers:
+            w.start()
+        cancelled = False
+        try:
+            while any(w.is_alive() for w in workers):
+                for w in workers:
+                    w.join(timeout=self.PROGRESS_EVERY / len(workers))
+                if proc.poll() is not None:
+                    raise RuntimeError("clamd stopped unexpectedly: " + open(log.name, encoding="utf-8", errors="replace").read()[-400:])
+                now = time.time()
+                with lock:
+                    new, st["new_threats"] = st["new_threats"], []
+                    snap = {k: st[k] for k in ("found", "found_bytes", "walk_done", "scanned", "scanned_bytes", "infected", "errors")}
+                    cur = sorted(((round(now - t), p) for p, t in current.values()), reverse=True)[:threads]
+                for t in new:
+                    self._stream_line(job_id, "log", {"message": "THREAT: " + t})
+                self._stream_line(job_id, "progress", {"phase": "scanning", "elapsed": round(now - t0), "threads": threads,
+                                                       "defender": defender,
+                                                       "current": [{"path": p, "secs": s} for s, p in cur], **snap})
+                if self._is_cancelled(job_id):
+                    cancelled = True
+                    break
+        finally:
+            stop.set()
+            if cancelled:
+                proc.kill()   # files still being scanned don't matter any more
+            else:
+                try:
+                    self._clamd_cmd(port, "SHUTDOWN", 5)
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            log.close()
+            shutil.rmtree(work, ignore_errors=True)
+        for t in st["new_threats"]:
+            self._stream_line(job_id, "log", {"message": "THREAT: " + t})
+        if cancelled:
+            raise RuntimeError(f"CANCELLED: scan stopped by the analyst after {st['scanned']} files "
+                               f"({st['infected']} threats found so far: {'; '.join(st['threats'][:5])})")
+        self._stream_line(job_id, "done", {
+            "scanned_files": st["scanned"], "infected_files": st["infected"], "threats": st["threats"],
+            "errors": st["errors"], "error_samples": st["error_samples"], "unreadable_folders": errs.get("dirs", 0),
+            "data_scanned": st["scanned_bytes"], "elapsed": round(time.time() - t0), "engine": f"clamd x{threads}",
+        })
+
+    def _clamav_clamscan(self, job_id, clamav_dir, path):
         exe = os.path.join(clamav_dir, "clamscan.exe")
         if not os.path.exists(exe):
             raise RuntimeError(f"clamscan.exe not found at {exe}")
-        path = self._require_path(params["scan_path"])
-        # --database explicit, not left to clamscan's own default search --
-        # main.cvd/daily.cld live in this same bundled folder, not
-        # wherever clamscan would otherwise look by default.
-        cmd = [exe, "-r", "--infected", f"--database={clamav_dir}", path]
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"
-        )
-        scanned, infected, threats = 0, 0, []
+        t0 = time.time()
+        # Every file's result line is read (no --infected) to count progress;
+        # stderr merged so a full, unread stderr pipe can't stall clamscan.
+        cmd = [exe, "-r", f"--database={clamav_dir}", path]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=0x08000000 if os.name == "nt" else 0)
+        scanned, infected, errors, threats, last, cur = 0, 0, 0, [], 0, ""
+        summary = False
         for line in proc.stdout:
             line = line.strip()
-            self._stream_line(job_id, "log", {"message": line})
-            if "Infected files:" in line:
-                try:
-                    infected = int(line.split(":")[1].strip())
-                except Exception:
-                    pass
-            if "Scanned files:" in line:
-                try:
-                    scanned = int(line.split(":")[1].strip())
-                except Exception:
-                    pass
-            if "FOUND" in line:
-                threats.append(line)
+            if line.startswith("----------- SCAN SUMMARY"):
+                summary = True
+            if summary:
+                if line:
+                    self._stream_line(job_id, "log", {"message": line})
+                if line.startswith("Scanned files:"):
+                    scanned = int(line.split(":")[1])
+                continue
+            if line.endswith(" FOUND"):
+                infected += 1; threats.append(line)
+                self._stream_line(job_id, "log", {"message": "THREAT: " + line})
+            elif line.endswith(": OK") or line.endswith(": Empty file"):
+                cur = line.rsplit(":", 1)[0]
+            elif line.endswith("ERROR") or "Can't" in line:
+                errors += 1
+            else:
+                continue
+            scanned += 1
+            if time.time() - last >= self.PROGRESS_EVERY:
+                last = time.time()
+                self._stream_line(job_id, "progress", {"phase": "scanning", "elapsed": round(last - t0), "threads": 1,
+                                                       "scanned": scanned, "infected": infected, "errors": errors,
+                                                       "walk_done": False, "found": None,
+                                                       "current": [{"path": cur, "secs": None}]})
+                if self._is_cancelled(job_id):
+                    proc.kill()
+                    raise RuntimeError(f"CANCELLED: scan stopped by the analyst after {scanned} files")
         proc.wait()
-        self._stream_line(
-            job_id,
-            "done",
-            {"scanned_files": scanned, "infected_files": infected, "threats": threats},
-        )
+        self._stream_line(job_id, "done", {"scanned_files": scanned, "infected_files": infected, "threats": threats,
+                                           "errors": errors, "elapsed": round(time.time() - t0), "engine": "clamscan"})
 
     # ── Disk image mounting (Arsenal Image Mounter CLI) ──────────────────────
     # aim_cli without --background keeps the virtual disk only while that
@@ -651,6 +908,36 @@ class OrcaAgent:
             creationflags=0x08000000 if os.name == "nt" else 0,
         )
         return proc.returncode, (proc.stdout or ""), (proc.stderr or "")
+
+    def _defender_notice(self, job_id, path, exes):
+        """Measured: with Defender real-time protection on, Defender scans every
+        file syft/clamd opens and becomes the bottleneck (MsMpEng ~1 core vs
+        syft 0.08). Only reads Defender's settings; never changes them."""
+        if os.name != "nt":
+            return
+        try:
+            rc, out, _ = self._powershell(
+                "$s = Get-MpComputerStatus; $p = Get-MpPreference; "
+                "[pscustomobject]@{rt = [bool]$s.RealTimeProtectionEnabled; "
+                "paths = @($p.ExclusionPath); procs = @($p.ExclusionProcess)} | ConvertTo-Json -Compress", timeout=30)
+            info = json.loads(out.strip() or "{}")
+        except Exception:
+            return
+        if not info.get("rt"):
+            return
+        target = os.path.abspath(path).lower().rstrip("\\") + "\\"
+        excluded_path = any(target.startswith(str(x).lower().rstrip("\\") + "\\") for x in (info.get("paths") or []) if x)
+        procs = {os.path.basename(str(x)).lower() for x in (info.get("procs") or []) if x}
+        if excluded_path or all(e.lower() in procs for e in exes):
+            return
+        drive = os.path.splitdrive(target)[0].upper() + "\\"
+        self._stream_line(job_id, "log", {"message":
+            f"NOTE: Windows Defender real-time protection is on and {path} is not excluded, so Defender also scans "
+            f"every file this scan opens; that is usually what makes it slow. To speed it up, in an administrator "
+            f"PowerShell on this computer: Add-MpPreference -ExclusionPath '{drive}' (for a mounted image: its drive "
+            f"letter) or Add-MpPreference -ExclusionProcess {', '.join(exes)}. Remove the exclusion afterwards "
+            f"(Remove-MpPreference with the same arguments)."})
+        return True
 
     def _online_and_letter(self, disk_number, wanted_letter=None):
         """Brings the mounted disk's partitions online and makes sure every
@@ -859,10 +1146,59 @@ Get-Partition -DiskNumber $n | Where-Object { $_.DriveLetter -and $_.DriveLetter
             raise RuntimeError(f"AIM_DISMOUNT_FAILED: {output[:500]}")
         self._stream_line(job_id, "done", {"output": output})
 
+    def _run_tool_with_progress(self, job_id, cmd, env, phase, t0, extra, out_path=None):
+        """Runs syft/grype with stderr read by a thread (-v log lines) and a
+        progress event every few seconds: elapsed time, bytes the tool has read,
+        last log line. Returns (returncode, stderr_text)."""
+        out = open(out_path, "wb") if out_path else subprocess.DEVNULL
+        proc = subprocess.Popen(cmd, stdout=out, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env,
+                                creationflags=0x08000000 if os.name == "nt" else 0)
+        err_lines, done_tasks = [], []
+
+        def read_err():
+            for raw in proc.stderr:
+                line = raw.decode("utf-8", "replace").rstrip()
+                err_lines.append(line)
+                m = re.search(r"task completed .*task=([\w.-]+)", line)
+                if m:
+                    done_tasks.append(m.group(1))
+        tr = threading.Thread(target=read_err, daemon=True)
+        tr.start()
+        first = True
+        try:
+            while True:
+                if not first:
+                    try:
+                        proc.wait(timeout=self.PROGRESS_EVERY)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+                first = False   # first event right away: the panel shows the step at once
+                io = self._proc_io(proc)
+                last = next((l for l in reversed(err_lines) if "task completed" not in l and l.strip()), "")
+                self._stream_line(job_id, "progress", {
+                    "phase": phase, "elapsed": round(time.time() - t0),
+                    "phase_elapsed": round(time.time() - extra["phase_t0"]),
+                    "read_bytes": io[0] if io else None, "read_ops": io[1] if io else None,
+                    "catalogers_done": len(done_tasks), "last_cataloger": done_tasks[-1] if done_tasks else None,
+                    "last_log": re.sub(r"^\[\d+\]\s+", "", last)[:300],
+                    "target_files": extra.get("files"), "target_bytes": extra.get("bytes"),
+                    "target_counted": extra.get("counted", False), "defender": extra.get("defender", False),
+                })
+                if self._is_cancelled(job_id):
+                    proc.kill()
+                    raise RuntimeError(f"CANCELLED: vulnerability scan stopped by the analyst during {phase}")
+        finally:
+            if out_path:
+                out.close()
+            tr.join(timeout=5)
+        return proc.returncode, "\n".join(err_lines)
+
     def _run_grype(self, job_id, params):
         syft_exe = os.path.join(self.bin_dir, "syft.exe")
         grype_exe = os.path.join(self.bin_dir, "grype.exe")
         path = self._require_path(params["scan_path"])
+        t0 = time.time()
         # Never phone home: syft/grype check for a newer release on every run
         # by default (an outbound HTTPS attempt that just times out offline).
         tool_env = os.environ.copy()
@@ -878,53 +1214,81 @@ Get-Partition -DiskNumber $n | Where-Object { $_.DriveLetter -and $_.DriveLetter
         # catalog instead of guessing (it otherwise also tries image sources).
         source = path if os.path.isfile(path) else "dir:" + path
 
-        self._stream_line(job_id, "log", {"message": f"Running Syft on {path}"})
-        sbom = subprocess.run(
-            [syft_exe, source, "-o", "json"],
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            env=tool_env,
-        )
-        if sbom.returncode != 0:
-            raise RuntimeError(f"Syft failed: {sbom.stderr[:500]}")
+        # Size of the target, counted alongside (seconds even for a whole disk),
+        # so the progress panel can say how much syft has to get through.
+        extra = {"phase_t0": t0, "defender": bool(self._defender_notice(job_id, path, ["syft.exe"]))}
 
-        self._stream_line(job_id, "log", {"message": "Running Grype..."})
-        # Without these, grype tries to reach the internet to check for a
-        # newer DB on every single scan (this agent has none, by design),
-        # and -- confirmed live -- outright REFUSES to run at all once its
-        # bundled DB is older than the default 5-day max-allowed-built-age,
-        # erroring instead of just warning. Always disabled here, unlike
-        # the backend's equivalent (gated on an analyst-facing "offline"
-        # toggle there) -- this agent has no such toggle, and exists
-        # specifically for offline/standalone deployments.
-        grype_env = tool_env.copy()
-        grype_env["GRYPE_DB_AUTO_UPDATE"] = "false"
-        grype_env["GRYPE_DB_VALIDATE_AGE"] = "false"
-        # Grype's own default cache dir is some per-user profile path that
-        # doesn't exist on a freshly deployed agent -- point it at the
-        # bundled DB (downloaded as grype-db.zip in _bootstrap_binaries)
-        # explicitly, same reasoning as the backend's equivalent.
-        grype_env["GRYPE_DB_CACHE_DIR"] = os.path.join(self.bin_dir, "grype-db")
-        proc = subprocess.Popen(
-            [grype_exe, "-o", "json"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-            env=grype_env,
-        )
-        out, grype_err = proc.communicate(sbom.stdout)
+        def count():
+            n = b = 0
+            for _, size in self._iter_files(path, {}):
+                n += 1
+                b += size
+                if n % 5000 == 0:
+                    extra["files"], extra["bytes"] = n, b
+            extra["files"], extra["bytes"], extra["counted"] = n, b, True
+        threading.Thread(target=count, daemon=True).start()
 
+        work = tempfile.mkdtemp(prefix="orca_grype_")
         try:
-            data = json.loads(out)
-            vulns = data.get("matches", [])
-            self._stream_line(
-                job_id, "done", {"vulnerabilities": vulns, "total": len(vulns)}
-            )
-        except Exception:
-            self._stream_line(
-                job_id, "error", {"message": f"Grype failed (exit {proc.returncode}): {(grype_err or '').strip()[-500:]}"}
-            )
+            sbom_path = os.path.join(work, "sbom.json")
+            self._stream_line(job_id, "log", {"message": f"Syft: cataloging software on {path}"})
+            rc, err = self._run_tool_with_progress(job_id, [syft_exe, source, "-o", "json", "-v"], tool_env,
+                                                   "syft", t0, extra, out_path=sbom_path)
+            if rc != 0:
+                raise RuntimeError(f"Syft failed (exit {rc}): {err.strip()[-500:]}")
+            try:
+                with open(sbom_path, encoding="utf-8", errors="replace") as f:
+                    npk = len(json.load(f).get("artifacts", []))
+            except Exception:
+                npk = None
+            self._stream_line(job_id, "log", {"message": f"Syft finished in {round(time.time() - t0)}s: {npk} packages found. Running Grype..."})
+
+            # Without these, grype tries to reach the internet to check for a
+            # newer DB on every single scan (this agent has none, by design),
+            # and -- confirmed live -- outright REFUSES to run at all once its
+            # bundled DB is older than the default 5-day max-allowed-built-age,
+            # erroring instead of just warning. Always disabled here, unlike
+            # the backend's equivalent (gated on an analyst-facing "offline"
+            # toggle there) -- this agent has no such toggle, and exists
+            # specifically for offline/standalone deployments.
+            grype_env = tool_env.copy()
+            grype_env["GRYPE_DB_AUTO_UPDATE"] = "false"
+            grype_env["GRYPE_DB_VALIDATE_AGE"] = "false"
+            # Grype's own default cache dir is some per-user profile path that
+            # doesn't exist on a freshly deployed agent -- point it at the
+            # bundled DB (downloaded as grype-db.zip in _bootstrap_binaries)
+            # explicitly, same reasoning as the backend's equivalent.
+            grype_env["GRYPE_DB_CACHE_DIR"] = os.path.join(self.bin_dir, "grype-db")
+            out_path = os.path.join(work, "grype.json")
+            extra["phase_t0"] = time.time()
+            rc, err = self._run_tool_with_progress(job_id, [grype_exe, "sbom:" + sbom_path, "-o", "json", "-v"], grype_env,
+                                                   "grype", t0, extra, out_path=out_path)
+            try:
+                with open(out_path, encoding="utf-8", errors="replace") as f:
+                    data = json.load(f)
+            except Exception:
+                raise RuntimeError(f"Grype failed (exit {rc}): {err.strip()[-500:]}")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+        # One row per (CVE, package, version), trimmed to what ORCA stores
+        # (full grype matches for a whole disk run to tens of MB).
+        seen = {}
+        for mt in data.get("matches", []):
+            v, a = mt.get("vulnerability", {}), mt.get("artifact", {})
+            key = (v.get("id", ""), a.get("name", ""), a.get("version", ""))
+            if key in seen:
+                continue
+            fix = v.get("fix") or {}
+            seen[key] = {
+                "vulnerability": {"id": v.get("id", ""), "severity": v.get("severity", "Unknown"),
+                                  "fix": {"versions": fix.get("versions") or [], "state": fix.get("state", "")}},
+                "artifact": {"name": a.get("name", ""), "version": a.get("version", ""), "type": a.get("type", ""),
+                             "locations": [l.get("path") for l in (a.get("locations") or [])[:3]]},
+            }
+        vulns = list(seen.values())
+        self._stream_line(job_id, "done", {"vulnerabilities": vulns, "total": len(vulns), "packages": npk,
+                                           "elapsed": round(time.time() - t0)})
 
     def _run_memory(self, job_id, params):
         exe = os.path.join(self.bin_dir, "velociraptor.exe")

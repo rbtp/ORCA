@@ -273,6 +273,15 @@ Results stream back in real time. Any malware hits are logged per asset with the
 
 **On a mounted image:** use **RUN ON ANALYST WORKSTATION (AGENT)** with the image's drive letter as the scan path (e.g. `E:\`). If the path doesn't exist on the agent computer the scan fails with `PATH_NOT_FOUND` rather than reporting 0 files. Windows Defender on the workstation may block reading malware on the mounted image (ClamAV then never sees those files); add a Defender exclusion for the mounted drive letter while you scan.
 
+**Agent scans (ClamAV and Syft/Grype) show live progress** in a panel under the path:
+
+- ClamAV: files done / total (the total fills in while the agent lists the files), %, data scanned, threats, unreadable files, files per minute, estimated time left, and the files being scanned right now with how long each has taken. Threats appear in the list as soon as they are found. The agent loads the signatures once (`clamd`) and scans several files at a time (computer's cores minus 2, at most 8): about 2.5x faster than the old single `clamscan` in testing. Installers and archives are unpacked and scanned inside, so a single file can take up to 2 minutes while the others continue. Junctions and symbolic links are not followed (on a mounted image they point at the workstation's own C:).
+- Syft/Grype: step 1/2 (Syft finding installed software) and 2/2 (Grype matching), the target's size, how much the tool has read from disk, and its latest log line. Syft reports no count while it indexes files, so the "read" figure is the sign it's working.
+- **Windows Defender** real-time protection on the agent computer scans every file the scanner opens and is usually what makes these scans slow (measured: Defender using a full CPU core while Syft used under a tenth of one). The panel and the log say when Defender is on and the target isn't excluded, with the command to add an exclusion (`Add-MpPreference -ExclusionPath 'E:\'` in an administrator PowerShell; remove it afterwards with `Remove-MpPreference`). ORCA never changes Defender settings itself.
+- **STOP** stops the scan on the agent computer (within a few seconds), not only in the browser.
+- Closing the Evidence Window or reloading the page doesn't stop the scan; reopening the tab re-attaches to it. Results are saved by the server when the agent finishes, even if nobody has the window open. "No update from the agent for ..." in red means the agent stopped reporting (computer asleep, offline, agent restarted).
+- Files ClamAV could not read (locked, access denied, blocked by Defender) are counted as **UNREADABLE** and listed after the scan.
+
 ### Update Signatures
 
 Click **Update ClamAV Signatures** to trigger a `freshclam` run. ClamAV signatures are also updated automatically on each container start. For air-gapped deployments, copy the `.cvd`/`.cld` files into `backend/bin/clamav/` manually.
