@@ -376,6 +376,8 @@ A power-user view for editing the `ref_artifact_library` table directly:
 - Edit the **Surgical YAML** (Velociraptor artifact YAML) for a technique
 - Changes take effect immediately for future package builds
 
+The library was audited and largely repaired in November 2026 (`docs/LIBRARY_QUALITY.md`): most queries could never return a row (event looked for in the wrong log, regexes broken by VQL string escaping, fields that don't exist in the event, ...). Before writing or editing a query, read that document's **Rules for writing library queries**, and check a YAML with `velociraptor artifacts verify <file>`. The update keeps any query you edited yourself; `docs/library_scorecard.csv` lists every technique's status and what was changed.
+
 ### Investigation Profiles
 
 Create and manage named custom technique sets:
