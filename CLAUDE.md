@@ -36,6 +36,12 @@ Fresh `git clone` + `install.ps1` (Windows PowerShell 5.1) tested from scratch i
 Not tested: agent-dispatched collection end-to-end (no agent online); frontend session-revocation redirect in a real browser (API side verified).
 
 ## Progress Log
+- [x] No duplicate evidence rows (2026-11-12), `migrations/evidence_no_duplicates.sql`:
+  - Re-running a collection appended every row again (live DB: 350,766 rows, 120,090 exact copies, e.g. 90,892 in one AMCACHE)
+  - In the database, so every ingest path gets it (agent, server, uploads, parsers; ~10 INSERT sites): BEFORE INSERT trigger `evidence_skip_duplicate` skips a row whose asset + t_code + raw_data (jsonb, key order irrelevant) is already stored; index `idx_evidence_dedup` on `(asset_id, t_code, md5(raw_data::text))`; `pg_advisory_xact_lock` per asset+technique (not per row: lock table) so parallel runs can't both insert. Skipped inserts return no row (no evidence INSERT uses RETURNING)
+  - Migration also removes existing copies (keeps a starred copy, else the oldest) and writes one `DELETE_EVIDENCE` audit_log row per asset+technique (username `system`)
+  - Backend code/images unchanged (migrations are bind-mounted); `schema.sql` regenerated
+  - Verified: on a copy of the live DB (120,090 removed, 230,676 = unique count, 23 audit rows, starred copy kept, re-runnable); trigger cases (repeat, swapped key order, in-statement dup, same data other asset/technique kept, 2 concurrent sessions x 2000 rows = 2000); real `_ingest_agent_technique` 3 runs = 1200/1200/1205; applied live; fresh isolated install applies it
 - [x] Fixed the last 7 library techniques that could never run (2026-11-10), `migrations/fix_broken_library_techniques.sql`:
   - T1597 / T1597.002: `glob(globs='a', 'b')` syntax error; now read Chrome/Edge/Firefox history (sqlite) and match the visited site's host (closed-source research sites / breach & exploit markets)
   - T1574.013: `intbitand()` doesn't exist and VQL has no bitwise/modulo operators; PROCESS_VM_WRITE (0x20) bit tested as `int(x/32) - 2*int(x/64) = 1`
@@ -50,7 +56,7 @@ Not tested: agent-dispatched collection end-to-end (no agent online); frontend s
   - Agent job poll no longer loses jobs: the long-poll took the next job for an agent that had already disconnected (restart/network drop) and the caller timed out; now polls `request.is_disconnected()` every 0.5s (reproduced on old code, fixed)
   - Agent ClamAV/Grype/collection fail with `PATH_NOT_FOUND` instead of "0 files"/"no artifacts"; syft/grype update checks and remote license lookups off; syft target `dir:<path>`
   - UI: "RUN ON SERVER" / "RUN ON ANALYST WORKSTATION (AGENT)" with hover tips (scan tabs too); progress panel; status bar and OVERVIEW follow live results; mount panel shows real volumes/listing or NO DRIVE LETTER; RUN ON SERVER refuses Windows drive letters (400) instead of all-"no artifacts"
-  - Known, not changed: re-running a collection appends evidence (duplicates); Windows Defender blocks reading malware on mounted images (documented: add an exclusion)
+  - Known, not changed: re-running a collection appended evidence (duplicates; fixed 2026-11-12, see above); Windows Defender blocks reading malware on mounted images (documented: add an exclusion)
   - Tested on an isolated stack + live agent + Arsenal-mounted test VHD with real hives: API 115/115, progress 18/18, mount 15/16 (EICAR blocked by Defender), dead-disk collection 11/11, Evidence Window browser 14/14, UI tour 22/22, agent 11/12 (+ Grype/stale-mount 3/3), lost-job repro
 - [x] Offline kit updated to 2026-11-09 code (2026-11-09):
   - This session first worked only in the repo and missed the kit (the user's "install.md" / "folder on the desktop" meant the kit); the remote had run the Nov 6 kit

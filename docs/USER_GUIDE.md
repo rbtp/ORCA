@@ -176,6 +176,8 @@ The **PKG** panel on each asset shows live collection progress:
    **Collecting from a mounted image:** set DRIVE to the image's drive letter (shown in the mount panel). When DRIVE is not the agent computer's own system drive, the agent collects in *dead-disk mode* (Velociraptor's remapping): every technique's `C:\...` paths, event logs, `HKEY_LOCAL_MACHINE` (SYSTEM / SOFTWARE / SAM / SECURITY hives) and `HKEY_USERS` (each user's `NTUSER.DAT`) are read **from the image**, `CurrentControlSet` is resolved to the image's active control set, and `%APPDATA%`-style paths cover every user profile on the image. Techniques that need a running system (process list, network connections, WMI) are marked **not applicable to a disk image** instead of reporting the workstation's own state.
 
    **Progress:** while a collection runs, a panel under the buttons shows done / total, hits, empty, not-applicable and failed counts, which techniques are running and for how long, and at the end the failed techniques with the reason. Up to 3 techniques run at once on the agent (20-minute limit each). Only one collection can run per asset at a time.
+
+   **Running again:** re-running a collection (or re-uploading the same file) only adds rows that are new. A row identical to one already stored for that asset and technique is skipped, so running twice never doubles the evidence; stars and notes on existing rows stay.
 7. **Admins only**: a technique that already has evidence shows a red **⚠ FLUSH_EVIDENCE** button next to the verdict selector. This permanently deletes the evidence collected for that technique and is logged — see [Audit Trail (Admin Only)](#audit-trail-admin-only) below.
 
 ### Timeline View

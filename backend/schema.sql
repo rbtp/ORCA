@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict kXZRvQgXDYMzWBhM2QpNfJVuTci3J4bSSd552DgLJgh7aCRQ8NbdnLArcmOcowL
+\restrict DV6WGMsBarbxSRsh0U6V2FO6YTb0DEYTzGIC5gmpbALq4u3Uk8d2lhpfOdr3e08
 
 -- Dumped from database version 15.19 (Debian 15.19-1.pgdg13+2)
 -- Dumped by pg_dump version 15.19 (Debian 15.19-1.pgdg13+2)
@@ -30,6 +30,32 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 --
 
 COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
+-- Name: evidence_skip_duplicate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.evidence_skip_duplicate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.raw_data IS NULL OR NEW.asset_id IS NULL OR NEW.t_code IS NULL THEN
+        RETURN NEW;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtext('orca_evidence'),
+                                  hashtext(NEW.asset_id::text || '|' || NEW.t_code));
+    IF EXISTS (
+        SELECT 1 FROM evidence
+        WHERE asset_id = NEW.asset_id
+          AND t_code = NEW.t_code
+          AND md5(raw_data::text) = md5(NEW.raw_data::text)
+          AND raw_data = NEW.raw_data
+    ) THEN
+        RETURN NULL;  -- already stored: skip silently
+    END IF;
+    RETURN NEW;
+END $$;
 
 
 --
@@ -1463,6 +1489,16 @@ ALTER SEQUENCE public.ref_ioc_library_id_seq OWNED BY public.ref_ioc_library.id;
 
 
 --
+-- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.schema_migrations (
+    filename text NOT NULL,
+    applied_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: speakeasy_results; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2523,6 +2559,14 @@ ALTER TABLE ONLY public.ref_ioc_library
 
 
 --
+-- Name: schema_migrations schema_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.schema_migrations
+    ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (filename);
+
+
+--
 -- Name: speakeasy_results speakeasy_results_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2738,6 +2782,13 @@ CREATE INDEX idx_enrollment_tokens_username ON public.enrollment_tokens USING bt
 --
 
 CREATE INDEX idx_evidence_asset_tcode ON public.evidence USING btree (asset_id, t_code);
+
+
+--
+-- Name: idx_evidence_dedup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_evidence_dedup ON public.evidence USING btree (asset_id, t_code, md5((raw_data)::text));
 
 
 --
@@ -2979,6 +3030,13 @@ CREATE INDEX ix_mitre_techniques_tactic ON public.mitre_techniques USING btree (
 
 
 --
+-- Name: evidence evidence_skip_duplicate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER evidence_skip_duplicate BEFORE INSERT ON public.evidence FOR EACH ROW EXECUTE FUNCTION public.evidence_skip_duplicate();
+
+
+--
 -- Name: agent_jobs agent_jobs_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3198,5 +3256,5 @@ ALTER TABLE ONLY public.tool_locks
 -- PostgreSQL database dump complete
 --
 
-\unrestrict kXZRvQgXDYMzWBhM2QpNfJVuTci3J4bSSd552DgLJgh7aCRQ8NbdnLArcmOcowL
+\unrestrict DV6WGMsBarbxSRsh0U6V2FO6YTb0DEYTzGIC5gmpbALq4u3Uk8d2lhpfOdr3e08
 
