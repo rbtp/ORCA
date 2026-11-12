@@ -46,6 +46,8 @@ class OrcaAgent:
         for cap, binary in bins.items():
             if os.path.exists(os.path.join(self.bin_dir, binary)):
                 caps.append(cap)
+        # The server runs this many techniques at once on this machine (cores - 2).
+        caps.append(f"cpus:{os.cpu_count() or 4}")
         return caps
 
     def register(self):
@@ -154,12 +156,18 @@ class OrcaAgent:
         return job_id in self._cancelled_jobs()
 
     @staticmethod
-    def _iter_files(root, errors):
+    def _iter_files(root, errors, skip_hardlinks=False):
         """Yields (path, size) for every file under root. Never follows reparse
         points (junctions/symlinks): on a mounted image they point at the
         ANALYST'S OWN C: (e.g. "Application Data" -> C:\\Users\\..\\Roaming),
         and on a live disk some loop forever. Unreadable folders are counted
-        in errors["dirs"]."""
+        in errors["dirs"].
+        skip_hardlinks: a file with several names (hard links; 14% of the
+        files under C:\\Windows, WinSxS <-> System32) is yielded once, under
+        the first name found; the rest are counted in errors["hardlinks"] /
+        errors["hardlink_bytes"]. Costs one extra stat per file (DirEntry has
+        no link count/file ID on Windows), done in the walker thread."""
+        seen = set()
         if os.path.isfile(root):
             try:
                 yield root, os.path.getsize(root)
@@ -182,8 +190,20 @@ class OrcaAgent:
                             continue
                         if e.is_dir(follow_symlinks=False):
                             stack.append(e.path)
-                        else:
-                            yield e.path, st.st_size
+                            continue
+                        if skip_hardlinks:
+                            try:
+                                full = os.stat(e.path, follow_symlinks=False)
+                            except OSError:
+                                full = None
+                            if full is not None and full.st_nlink > 1 and full.st_ino:
+                                key = (full.st_dev, full.st_ino)
+                                if key in seen:
+                                    errors["hardlinks"] = errors.get("hardlinks", 0) + 1
+                                    errors["hardlink_bytes"] = errors.get("hardlink_bytes", 0) + st.st_size
+                                    continue
+                                seen.add(key)
+                        yield e.path, st.st_size
                     except OSError:
                         errors["dirs"] = errors.get("dirs", 0) + 1
 
@@ -706,7 +726,7 @@ class OrcaAgent:
 
         def walker():
             try:
-                for p, size in self._iter_files(path, errs):
+                for p, size in self._iter_files(path, errs, skip_hardlinks=True):
                     if stop.is_set():
                         return
                     with lock:
@@ -760,6 +780,7 @@ class OrcaAgent:
                 with lock:
                     new, st["new_threats"] = st["new_threats"], []
                     snap = {k: st[k] for k in ("found", "found_bytes", "walk_done", "scanned", "scanned_bytes", "infected", "errors")}
+                    snap["hardlinks"] = errs.get("hardlinks", 0)
                     cur = sorted(((round(now - t), p) for p, t in current.values()), reverse=True)[:threads]
                 for t in new:
                     self._stream_line(job_id, "log", {"message": "THREAT: " + t})
@@ -792,6 +813,7 @@ class OrcaAgent:
         self._stream_line(job_id, "done", {
             "scanned_files": st["scanned"], "infected_files": st["infected"], "threats": st["threats"],
             "errors": st["errors"], "error_samples": st["error_samples"], "unreadable_folders": errs.get("dirs", 0),
+            "hardlinks_skipped": errs.get("hardlinks", 0), "hardlink_bytes_skipped": errs.get("hardlink_bytes", 0),
             "data_scanned": st["scanned_bytes"], "elapsed": round(time.time() - t0), "engine": f"clamd x{threads}",
         })
 

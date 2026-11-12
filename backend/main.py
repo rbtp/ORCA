@@ -657,9 +657,32 @@ def run_vr_orchestrator(target_list, tsource, output_root, asset_id):
 
 
 # Techniques dispatched to one agent at a time. The agent runs every job it
-# receives in its own thread, so more than one keeps the disk busy without
-# starting a dozen velociraptor processes on the analyst's machine at once.
-AGENT_COLLECTION_PARALLEL = int(os.environ.get("ORCA_AGENT_COLLECTION_PARALLEL", "3"))
+# receives in its own thread. Most library techniques re-parse the same big
+# event logs (448 read Security.evtx), which is CPU-bound per velociraptor
+# process, so the default follows the agent's core count (it reports
+# "cpus:N" in its capabilities): cores - 2, between 2 and
+# AGENT_COLLECTION_PARALLEL_MAX. Agents too old to report it get 3.
+# ORCA_AGENT_COLLECTION_PARALLEL set = that number for every agent.
+AGENT_COLLECTION_PARALLEL = os.environ.get("ORCA_AGENT_COLLECTION_PARALLEL", "").strip()
+AGENT_COLLECTION_PARALLEL_MAX = int(os.environ.get("ORCA_AGENT_COLLECTION_PARALLEL_MAX", "10"))
+
+
+def _agent_collection_parallel(agent_id):
+    if AGENT_COLLECTION_PARALLEL:
+        return max(1, int(AGENT_COLLECTION_PARALLEL))
+    try:
+        with db.engine.connect() as conn:
+            caps = conn.execute(text("SELECT capabilities FROM agent_registrations WHERE agent_id = :a"),
+                                {"a": agent_id}).scalar() or []
+        if isinstance(caps, str):
+            caps = json.loads(caps)
+        cpus = next((int(c.split(":", 1)[1]) for c in caps if isinstance(c, str) and c.startswith("cpus:")), None)
+    except Exception as e:
+        print(f"[VR_AGENT] could not read agent core count -- {e}")
+        cpus = None
+    if not cpus:
+        return 3
+    return max(2, min(AGENT_COLLECTION_PARALLEL_MAX, cpus - 2))
 # Per technique. A full-drive glob or an event-log parse over a mounted image
 # can legitimately take many minutes; the old 300s marked slow ones as failed
 # while they were still running.
@@ -756,7 +779,9 @@ async def run_vr_via_agent(target_list, tsource, agent_id, asset_id):
     _run_artifact_collection). Progress goes to COLLECTION_PROGRESS.
     """
     from agent_routes import _job_streams
-    sem = asyncio.Semaphore(max(1, AGENT_COLLECTION_PARALLEL))
+    parallel = await asyncio.to_thread(_agent_collection_parallel, agent_id)
+    print(f"[VR_AGENT] asset {asset_id}: {len(target_list)} techniques on agent {agent_id}, {parallel} at a time")
+    sem = asyncio.Semaphore(parallel)
 
     async def one(item):
         t_code = item["t_code"]

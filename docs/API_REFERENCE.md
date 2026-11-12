@@ -150,7 +150,7 @@ Trigger local Velociraptor collection for an asset (inline — runs inside the c
 }
 ```
 
-If `agent_id` is set, each technique is dispatched to that agent as an `artifact_collection` job instead of running in-container: up to 3 at a time (`ORCA_AGENT_COLLECTION_PARALLEL`), 20 minutes each (`ORCA_AGENT_COLLECTION_TIMEOUT`, seconds). This reaches any drive the agent can see (local physical disks or Arsenal-mounted images). When `tsource` is not the agent's own system drive, the agent collects in dead-disk mode (Velociraptor `deaddisk` remapping: `C:`, `HKEY_LOCAL_MACHINE` and `HKEY_USERS` read from the image). The server ingests the returned rows into `evidence` / `artifact_results` exactly as for in-container runs.
+If `agent_id` is set, each technique is dispatched to that agent as an `artifact_collection` job instead of running in-container: several at a time: the agent's core count minus 2 (it reports `cpus:N` in its registration `capabilities`), between 2 and `ORCA_AGENT_COLLECTION_PARALLEL_MAX` (default 10), 3 for agents that don't report it; `ORCA_AGENT_COLLECTION_PARALLEL` set = that number for every agent, 20 minutes each (`ORCA_AGENT_COLLECTION_TIMEOUT`, seconds). This reaches any drive the agent can see (local physical disks or Arsenal-mounted images). When `tsource` is not the agent's own system drive, the agent collects in dead-disk mode (Velociraptor `deaddisk` remapping: `C:`, `HKEY_LOCAL_MACHINE` and `HKEY_USERS` read from the image). The server ingests the returned rows into `evidence` / `artifact_results` exactly as for in-container runs.
 
 **Response 409** if a collection is already running for the asset.
 

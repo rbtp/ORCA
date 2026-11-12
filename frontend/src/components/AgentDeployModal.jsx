@@ -220,7 +220,7 @@ export default function AgentDeployModal({ isOpen, onClose }) {
                 <tbody>
                   {fleet.map(a => {
                     const lastSeen = a.last_seen ? new Date(a.last_seen).toLocaleTimeString([], { hour12: false }) : '—';
-                    const caps = Array.isArray(a.capabilities) ? a.capabilities.join(', ') : '—';
+                    const caps = Array.isArray(a.capabilities) ? a.capabilities.filter(c => !String(c).includes(':')).join(', ') : '—';
                     return (
                       <tr key={a.agent_id} style={{ borderBottom: `1px solid #0a0a0a` }}>
                         <td style={{ padding: '7px 16px', color: C.greyDim, fontSize: 10 }}>{a.agent_id}</td>

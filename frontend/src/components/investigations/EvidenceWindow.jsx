@@ -3429,6 +3429,7 @@ const AgentScanProgress = ({ kind, progress, lastEventAt, stopping }) => {
           <span>DATA {fmtBytes(p.scanned_bytes)}{p.walk_done ? ` / ${fmtBytes(p.found_bytes)}` : ''}</span>
           <span style={{ color: p.infected ? C.red : C.green }}>THREATS {p.infected || 0}</span>
           <span style={{ color: p.errors ? C.amber : C.greyDim }} title="Files that could not be read: locked, access denied, or blocked by Windows Defender">UNREADABLE {p.errors || 0}</span>
+          {p.hardlinks > 0 && <span style={{ color: C.greyDim }} title="Files with more than one name (hard links, e.g. WinSxS and System32) are scanned once, under the first name found">SAME FILE, OTHER NAME (SKIPPED) {p.hardlinks.toLocaleString()}</span>}
           <span style={{ color: C.grey }}>{rate ? `${Math.round(rate * 60).toLocaleString()} files/min` : ''}</span>
           {eta != null && <span style={{ color: C.grey }}>~{fmtSecs(eta)} left</span>}
         </div>
@@ -3551,7 +3552,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
         } else if (evt.type === 'done') {
           const d = evt.data;
           setScanned(d.scanned_files); setInfected(d.infected_files); setThreats(d.threats || []);
-          setScanInfo({ errors: d.errors || 0, samples: d.error_samples || [], elapsed: d.elapsed, engine: d.engine, data: d.data_scanned, folders: d.unreadable_folders || 0 });
+          setScanInfo({ errors: d.errors || 0, samples: d.error_samples || [], elapsed: d.elapsed, engine: d.engine, data: d.data_scanned, folders: d.unreadable_folders || 0, hardlinks: d.hardlinks_skipped || 0, hardlinkBytes: d.hardlink_bytes_skipped || 0 });
           addLog(`SCAN COMPLETE — Scanned: ${d.scanned_files}, Infected: ${d.infected_files}${d.errors ? `, unreadable: ${d.errors}` : ''}${d.elapsed != null ? `, ${fmtSecs(d.elapsed)}` : ''}`,
             d.infected_files > 0 ? 'error' : 'success');
           if (onSummaryUpdate) onSummaryUpdate('av', { scanned: d.scanned_files, infected: d.infected_files });
@@ -3743,6 +3744,11 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
       </div>
 
       {agentJob && isScanning && <AgentScanProgress kind="clamav" progress={progress} lastEventAt={lastEventAt} stopping={stopping} />}
+      {!isScanning && scanInfo && scanInfo.hardlinks > 0 && (
+        <div data-testid="hardlink-note" style={{ padding: '4px 15px', borderBottom: `1px solid ${C.border}`, color: C.greyDim, fontFamily: 'monospace', fontSize: 10, flexShrink: 0 }}>
+          {scanInfo.hardlinks.toLocaleString()} file name(s) ({fmtBytes(scanInfo.hardlinkBytes)}) were second names (hard links) of files already scanned, so they weren't scanned again
+        </div>
+      )}
       {!isScanning && scanInfo && (scanInfo.errors > 0 || scanInfo.folders > 0) && (
         <details style={{ padding: '6px 15px', borderBottom: `1px solid ${C.border}`, color: C.amber, fontFamily: 'monospace', fontSize: 10, flexShrink: 0 }}>
           <summary style={{ cursor: 'pointer' }}>
