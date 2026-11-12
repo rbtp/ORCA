@@ -516,6 +516,7 @@ async def complete_reset(request: Request, token: str, body: CompleteResetReques
 import threading as _threading
 import time as _time
 COLLECTION_PROGRESS: dict = {}
+import collection_state
 _BACKGROUND_TASKS: set = set()  # strong refs so asyncio doesn't GC running tasks
 _COLLECTION_LOCK = _threading.Lock()
 
@@ -561,6 +562,9 @@ def _progress_end(asset_id, t_code, outcome=None, detail=None):
 
 def _progress_finish(asset_id, state="DONE", detail=None):
     with _COLLECTION_LOCK:
+        if collection_state.is_deleted(asset_id):
+            COLLECTION_PROGRESS.pop(asset_id, None)
+            return
         p = COLLECTION_PROGRESS.get(asset_id)
         if p:
             p["state"] = state
@@ -615,6 +619,17 @@ def run_vr_orchestrator(target_list, tsource, output_root, asset_id):
     queue  = list(target_list)
 
     while queue or active:
+        if collection_state.is_deleted(asset_id):
+            # Asset (or its case) was deleted mid-collection: stop the workers
+            # instead of letting them write rows for an asset that's gone.
+            for proc, t_code, _, _ in active.values():
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            logging.info(f"[VR] asset {asset_id} deleted: collection stopped "
+                         f"({len(active)} running, {len(queue)} not started)")
+            raise RuntimeError("asset deleted during collection")
         while queue and len(active) < max_workers:
             item   = queue.pop(0)
             t_code = item['t_code']
@@ -786,6 +801,8 @@ async def run_vr_via_agent(target_list, tsource, agent_id, asset_id):
     async def one(item):
         t_code = item["t_code"]
         async with sem:
+            if collection_state.is_deleted(asset_id):
+                return
             _progress_begin(asset_id, t_code)
             job_ref = {}
             try:
@@ -805,6 +822,9 @@ async def run_vr_via_agent(target_list, tsource, agent_id, asset_id):
                 # job's stream afterwards, so don't keep it in memory.
                 if job_ref.get("job_id"):
                     _job_streams.pop(job_ref["job_id"], None)
+            if collection_state.is_deleted(asset_id):
+                print(f"[VR_AGENT] {t_code}: asset {asset_id} was deleted, results discarded")
+                return
             try:
                 outcome, detail = await asyncio.to_thread(_ingest_agent_technique, asset_id, t_code, lines)
             except Exception as e:

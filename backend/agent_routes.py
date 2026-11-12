@@ -414,6 +414,9 @@ def _persist_scan_result(job_id: str, line: str):
     asset_id = params.get("asset_id")
     if asset_id is None:
         return
+    import collection_state
+    if collection_state.is_deleted(asset_id):
+        return   # asset/case deleted while the scan ran: don't leave orphan rows
     data = (json.loads(line).get("data") or {})
     with db.engine.begin() as conn:
         if row[0] == "clamav":

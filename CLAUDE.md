@@ -36,6 +36,12 @@ Fresh `git clone` + `install.ps1` (Windows PowerShell 5.1) tested from scratch i
 Not tested: agent-dispatched collection end-to-end (no agent online); frontend session-revocation redirect in a real browser (API side verified).
 
 ## Progress Log
+- [x] Case/asset delete failed while a collection was still writing (2026-11-12):
+  - `DELETE /api/mitre/cases/{name}` / `/assets/{id}` deleted child rows, then `assets`; a collection/scan inserting evidence/artifact_results in between -> FK violation, 500, nothing deleted (reproduced deterministically: open write transaction during the delete)
+  - `routes/mitre_routes.py` `_stop_writes_for_assets()`: marks the asset ids in new `backend/collection_state.py` (own module: main.py runs as `__main__`), then `SELECT ... FOR UPDATE` on the asset rows so in-flight inserts finish first (and are deleted) and new ones wait; also deletes `clam_results` now
+  - `main.py`: server collection kills its workers, agent collection stops dispatching and discards results, progress entry dropped; `agent_routes._persist_scan_result` doesn't save ClamAV/Grype results for a deleted asset
+  - Verified: repro 4/4 failing before, `del_race` 14/14 after (open transaction, server collection, agent collection, agent ClamAV); API suite 115/115 and the short form that first showed it
+  - Still not cleaned on delete (orphans, no error): discovered_iocs, memory_*, capa/floss/speakeasy results, file_fetch_jobs
 - [x] Faster agent collection + ClamAV hard-link skip (2026-11-12). Remote asked to speed up ClamAV, Syft and artifact analysis:
   - Measured where the time goes: Windows Defender real-time scanning of every opened file (MsMpEng ~1 core vs syft 0.08) is the main cost for all three; 448 library techniques each re-parse Security.evtx (58 s per parse of a 1 GB log here); a JSONL cache of the log was slower (75 s vs 55 s); no duplicate technique queries; syft already parallel, excluding WinSxS didn't help
   - Collection: techniques per agent were fixed at 3. Agent now reports `cpus:N` in its registration capabilities; backend `_agent_collection_parallel()` runs cores-2 at once (2..`ORCA_AGENT_COLLECTION_PARALLEL_MAX`, default 10; 3 for older agents; `ORCA_AGENT_COLLECTION_PARALLEL` still forces a number). Benchmark, 10 parses of Security.evtx: 3 at a time 302 s, 10 at a time 162 s (1.9x); memory ~75-160 MB per velociraptor. AgentDeployModal hides `key:value` capabilities

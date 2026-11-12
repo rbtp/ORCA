@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse, Response
 from core.database_manager import db, get_db
 from services.mitre_service import MitreIntelService
 from sqlalchemy import text
+import collection_state
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Union, Any, Dict, Optional
@@ -1690,11 +1691,28 @@ async def set_case_assignments(case_name: str, payload: dict = Body(...), curren
     return {"status": "SUCCESS", "assigned_count": len(user_ids)}
 
 
+def _stop_writes_for_assets(db, where, params):
+    """Before deleting assets: a collection or scan still running for them
+    kept inserting evidence/artifact_results rows between this endpoint's
+    child-table DELETEs and the final DELETE FROM assets, which then failed
+    on the foreign key (500, nothing deleted). Marks the assets deleted so
+    the collection runners stop and discard results, then locks the asset
+    rows FOR UPDATE: a concurrent insert needs a KEY SHARE lock on its asset
+    row, so inserts already in flight finish first (and their rows are
+    deleted below) and new ones wait until this transaction commits (then
+    fail on the missing asset instead of breaking the delete)."""
+    ids = [r[0] for r in db.execute(text(f"SELECT id FROM assets WHERE {where}"), params)]  # nosec B608 -- where is a literal from the callers
+    collection_state.mark_deleted(ids)
+    db.execute(text(f"SELECT id FROM assets WHERE {where} ORDER BY id FOR UPDATE"), params).fetchall()  # nosec B608
+    return ids
+
+
 @router.delete("/cases/{case_name}")
 async def delete_case(case_name: str, db: Session = Depends(get_db), current_user: dict = Depends(require_admin)):
     try:
         p = {"name": case_name}
         asset_subq = "SELECT id FROM assets WHERE case_name = :name"
+        _stop_writes_for_assets(db, "case_name = :name", p)
 
         # nosec B608 — asset_subq is a hardcoded literal string; :name is parameterized
         db.execute(text(f"DELETE FROM artifact_results  WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
@@ -1707,6 +1725,7 @@ async def delete_case(case_name: str, db: Session = Depends(get_db), current_use
         db.execute(text(f"DELETE FROM mount_sessions    WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
         db.execute(text(f"DELETE FROM package_tokens    WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
         db.execute(text(f"DELETE FROM vuln_results      WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
+        db.execute(text(f"DELETE FROM clam_results      WHERE asset_id IN ({asset_subq})"), p)  # nosec B608
         db.execute(text(  # nosec B608 — asset_subq is hardcoded literal
             f"DELETE FROM network_links WHERE source_id IN ({asset_subq}) OR target_id IN ({asset_subq})"  # nosec B608
         ), p)
@@ -1727,6 +1746,7 @@ async def delete_asset(asset_id: int, db: Session = Depends(get_db), current_use
     """Delete a single asset and all associated evidence, notes, and results."""
     try:
         p = {"aid": asset_id}
+        _stop_writes_for_assets(db, "id = :aid", p)
         db.execute(text("DELETE FROM artifact_results  WHERE asset_id = :aid"), p)
         db.execute(text("DELETE FROM evidence          WHERE asset_id = :aid"), p)
         db.execute(text("DELETE FROM mft_entries       WHERE asset_id = :aid"), p)
@@ -1737,6 +1757,7 @@ async def delete_asset(asset_id: int, db: Session = Depends(get_db), current_use
         db.execute(text("DELETE FROM mount_sessions    WHERE asset_id = :aid"), p)
         db.execute(text("DELETE FROM package_tokens    WHERE asset_id = :aid"), p)
         db.execute(text("DELETE FROM vuln_results      WHERE asset_id = :aid"), p)
+        db.execute(text("DELETE FROM clam_results      WHERE asset_id = :aid"), p)
         db.execute(text("""
             DELETE FROM network_links
             WHERE source_id = :aid OR target_id = :aid
