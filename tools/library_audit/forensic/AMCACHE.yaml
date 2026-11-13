@@ -1,0 +1,23 @@
+name: Forensic.Execution.Amcache
+description: |
+  Program presence / execution evidence from the Amcache.hve registry hive on a
+  mounted dead disk (C:/Windows/appcompat/Programs/Amcache.hve). File/registry
+  mode (mode 1): runs under the dead-disk remap and reads the hive with the
+  raw_reg accessor. Enumerates every InventoryApplicationFile entry: the program
+  name (from the entry key), the entry's registration time (key last-write), the
+  ProgramId, and the full path / SHA1 where the hive records them.
+type: CLIENT
+sources:
+- name: Amcache
+  query: |
+    LET hive = "C:/Windows/appcompat/Programs/Amcache.hve"
+    LET root = pathspec(DelegateAccessor="auto", DelegatePath=hive)
+    SELECT split(string=Name, sep="[|]")[0] AS Program,
+           Name AS AmcacheEntry,
+           Mtime AS RegisteredTime,
+           { SELECT Data.value FROM glob(globs="/ProgramId", accessor="raw_reg", root=OSPath) } AS ProgramId,
+           { SELECT Data.value FROM glob(globs="/LowerCaseLongPath", accessor="raw_reg", root=OSPath) } AS Path,
+           { SELECT Data.value FROM glob(globs="/Sha1", accessor="raw_reg", root=OSPath) } AS Sha1,
+           { SELECT Data.value FROM glob(globs="/Size", accessor="raw_reg", root=OSPath) } AS Size
+    FROM glob(globs="/Root/InventoryApplicationFile/*", accessor="raw_reg", root=root)
+    ORDER BY RegisteredTime

@@ -1,0 +1,20 @@
+name: Forensic.Execution.Prefetch
+description: |
+  Program execution evidence from Windows Prefetch (C:/Windows/Prefetch/*.pf) on a
+  mounted dead disk. File mode (mode 1): runs under the dead-disk remap, reading C:
+  (= the image). Uses the built-in Windows.Forensics.Prefetch, which parses each .pf
+  and reports executable name, run count and the embedded run timestamps.
+type: CLIENT
+sources:
+- name: Prefetch
+  query: |
+    SELECT OSPath,
+           Executable,
+           ExecutablePath,
+           RunCount,
+           CreationTime,
+           ModificationTime,
+           LastRunTimes[0] AS LastRun,
+           LastRunTimes,
+           FilesAccessed
+    FROM Artifact.Windows.Forensics.Prefetch()

@@ -881,25 +881,61 @@ async def execute_asset_action(
             """), {"asset_id": asset_id}).fetchall()
 
             case_row = conn.execute(text(
-                "SELECT case_name FROM assets WHERE id = :id"
+                "SELECT case_name, analysis_mode FROM assets WHERE id = :id"
             ), {"id": asset_id}).fetchone()
 
         if not intel_rows:
             raise HTTPException(status_code=404, detail=f"No techniques found for asset {asset_id} — check case country and asset OS")
 
-        t_codes = [r.t_code for r in intel_rows]
+        # The asset's analysis_mode decides which query runs. A dead-disk asset
+        # uses each technique's dead variant when it has one (else its default
+        # query, which the agent runs through the dead-disk remap), and also
+        # runs the forensic dead-disk-only collections (MFT, USN, Prefetch, ...,
+        # applies_live=false) regardless of the case's threat-actor mapping. A
+        # live asset runs the default (live) query and skips the forensic-only
+        # collections. UNKNOWN keeps the old behaviour (default query, no filter).
+        mode = (case_row.analysis_mode or "UNKNOWN") if case_row else "UNKNOWN"
+        is_dead = mode in ("DEAD_DISK_LOCAL", "DEAD_DISK_REMOTE")
+        intel_codes = [r.t_code for r in intel_rows]
         with db.engine.connect() as conn:
-            lib_rows = conn.execute(text(
-                "SELECT t_code, custom_vql, surgical_yaml FROM ref_artifact_library WHERE t_code = ANY(:codes)"
-            ), {"codes": t_codes}).fetchall()
-        lib_map = {r.t_code: r for r in lib_rows}
+            if is_dead:
+                lib_rows = conn.execute(text("""
+                    SELECT t_code, custom_vql, surgical_yaml, custom_vql_dead, surgical_yaml_dead,
+                           applies_live, applies_dead
+                    FROM ref_artifact_library
+                    WHERE (t_code = ANY(:codes) OR applies_live = false)
+                      AND applies_dead = true
+                      AND (custom_vql IS NOT NULL OR surgical_yaml IS NOT NULL
+                           OR custom_vql_dead IS NOT NULL OR surgical_yaml_dead IS NOT NULL)
+                    ORDER BY t_code
+                """), {"codes": intel_codes}).fetchall()
+            else:
+                lib_rows = conn.execute(text("""
+                    SELECT t_code, custom_vql, surgical_yaml, custom_vql_dead, surgical_yaml_dead,
+                           applies_live, applies_dead
+                    FROM ref_artifact_library
+                    WHERE t_code = ANY(:codes)
+                      AND (:unknown OR applies_live = true)
+                    ORDER BY t_code
+                """), {"codes": intel_codes, "unknown": mode == "UNKNOWN"}).fetchall()
 
-        target_list = [{
-            "t_code":        r.t_code,
-            "orca_name":     r.t_code,
-            "custom_vql":    lib_map[r.t_code].custom_vql if r.t_code in lib_map else '',
-            "surgical_yaml": lib_map[r.t_code].surgical_yaml if r.t_code in lib_map else '',
-        } for r in intel_rows]
+        def _pick(r):
+            # dead-disk: prefer the authored dead variant, else the default query
+            if is_dead and ((r.custom_vql_dead or "").strip() or (r.surgical_yaml_dead or "").strip()):
+                return r.custom_vql_dead or "", r.surgical_yaml_dead or ""
+            return r.custom_vql or "", r.surgical_yaml or ""
+
+        target_list = []
+        for r in lib_rows:
+            vql, yaml = _pick(r)
+            if not (vql.strip() or yaml.strip()):
+                continue
+            target_list.append({"t_code": r.t_code, "orca_name": r.t_code,
+                                 "custom_vql": vql, "surgical_yaml": yaml})
+        if not target_list:
+            raise HTTPException(status_code=404, detail=(
+                f"No techniques apply to asset {asset_id} in {mode} mode "
+                "(every mapped technique is not applicable to this analysis mode)."))
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_root = os.path.join(DATA_ROOT, case_row.case_name.replace(" ", "_"), run_id)
         os.makedirs(output_root, exist_ok=True)

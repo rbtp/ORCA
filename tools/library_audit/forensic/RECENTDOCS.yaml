@@ -1,0 +1,23 @@
+name: Forensic.Execution.RecentDocs
+description: |
+  Recently opened documents from the per-user RecentDocs registry keys of a
+  mounted disk image (dead disk). Enumerates
+  HKEY_USERS/<user>/Software/Microsoft/Windows/CurrentVersion/Explorer/RecentDocs
+  and its per-extension subkeys; the leading UTF-16LE filename is decoded from
+  each binary value. Reports the file name, the owning subkey (file extension /
+  "RecentDocs" for the global list), the key write time and the user.
+  NOTE: the RecentDocs key is empty on a freshly installed image, so a clean
+  disk yields no rows; the query is validated against a clean image.
+sources:
+- name: RecentDocs
+  query: |
+    SELECT split(string=utf16(string=Data.value), sep="\x00")[0] AS FileName,
+           basename(path=dirname(path=OSPath)) AS SubKey,
+           OSPath.Components[1] AS User,
+           Mtime AS KeyWriteTime,
+           Name AS ValueName,
+           OSPath
+    FROM glob(globs='HKEY_USERS/*/Software/Microsoft/Windows/CurrentVersion/Explorer/RecentDocs/**',
+              accessor='registry')
+    WHERE Data.type = "REG_BINARY" AND Name != "MRUListEx"
+    ORDER BY User

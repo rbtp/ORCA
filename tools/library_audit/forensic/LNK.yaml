@@ -1,0 +1,34 @@
+name: Forensic.Windows.Lnk
+description: |
+  Recent-file and program-launch evidence parsed from Windows LNK
+  shortcut files on a mounted Windows disk image (dead disk). LNK files
+  in the Recent folder, Desktop and Start Menu record the target file
+  that was opened, its path, size and MAC timestamps, the working
+  directory and any arguments - evidence of files that were accessed
+  even if the target itself is now gone.
+
+  Wraps the built-in Windows.Forensics.Lnk and widens the default glob
+  to cover Recent, Desktop and the whole Start Menu for every user plus
+  ProgramData. SuspiciousOnly is left off so every LNK is returned; the
+  built-in's Suspicious column still flags anomalies.
+reference:
+  - https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-shllink
+parameters:
+  - name: TargetGlob
+    default: C:\{ProgramData,Users\*\{Desktop,AppData\*\Microsoft\Windows\{Start Menu\Programs,Recent}}}\**\*.lnk
+sources:
+  - name: Lnk
+    query: |
+      SELECT SourceFile.OSPath AS LnkFile,
+             SourceFile.Mtime AS LnkModified,
+             SourceFile.Btime AS LnkCreated,
+             StringData.TargetPath AS TargetPath,
+             StringData.Arguments AS Arguments,
+             StringData.WorkingDir AS WorkingDir,
+             LinkTarget.LinkTarget AS LinkTargetName,
+             ShellLinkHeader.CreationTime AS TargetCreated,
+             ShellLinkHeader.WriteTime AS TargetModified,
+             ShellLinkHeader.AccessTime AS TargetAccessed,
+             ShellLinkHeader.FileSize AS TargetSize,
+             Suspicious
+      FROM Artifact.Windows.Forensics.Lnk(TargetGlob=TargetGlob)

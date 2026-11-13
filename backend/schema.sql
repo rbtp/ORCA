@@ -1429,7 +1429,11 @@ CREATE TABLE public.ref_artifact_library (
     dead_disk_analysis text,
     custom_vql text,
     surgical_yaml text,
-    updated_at timestamp without time zone DEFAULT now()
+    updated_at timestamp without time zone DEFAULT now(),
+    applies_live boolean DEFAULT true NOT NULL,
+    applies_dead boolean DEFAULT true NOT NULL,
+    custom_vql_dead text,
+    surgical_yaml_dead text
 );
 
 

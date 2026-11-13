@@ -1367,11 +1367,13 @@ async def get_artifact_library(t_code: str, current_user: dict = Depends(get_cur
     try:
         row = session.execute(text("""
             SELECT t_code, name AS technique_name, live_analysis, dead_disk_analysis,
-                   collection_strategy, custom_vql, surgical_yaml
+                   collection_strategy, custom_vql, surgical_yaml,
+                   custom_vql_dead, surgical_yaml_dead, applies_live, applies_dead
             FROM public.ref_artifact_library WHERE t_code = :t_code
         """), {"t_code": t_code.strip()}).mappings().first()
         return dict(row) if row else {"t_code": t_code, "technique_name": "", "live_analysis": "",
-                                       "dead_disk_analysis": "", "collection_strategy": "", "custom_vql": "", "surgical_yaml": ""}
+                                       "dead_disk_analysis": "", "collection_strategy": "", "custom_vql": "", "surgical_yaml": "",
+                                       "custom_vql_dead": "", "surgical_yaml_dead": "", "applies_live": True, "applies_dead": True}
     finally:
         session.close()
 
@@ -1459,17 +1461,28 @@ async def update_artifact_library(t_code: str, data: dict = Body(...), current_u
         # return {"status": "SUCCESS"}, a phantom save that silently did
         # nothing. t_code has a UNIQUE constraint (ref_artifact_library_
         # t_code_key), so ON CONFLICT works directly off it.
+        # applies_live / applies_dead and the optional dead-disk query variant
+        # (custom_vql_dead / surgical_yaml_dead) default to the current row when
+        # the caller doesn't send them, so an older client can't blank them.
         session.execute(text("""
             INSERT INTO public.ref_artifact_library
-                (t_code, name, live_analysis, dead_disk_analysis, collection_strategy, custom_vql, surgical_yaml, updated_at)
-            VALUES (:t, :name, :live, :dead, :coll, :vql, :yaml, NOW())
+                (t_code, name, live_analysis, dead_disk_analysis, collection_strategy, custom_vql, surgical_yaml,
+                 custom_vql_dead, surgical_yaml_dead, applies_live, applies_dead, updated_at)
+            VALUES (:t, :name, :live, :dead, :coll, :vql, :yaml,
+                    :vql_dead, :yaml_dead, COALESCE(:a_live, TRUE), COALESCE(:a_dead, TRUE), NOW())
             ON CONFLICT (t_code) DO UPDATE SET
                 name=:name, live_analysis=:live, dead_disk_analysis=:dead,
                 collection_strategy=:coll, custom_vql=:vql, surgical_yaml=:yaml,
+                custom_vql_dead=COALESCE(:vql_dead, ref_artifact_library.custom_vql_dead),
+                surgical_yaml_dead=COALESCE(:yaml_dead, ref_artifact_library.surgical_yaml_dead),
+                applies_live=COALESCE(:a_live, ref_artifact_library.applies_live),
+                applies_dead=COALESCE(:a_dead, ref_artifact_library.applies_dead),
                 updated_at=NOW()
         """), {"name": data.get("name"), "live": data.get("live_analysis"), "dead": data.get("dead_disk_analysis"),
                "coll": data.get("collection_strategy"), "vql": data.get("custom_vql"),
-               "yaml": data.get("surgical_yaml"), "t": t_code})
+               "yaml": data.get("surgical_yaml"), "t": t_code,
+               "vql_dead": data.get("custom_vql_dead"), "yaml_dead": data.get("surgical_yaml_dead"),
+               "a_live": data.get("applies_live"), "a_dead": data.get("applies_dead")})
         session.commit()
         return {"status": "SUCCESS"}
     except Exception as e:

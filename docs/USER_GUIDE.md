@@ -167,6 +167,14 @@ The **PKG** panel on each asset shows live collection progress:
 
    Hover over either button for the same explanation.
 
+7. **The asset's analysis mode decides which query runs.** Set it per asset (`LIVE_REMOTE` or `DEAD_DISK_LOCAL`; a mount sets `DEAD_DISK_LOCAL` automatically):
+   - **Live host** runs each technique's normal (live) query and skips the dead-disk-only forensic collections.
+   - **Dead disk image** runs each technique's dead-disk variant when the library has one, otherwise its normal query through the automatic dead-disk remap (the image is presented as C:, its registry hives are loaded). It also runs the **forensic collections** below, and it marks a live-only technique (running-process memory, live network state) **N/A** instead of showing an empty result.
+   A technique's applicability (LIVE / DEAD) and its optional dead-disk query are set in the Artifact Library Editor.
+
+8. **Forensic collections (dead disk only).** On a dead-disk asset ORCA also pulls the core forensic artifacts an examiner wants off any image, regardless of the case's threat-actor mapping, so nothing is missed: the NTFS **MFT** (full filesystem timeline) and **USN** journal (file create/delete/rename history), **Prefetch**, **Amcache** and **ShimCache** (program execution), **SRUM** (per-app/network resource usage), **WMI** persistent subscriptions, **Shellbags** (folder-access history), **LNK** shortcuts, the **Recycle Bin**, **scheduled tasks**, **services**, **autoruns**, **UserAssist** and **RecentDocs**. Some of these are empty on a freshly-installed image (no documents opened, nothing deleted) and fill in on a real one; **SRUM** and other ESE databases (`SRUDB.dat`) may need recovery (`esentutl /r`) first if the image was captured while the system was running.
+
+
    | | Run on server | Run on analyst workstation (agent) |
    |---|---|---|
    | Where it runs | Linux container on the ORCA server | Windows computer running the agent |

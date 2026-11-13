@@ -1,0 +1,22 @@
+name: Forensic.Filesystem.MFT
+description: |
+  Full NTFS Master File Table timeline from a mounted dead disk. Reads the raw
+  volume ($MFT) and returns every in-use file record with all four
+  $STANDARD_INFORMATION (0x10) timestamps (Created, Modified, MFT-changed,
+  Accessed). Raw-NTFS mode: the token :rawdrive is replaced by the agent with the
+  real drive letter and the query runs without the dead-disk remap.
+type: CLIENT
+sources:
+- name: MFT
+  query: |
+    SELECT EntryNumber,
+           InUse,
+           FileName,
+           FileSize,
+           OSPath,
+           Created0x10 AS SI_Created,
+           LastModified0x10 AS SI_Modified,
+           LastRecordChange0x10 AS SI_MFTModified,
+           LastAccess0x10 AS SI_Accessed
+    FROM parse_mft(filename=":rawdrive/$MFT", accessor="ntfs")
+    WHERE InUse

@@ -1,0 +1,16 @@
+name: Forensic.Execution.UserAssist
+description: |
+  Program-execution evidence from the per-user UserAssist registry keys of a
+  mounted disk image (dead disk). The ROT13-encoded value names are decoded by
+  the built-in Windows.Registry.UserAssist (which reads every NTUSER.DAT under
+  the image); reports the decoded program name, run count, last run time and
+  the user.
+sources:
+- name: UserAssist
+  query: |
+    SELECT Name AS Program,
+           NumberOfExecutions AS RunCount,
+           LastExecution AS LastRun,
+           User
+    FROM Artifact.Windows.Registry.UserAssist()
+    ORDER BY User

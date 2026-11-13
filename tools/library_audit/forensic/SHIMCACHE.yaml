@@ -1,0 +1,17 @@
+name: Forensic.Execution.ShimCache
+description: |
+  AppCompatCache (ShimCache) execution evidence from the SYSTEM registry hive on a
+  mounted dead disk. Registry mode (mode 1): runs under the dead-disk remap and
+  reads HKLM/System/ControlSet*/Control/Session Manager/AppCompatCache (= the
+  image's SYSTEM hive). Each entry records a program path, its file-modification
+  time and an execution flag; Position preserves the cache order (recent first).
+type: CLIENT
+sources:
+- name: ShimCache
+  query: |
+    SELECT Position,
+           Path,
+           ModificationTime,
+           ExecutionFlag
+    FROM Artifact.Windows.Registry.AppCompatCache()
+    ORDER BY Position

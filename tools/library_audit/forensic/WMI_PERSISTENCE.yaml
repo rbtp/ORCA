@@ -1,0 +1,83 @@
+name: Forensic.Windows.WMIPersistence
+description: |
+  WMI permanent event subscriptions (filters, consumers and their
+  bindings) recovered directly from the WMI repository
+  (C:/Windows/System32/wbem/Repository/OBJECTS.DATA) on a mounted
+  Windows disk image (dead disk).
+
+  The built-in Windows.Persistence.PermanentWMIEvents queries the LIVE
+  WMI service (wmi() plugin), which is disabled under the dead-disk
+  remap and would read the analyst host rather than the image. Instead
+  this artifact carves OBJECTS.DATA with parse_records_with_regex, the
+  standard dead-disk technique: __FilterToConsumerBinding records store
+  the consumer type/name and the bound __EventFilter name adjacently,
+  and __EventFilter records store the WQL trigger query, so both are
+  recovered by regex without a running WMI service.
+
+  Every clean Windows image has one benign subscription (the "SCM Event
+  Log Consumer" NTEventLogEventConsumer bound to the "SCM Event Log
+  Filter"); a CommandLineEventConsumer or ActiveScriptEventConsumer with
+  a script/command body (the ScriptedConsumers source) is the classic
+  WMI persistence red flag (ATT&CK T1546.003).
+reference:
+  - https://attack.mitre.org/techniques/T1546/003/
+  - https://github.com/davidpany/WMI_Forensics
+parameters:
+  - name: RepositoryPath
+    default: C:/Windows/System32/wbem/Repository/OBJECTS.DATA
+sources:
+  - name: FilterToConsumerBinding
+    description: Consumer/filter bindings, each enriched with the filter's WQL query.
+    query: |
+      LET Repo = RepositoryPath
+      LET RepoStat <= SELECT Mtime FROM stat(filename=Repo, accessor="auto")
+      LET Filters = SELECT FilterName, Query
+        FROM parse_records_with_regex(file=Repo, accessor="auto",
+          regex='''(?P<FilterName>[\x20-\x7e]{3,100})[\x00-\x1f]+(?P<Query>(?i:select)[\s\S]{3,400}?)[\x00-\x1f]+WQL''')
+      LET FilterMap <= to_dict(item={
+          SELECT FilterName AS _key, Query AS _value FROM Filters
+      })
+      SELECT ConsumerType,
+             ConsumerName,
+             FilterName,
+             get(item=FilterMap, field=FilterName) AS FilterQuery,
+             Repo AS Repository,
+             RepoStat[0].Mtime AS RepositoryModified
+      FROM parse_records_with_regex(file=Repo, accessor="auto",
+          regex='''(?P<ConsumerType>[A-Za-z]+EventConsumer)\.Name="(?P<ConsumerName>[^"]{1,200})"[\x00-\xff]{0,120}?__EventFilter\.Name="(?P<FilterName>[^"]{1,200})"''')
+  - name: EventFilters
+    description: All __EventFilter trigger queries (WQL) found in the repository.
+    query: |
+      LET Repo = RepositoryPath
+      LET RepoStat <= SELECT Mtime FROM stat(filename=Repo, accessor="auto")
+      SELECT FilterName,
+             Query,
+             Repo AS Repository,
+             RepoStat[0].Mtime AS RepositoryModified
+      FROM parse_records_with_regex(file=Repo, accessor="auto",
+          regex='''(?P<FilterName>[\x20-\x7e]{3,100})[\x00-\x1f]+(?P<Query>(?i:select)[\s\S]{3,400}?)[\x00-\x1f]+WQL''')
+  - name: Consumers
+    description: |
+      Every __EventConsumer instance (by its Type.Name="..." reference),
+      with the script/command body for scripted consumers. The
+      ScriptOrCommand column is populated for ActiveScriptEventConsumer
+      (ScriptText) and CommandLineEventConsumer (command line) instances
+      - the classic WMI persistence payload (ATT&CK T1546.003) - and is
+      null for benign consumers such as the NTEventLogEventConsumer that
+      every clean image carries.
+    query: |
+      LET Repo = RepositoryPath
+      LET RepoStat <= SELECT Mtime FROM stat(filename=Repo, accessor="auto")
+      LET ScriptMap <= to_dict(item={
+          SELECT ConsumerName AS _key, ScriptOrCommand AS _value
+          FROM parse_records_with_regex(file=Repo, accessor="auto",
+              regex='''(?P<ConsumerType>ActiveScriptEventConsumer|CommandLineEventConsumer)\.Name="(?P<ConsumerName>[^"]{1,200})"[\x00-\xff]{0,40}?(?P<ScriptOrCommand>[\x20-\x7e]{5,800})''')
+      })
+      SELECT ConsumerType,
+             ConsumerName,
+             get(item=ScriptMap, field=ConsumerName) AS ScriptOrCommand,
+             Repo AS Repository,
+             RepoStat[0].Mtime AS RepositoryModified
+      FROM parse_records_with_regex(file=Repo, accessor="auto",
+          regex='''(?P<ConsumerType>[A-Za-z]+EventConsumer)\.Name="(?P<ConsumerName>[^"]{1,200})"''')
+      GROUP BY ConsumerType, ConsumerName

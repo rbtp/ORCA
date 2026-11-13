@@ -514,14 +514,27 @@ class OrcaAgent:
         # image: collect through Velociraptor's dead-disk remapping (see
         # _deaddisk_config) so C:, HKLM and HKEY_USERS mean the image.
         dead_disk = self._is_dead_disk(tsource)
+        # A raw-NTFS artifact ($MFT / USN journal) reads the mounted volume
+        # itself via the ntfs accessor and the :rawdrive placeholder. The
+        # dead-disk remap presents the image as C: for file/registry access but
+        # hides the raw volume, so a :rawdrive query runs WITHOUT the remap,
+        # straight against the real drive letter.
+        uses_rawdrive = ":rawdrive" in (custom_vql + surgical_yaml)
         vr_base = [vr_exe]
-        if dead_disk:
+        if dead_disk and not uses_rawdrive:
             remap, control_set = self._deaddisk_config(self._drive_of(tsource), vr_exe)
             vr_base = [vr_exe, "--config", remap]
             custom_vql = self._rewrite_for_image(custom_vql, control_set)
             surgical_yaml = self._rewrite_for_image(surgical_yaml, control_set)
             clean_tsource = "C:"  # the remap presents the image as C:
-        live_only = self._live_only_plugins_used(custom_vql + "\n" + surgical_yaml) if dead_disk else []
+        # Placeholders in a query:
+        #   :tsource  -> the collection root (C: under the dead-disk remap, else the drive)
+        #   :rawdrive -> the real mounted drive letter, for raw-NTFS artifacts
+        raw_drive = (self._drive_of(tsource) or "C") + ":"
+        for _ph, _val in ((":rawdrive", raw_drive), (":tsource", clean_tsource)):
+            custom_vql = custom_vql.replace(_ph, _val)
+            surgical_yaml = surgical_yaml.replace(_ph, _val)
+        live_only = self._live_only_plugins_used(custom_vql + "\n" + surgical_yaml) if (dead_disk and not uses_rawdrive) else []
         work_dir = tempfile.mkdtemp(prefix=f"orca_art_{t_code}_")
 
         def vr_run(args):

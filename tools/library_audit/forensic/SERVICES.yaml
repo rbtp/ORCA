@@ -1,0 +1,38 @@
+name: Forensic.System.Services
+description: |
+  Installed Windows services and drivers from the SYSTEM hive of a mounted
+  disk image (dead disk). CurrentControlSet is resolved from
+  HKLM/System/Select/Current, then every key under ControlSet00N/Services is
+  read for ImagePath, Start type, service type, display name and the account
+  it runs as. NonSystemImagePath flags an ImagePath that is not under the
+  Windows system directories (a common place to hide a malicious service).
+sources:
+- name: Services
+  query: |
+    LET SysRe <= '''(?i)(system32|systemroot|%systemroot%|\\windows\\|\\drivers\\|servicing)'''
+
+    LET StartMap <= dict(`0`="0 - Boot", `1`="1 - System", `2`="2 - Automatic",
+                         `3`="3 - Manual", `4`="4 - Disabled")
+
+    LET ControlSet <= SELECT format(format="HKEY_LOCAL_MACHINE/System/ControlSet%03d/Services",
+                                   args=Data.value) AS Base
+      FROM glob(globs='HKEY_LOCAL_MACHINE/System/Select/Current', accessor='registry')
+
+    SELECT ServiceName, DisplayName, ImagePath, StartType, ServiceType,
+           RunAsAccount,
+           if(condition=NOT ImagePath =~ SysRe, then=TRUE, else=FALSE) AS NonSystemImagePath,
+           KeyModTime, OSPath
+    FROM foreach(row=ControlSet, query={
+       SELECT basename(path=Key.OSPath) AS ServiceName,
+              DisplayName || "" AS DisplayName,
+              ImagePath || "" AS ImagePath,
+              get(item=StartMap, field=format(format="%d", args=Start || -1))
+                || format(format="%d", args=Start || -1) AS StartType,
+              Type || -1 AS ServiceType,
+              ObjectName || "" AS RunAsAccount,
+              Key.FileInfo.ModTime AS KeyModTime,
+              Key.OSPath AS OSPath
+       FROM read_reg_key(globs=Base + '/*', accessor='registry')
+    })
+    WHERE ImagePath
+    ORDER BY ServiceName

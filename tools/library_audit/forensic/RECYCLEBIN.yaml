@@ -1,0 +1,22 @@
+name: Forensic.Windows.RecycleBin
+description: |
+  Deleted-file records recovered from the Recycle Bin $I metadata files
+  (C:/$Recycle.Bin/<SID>/$I*) on a mounted Windows disk image (dead
+  disk). Each $I file records the original full path, logical size and
+  deletion time of a file a user sent to the Recycle Bin; the matching
+  $R file (DeletedContentFile) still holds the recoverable content.
+
+  Wraps the built-in Windows.Forensics.RecycleBin (Vista+ $I format;
+  does not parse XP-era INFO2 files).
+reference:
+  - https://www.magnetforensics.com/blog/artifact-profile-recycle-bin/
+sources:
+  - name: RecycleBin
+    query: |
+      SELECT DeletedTimestamp,
+             OriginalFilePath,
+             FileSize,
+             Name AS RecycleId,
+             OSPath AS MetadataFile,
+             RecyclePath AS DeletedContentFile
+      FROM Artifact.Windows.Forensics.RecycleBin()

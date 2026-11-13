@@ -1,0 +1,47 @@
+name: Forensic.Persistence.Autoruns
+description: |
+  Autostart registry entries from a mounted disk image (dead disk): Run /
+  RunOnce / RunOnceEx / policy Run keys for HKLM (including Wow6432Node) and
+  for every user hive under HKEY_USERS, plus the Winlogon Shell / Userinit /
+  Taskman / VmApplet / GinaDLL values (HKLM and per-user). Reports the hive,
+  key, value name and the command executed at logon/boot.
+sources:
+- name: Autoruns
+  query: |
+    LET RunGlobs <= (
+      'HKEY_LOCAL_MACHINE/Software/Microsoft/Windows/CurrentVersion/Run/*',
+      'HKEY_LOCAL_MACHINE/Software/Microsoft/Windows/CurrentVersion/RunOnce/*',
+      'HKEY_LOCAL_MACHINE/Software/Microsoft/Windows/CurrentVersion/RunOnceEx/*',
+      'HKEY_LOCAL_MACHINE/Software/Microsoft/Windows/CurrentVersion/RunServices/*',
+      'HKEY_LOCAL_MACHINE/Software/Microsoft/Windows/CurrentVersion/RunServicesOnce/*',
+      'HKEY_LOCAL_MACHINE/Software/Microsoft/Windows/CurrentVersion/Policies/Explorer/Run/*',
+      'HKEY_LOCAL_MACHINE/Software/Wow6432Node/Microsoft/Windows/CurrentVersion/Run/*',
+      'HKEY_LOCAL_MACHINE/Software/Wow6432Node/Microsoft/Windows/CurrentVersion/RunOnce/*',
+      'HKEY_USERS/*/Software/Microsoft/Windows/CurrentVersion/Run/*',
+      'HKEY_USERS/*/Software/Microsoft/Windows/CurrentVersion/RunOnce/*',
+      'HKEY_USERS/*/Software/Microsoft/Windows/CurrentVersion/RunOnceEx/*',
+      'HKEY_USERS/*/Software/Microsoft/Windows/CurrentVersion/Policies/Explorer/Run/*'
+    )
+
+    LET WinlogonGlobs <= (
+      'HKEY_LOCAL_MACHINE/Software/Microsoft/Windows NT/CurrentVersion/Winlogon/*',
+      'HKEY_USERS/*/Software/Microsoft/Windows NT/CurrentVersion/Winlogon/*'
+    )
+
+    LET Runs = SELECT OSPath, Name AS ValueName, Data.value AS Command
+      FROM glob(globs=RunGlobs, accessor='registry')
+      WHERE Data.type =~ 'SZ' AND Command
+
+    LET Winlogon = SELECT OSPath, Name AS ValueName, Data.value AS Command
+      FROM glob(globs=WinlogonGlobs, accessor='registry')
+      WHERE ValueName =~ '''^(Shell|Userinit|Taskman|VmApplet|GinaDLL)$''' AND Command
+
+    SELECT if(condition=OSPath =~ '^HKEY_USERS',
+              then="HKU\\" + OSPath.Components[1],
+              else="HKLM") AS Hive,
+           dirname(path=OSPath) AS Key,
+           ValueName,
+           Command,
+           OSPath
+    FROM chain(a={SELECT * FROM Runs}, b={SELECT * FROM Winlogon})
+    ORDER BY Hive

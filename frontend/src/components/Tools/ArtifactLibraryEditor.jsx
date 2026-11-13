@@ -26,7 +26,11 @@ const ArtifactLibraryEditor = () => {
     dead_disk_analysis: '',
     collection_strategy: '',
     custom_vql: '',
-    surgical_yaml: ''
+    surgical_yaml: '',
+    custom_vql_dead: '',
+    surgical_yaml_dead: '',
+    applies_live: true,
+    applies_dead: true
   });
 
   const API_BASE = `${import.meta.env.VITE_API_URL}/api/mitre`;
@@ -84,7 +88,11 @@ const ArtifactLibraryEditor = () => {
         dead_disk_analysis: res.data.dead_disk_analysis || '',
         collection_strategy: res.data.collection_strategy || '',
         custom_vql: res.data.custom_vql || '',
-        surgical_yaml: res.data.surgical_yaml || ''
+        surgical_yaml: res.data.surgical_yaml || '',
+        custom_vql_dead: res.data.custom_vql_dead || '',
+        surgical_yaml_dead: res.data.surgical_yaml_dead || '',
+        applies_live: res.data.applies_live !== false,
+        applies_dead: res.data.applies_dead !== false
       });
       setActivePayloadTab(res.data.surgical_yaml ? 'YAML' : 'RAW');
       setStep(2);
@@ -345,7 +353,40 @@ const ArtifactLibraryEditor = () => {
         <TerminalInput label="Live Analysis Logic" value={formData.live_analysis} onChange={(v) => setFormData({...formData, live_analysis: v})} />
         <TerminalInput label="Dead Disk Strategy" value={formData.dead_disk_analysis} onChange={(v) => setFormData({...formData, dead_disk_analysis: v})} />
         <TerminalInput label="Collection Parameters" value={formData.collection_strategy} onChange={(v) => setFormData({...formData, collection_strategy: v})} />
-        
+
+        {/* Where this technique can produce evidence. Drives which assets run it,
+            by the asset's analysis mode (LIVE host vs DEAD-disk image). */}
+        <div style={{ display: 'flex', gap: '24px', alignItems: 'center', margin: '10px 0 16px', fontFamily: 'monospace', fontSize: '11px', color: '#bbb' }}>
+          <span style={{ color: '#666' }}>APPLIES_TO:</span>
+          <label style={{ cursor: 'pointer', color: formData.applies_live ? '#00ff41' : '#555' }}>
+            <input type="checkbox" checked={formData.applies_live} onChange={e => setFormData({...formData, applies_live: e.target.checked})} style={{ marginRight: 6 }} />
+            LIVE host
+          </label>
+          <label style={{ cursor: 'pointer', color: formData.applies_dead ? '#00ff41' : '#555' }}>
+            <input type="checkbox" checked={formData.applies_dead} onChange={e => setFormData({...formData, applies_dead: e.target.checked})} style={{ marginRight: 6 }} />
+            DEAD disk image
+          </label>
+          <span style={{ color: '#555', fontSize: '10px' }}>
+            (unchecking one marks the technique N/A for that analysis mode — e.g. live-only memory, or a dead-disk-only forensic artifact)
+          </span>
+        </div>
+
+        <details style={{ margin: '0 0 16px', border: '1px solid #111', background: '#050505' }}>
+          <summary style={{ cursor: 'pointer', padding: '8px 12px', fontFamily: 'monospace', fontSize: '11px', color: '#ffaa00' }}>
+            DEAD-DISK QUERY OVERRIDE (optional)
+          </summary>
+          <div style={{ padding: '12px' }}>
+            <div style={{ color: '#777', fontFamily: 'monospace', fontSize: '10px', marginBottom: '10px' }}>
+              Leave blank to run the query above on a dead disk via the automatic remap (image as C:, hives loaded) —
+              this is right for most techniques. Fill one in only when a dead disk needs different logic. Raw-NTFS
+              artifacts ($MFT / USN) use the token <code style={{ color: '#00ff41' }}>:rawdrive</code> with
+              <code style={{ color: '#00ff41' }}> accessor="ntfs"</code>; it resolves to the real mounted volume.
+            </div>
+            <TerminalInput label="DEAD_VQL_RAW (optional)" value={formData.custom_vql_dead} onChange={(v) => setFormData({...formData, custom_vql_dead: v})} isCode={true} />
+            <TerminalInput label="DEAD_VQL_YAML_ARTIFACT (optional)" value={formData.surgical_yaml_dead} onChange={(v) => setFormData({...formData, surgical_yaml_dead: v})} isCode={true} />
+          </div>
+        </details>
+
         <div style={{ display: 'flex', gap: '2px', marginBottom: '-1px' }}>
           <button 
             onClick={() => setActivePayloadTab('RAW')}

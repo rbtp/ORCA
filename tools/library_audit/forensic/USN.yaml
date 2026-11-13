@@ -1,0 +1,21 @@
+name: Forensic.Filesystem.USN
+description: |
+  NTFS USN change journal ($Extend/$UsnJrnl:$J) from a mounted dead disk: file
+  create / delete / rename / write history with per-event timestamp and change
+  reason. Raw-NTFS mode: the :rawdrive token is replaced by the agent with the
+  real drive letter and the query runs without the dead-disk remap. Uses the
+  built-in Windows.Forensics.Usn, which parses the $J stream and reassembles the
+  full path for each entry from the $MFT.
+type: CLIENT
+sources:
+- name: USN
+  query: |
+    SELECT Timestamp,
+           Filename,
+           OSPath,
+           Reason,
+           FileAttributes,
+           MFTId,
+           ParentMFTId,
+           Usn
+    FROM Artifact.Windows.Forensics.Usn(Device=":rawdrive")

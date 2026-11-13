@@ -182,6 +182,53 @@ T1001.002*, T1003.006*, T1010*, T1018*, T1021.001*, T1021.002*, T1021.003*, T102
 
 How the disks were read: the two disks are clones (same disk signature), so they were mounted with a fake signature and a throwaway write overlay (`tools/library_audit/mount_overlay.ps1`; the .vmdk files are never written). To keep 400+ collections practical, the big event logs on the overlays were cut to the attack window (attacked disk: 23:18-02:00 UTC; clean disk: emptied, so any log row on the attacked disk in the window counts as new). File, registry and other non-log evidence is compared between the two full disks.
 
+## Live host vs dead-disk image
+
+Every analysis so far runs each technique's query against a mounted disk image through the agent's
+dead-disk remap (the image as C:, its registry hives loaded) -- that is the path the Atomic scoring above
+used. From 2026-11-13 the asset's **analysis mode** decides what runs, so live-host and dead-disk analysis
+are first-class and separate:
+
+- A technique carries `applies_live` / `applies_dead` flags and an optional dead-disk query variant
+  (`custom_vql_dead` / `surgical_yaml_dead`). A **live** asset runs the normal query; a **dead-disk** asset
+  runs the dead variant when present, else the normal query through the remap. A live-only technique
+  (running-process memory, live network state) is marked **N/A** on a dead disk instead of returning empty;
+  a dead-disk-only collection is absent on a live host. These are set in the Artifact Library Editor.
+- Raw-NTFS artifacts ($MFT, USN journal) can't go through the remap (it exposes files and the registry, not
+  the raw volume). A dead-disk query reads them from the real mounted volume with the `:rawdrive` placeholder
+  and `accessor="ntfs"`; the agent runs such a query directly against the drive, without the remap. (Raw
+  volume access needs the agent to run elevated, which it already does to mount images.)
+
+### Forensic collections (dead disk only)
+
+A dead-disk asset also runs 15 **forensic collections** -- the artifacts an examiner wants off any image,
+independent of the case's threat-actor mapping, so the "capture everything" baseline isn't gated by which
+techniques a query happens to cover:
+
+| collection | source | rows on the clean test image |
+|---|---|---:|
+| MFT | NTFS Master File Table (raw) | 792,588 |
+| USN | NTFS USN change journal (raw) | 66,071 |
+| Services | SYSTEM hive services/drivers | 673 |
+| Amcache | Amcache.hve | 486 |
+| Scheduled tasks | Tasks XML + TaskCache | 251 |
+| Prefetch | Windows Prefetch | 230 |
+| ShimCache | AppCompatCache (SYSTEM hive) | 184 |
+| LNK | shortcut files | 85 |
+| WMI persistence | WMI repository (OBJECTS.DATA) | 8 |
+| Autoruns | Run keys + Winlogon (all hives) | 7 |
+| UserAssist | NTUSER UserAssist | 2 |
+| SRUM | SRUDB.dat (ESE) | 0 * |
+| Shellbags | NTUSER / UsrClass | 0 ** |
+| RecentDocs | NTUSER RecentDocs | 0 ** |
+| Recycle Bin | $Recycle.Bin $I files | 0 ** |
+
+Every collection passes `artifacts verify` and was run through the agent against a mounted Windows 11 image.
+\* SRUM's `SRUDB.dat` was a dirty ESE database on this image (it was captured while the VM was running), which
+`parse_ese` won't open; it returns rows on a cleanly-acquired or `esentutl`-recovered image. \** empty only
+because the freshly-installed test image has no browsing history, opened documents or deleted files; the query
+is correct and returns rows on a real image. The collection definitions are in `tools/library_audit/forensic/`.
+
 ## Rules for writing library queries (Velociraptor 0.77, verified)
 
 - **Backslashes in strings**: in `'...'` and `"..."`, `\\` becomes one backslash, `\n \t \' \"` are escapes, and any other backslash is **dropped** (`'C:\Users'` is `C:Users`, `'\d'` is `d`). For regexes use triple quotes, which keep text as written: `=~ '''.*\\CurrentVersion\\Run'''` (regex `\\` = one literal backslash).

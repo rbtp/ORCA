@@ -1,0 +1,27 @@
+name: Forensic.Windows.Shellbags
+description: |
+  Folder-access history (Shellbags) recovered from the per-user
+  NTUSER.DAT and UsrClass.dat registry hives of a mounted Windows disk
+  image (dead disk). Shellbags record folders that were browsed in
+  Explorer and persist even after the folder or its files are deleted,
+  so they are strong evidence of files/paths that once existed.
+
+  Wraps the built-in Windows.Forensics.Shellbags, which reads the hive
+  files directly with the raw registry parser (so it works on an image
+  with no logged-on user), and adds a per-user column derived from the
+  hive path.
+reference:
+  - https://www.sans.org/blog/computer-forensic-artifacts-windows-7-shellbags/
+sources:
+  - name: Shellbags
+    query: |
+      SELECT regex_replace(source=Hive,
+                 re='''(?i).*[\\/]Users[\\/]([^\\/]+)[\\/].*''',
+                 replace="$1") AS User,
+             FullPath,
+             Description.LongName || Description.ShortName || "?" AS FolderName,
+             ModTime AS RegModified,
+             Hive AS HivePath,
+             KeyPath,
+             Slot
+      FROM Artifact.Windows.Forensics.Shellbags()

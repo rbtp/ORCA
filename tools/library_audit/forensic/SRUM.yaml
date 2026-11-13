@@ -1,0 +1,50 @@
+name: Forensic.Windows.SRUM
+description: |
+  Per-application and per-network resource usage from the System
+  Resource Usage Monitor database (C:/Windows/System32/sru/SRUDB.dat)
+  on a mounted Windows disk image (dead disk). SRUM keeps ~30-60 days of
+  history of which application ran, when, and how many bytes it sent and
+  received over each network - useful for proving execution and data
+  movement.
+
+  Wraps the built-in Windows.Forensics.SRUM (one source per SRUM table).
+  NOTE: SRUDB.dat is an ESE database; if the image was captured while the
+  system was running, the on-disk copy can be in a dirty (unflushed)
+  state that Velociraptor's parse_ese refuses - on such an image these
+  sources return no rows until the database is recovered (esentutl /r).
+reference:
+  - https://github.com/libyal/esedb-kb/blob/main/documentation/System%20Resource%20Usage%20Monitor%20(SRUM).asciidoc
+sources:
+  - name: ApplicationResourceUsage
+    query: |
+      SELECT TimeStamp,
+             App AS Application,
+             User,
+             UserSid,
+             ForegroundBytesRead,
+             ForegroundBytesWritten,
+             BackgroundBytesRead,
+             BackgroundBytesWritten,
+             SRUMId
+      FROM Artifact.Windows.Forensics.SRUM(source="Application Resource Usage")
+  - name: NetworkUsage
+    query: |
+      SELECT TimeStamp,
+             App AS Application,
+             User,
+             UserSid,
+             BytesSent,
+             BytesRecvd,
+             InterfaceLuid,
+             L2ProfileId
+      FROM Artifact.Windows.Forensics.SRUM(source="Network Usage")
+  - name: ExecutionStats
+    query: |
+      SELECT TimeStamp,
+             App AS Application,
+             User,
+             UserSid,
+             EndTime,
+             DurationMS,
+             NetworkBytesRaw
+      FROM Artifact.Windows.Forensics.SRUM(source="Execution Stats")

@@ -1,0 +1,24 @@
+name: Forensic.System.ScheduledTasks
+description: |
+  Scheduled tasks recovered from a mounted Windows disk image (dead disk).
+  Parses the task XML files under C:/Windows/System32/Tasks (via the built-in
+  Windows.System.TaskScheduler) and reports the command each task runs, its
+  author, the account it runs as, run level and triggers. The same
+  registration metadata is mirrored in the TaskCache registry
+  (SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache).
+sources:
+- name: ScheduledTasks
+  query: |
+    SELECT TaskName,
+           Command,
+           Arguments,
+           _XML.Task.RegistrationInfo.Author AS Author,
+           UserId AS RunAsUser,
+           RunLevel,
+           _XML.Task.Triggers AS Triggers,
+           StartBoundary,
+           RegistrationTime,
+           Mtime,
+           OSPath
+    FROM Artifact.Windows.System.TaskScheduler()
+    ORDER BY TaskName
