@@ -16,53 +16,55 @@ Scope: 601 Windows techniques. 77 library queries for Linux/macOS were left out 
 
 ## Results
 
-| | before | after automatic repair |
-|---|---:|---:|
-| broken (won't run at all) | 8 | 6 |
-| blind (every query part has a defect that stops it matching) | 235 | 31 |
-| partly blind (some query parts have such a defect) | 172 | 47 |
-| partial (minor defect in a filter) | 3 | 4 |
-| noisy (runs, but returns events with no real filter) | 21 | 74 |
-| output (works, but some output columns are blank) | 73 | 45 |
-| ok (no defect found) | 87 | 392 |
-| query parts run on a live workstation | 1637 | 1390 |
-| ... returning rows | 230 | 404 |
-| techniques returning anything | 183 | 290 |
-| ... runtime errors | 221 | 49 |
+| | before | after automatic repair | after hand repair (shipped) |
+|---|---:|---:|---:|
+| broken (won't run at all) | 8 | 6 | 0 |
+| blind (every query part has a defect that stops it matching) | 235 | 31 | 7 |
+| partly blind (some query parts have such a defect) | 172 | 47 | 10 |
+| partial (minor defect in a filter) | 3 | 4 | 4 |
+| noisy (runs, but returns events with no real filter) | 21 | 74 | 83 |
+| output (works, but some output columns are blank) | 73 | 45 | 47 |
+| ok (no defect found) | 87 | 392 | 448 |
+| query parts run on a live workstation | 1637 | 1390 | 1453 |
+| ... returning rows | 230 | 404 | 421 |
+| techniques returning anything | 183 | 290 | 299 |
+| ... runtime errors | 221 | 49 | 37 |
 
-A *blind* query is not a weak query: whatever happened on the computer, it cannot return a row. A workstation with no attack activity returns few rows either way; the live run mainly proves queries run and shows noise. Whether each query catches the technique needs attack simulation (next step below).
+Of the techniques still blind or partly blind after the hand repair, 14 are *not observable on a host* (see below): their old text is kept and labelled, and an empty result is expected.
+
+A *blind* query is not a weak query: whatever happened on the computer, it cannot return a row. A workstation with no attack activity returns few rows either way; the live run mainly proves queries run and shows noise. Whether each query catches the technique is measured by the attack simulation below.
 
 ### Defects found (techniques affected)
 
-| defect | before | after | what it means |
-|---|---:|---:|---|
-| Output column that is always blank | 353 | 30 | `SELECT EventTime, Computer, ...` on raw events: those aren't fields of an event row (they're `System.TimeCreated.SystemTime`, `System.Computer`), so every result row had no time and no computer name. |
-| Looks for an event in a log where it never occurs | 223 | 29 | e.g. Sysmon event 1 (process creation) or PowerShell 4104 searched for in Security.evtx. Event numbers are per log: Security event 1 doesn't exist. |
-| Filters on a name that doesn't exist in the row | 122 | 19 | e.g. `WHERE CommandLine =~ ...` instead of `EventData.CommandLine`, or a field renamed in SELECT then filtered by its old name. The name is empty, so the condition is never true. |
-| Regular expression mangled by VQL string escaping | 119 | 14 | In VQL quoted strings a backslash escapes the next character: `'.*\\CurrentVersion\\Run'` reaches the regex engine as `.*\CurrentVersion\Run` (`\C`, `\R` are not a backslash) and never matches a registry path; `'\s+'` becomes `s+`. Checked by running every regex in Velociraptor against a string it was meant to match. |
-| Compares `System.EventID` to a number | 111 | 7 | `System.EventID` is a structure `{Value: N}`; `System.EventID = 4688` is always false. It must be `System.EventID.Value`. |
-| Uses a field the event doesn't have | 97 | 69 | e.g. `EventData.ProcessName` / `EventData.Image` on Security 4688 (the field is `NewProcessName`), `TargetProcessName` on Sysmon 10 (it's `TargetImage`). |
-| Compares a number to text | 53 | 3 | VQL never treats `3` and `'3'` as equal. `GrantedAccess`, `LogonType`, `DestinationPort`, event IDs are numbers; `GrantedAccess IN ('0x1410')` is always false. |
-| Returns every event of a type, with no content filter | 47 | 70 | e.g. every 4688 process creation. Not an indicator; analysts must sift everything. |
-| Reads a whole log with no event-type filter | 22 | 23 | Slow and noisy. |
-| Regex uses lookahead/lookbehind | 10 | 10 | Velociraptor's regex engine (Go RE2) doesn't support `(?=`, `(?!`, `(?<=`: the pattern never matches. |
-| Velociraptor refuses to load the artifact | 8 | 6 | Invalid artifact name (a part starting with a digit), YAML syntax errors, `ORDER BY a, b` (VQL allows one column), unknown functions. |
-| Field name in the wrong case | 6 | 0 | Field names are case-sensitive; `EventData.targetimage` is always empty. |
-| Needs a running computer | 3 | 3 | process list / network connections etc.: not applicable to a disk image. |
-| Path text loses its backslashes | 2 | 0 | `'C:\Windows'` is `C:Windows` to VQL. |
-| Exact, case-sensitive path comparison | 1 | 1 | `=` is case-sensitive; Windows paths vary in case. `=~` is case-insensitive. |
+| defect | before | after automatic repair | after hand repair | what it means |
+|---|---:|---:|---:|---|
+| Output column that is always blank | 353 | 30 | 19 | `SELECT EventTime, Computer, ...` on raw events: those aren't fields of an event row (they're `System.TimeCreated.SystemTime`, `System.Computer`), so every result row had no time and no computer name. |
+| Looks for an event in a log where it never occurs | 223 | 29 | 7 | e.g. Sysmon event 1 (process creation) or PowerShell 4104 searched for in Security.evtx. Event numbers are per log: Security event 1 doesn't exist. |
+| Filters on a name that doesn't exist in the row | 122 | 19 | 7 | e.g. `WHERE CommandLine =~ ...` instead of `EventData.CommandLine`, or a field renamed in SELECT then filtered by its old name. The name is empty, so the condition is never true. |
+| Regular expression mangled by VQL string escaping | 119 | 14 | 1 | In VQL quoted strings a backslash escapes the next character: `'.*\\CurrentVersion\\Run'` reaches the regex engine as `.*\CurrentVersion\Run` (`\C`, `\R` are not a backslash) and never matches a registry path; `'\s+'` becomes `s+`. Checked by running every regex in Velociraptor against a string it was meant to match. |
+| Compares `System.EventID` to a number | 111 | 7 | 1 | `System.EventID` is a structure `{Value: N}`; `System.EventID = 4688` is always false. It must be `System.EventID.Value`. |
+| Uses a field the event doesn't have | 97 | 69 | 49 | e.g. `EventData.ProcessName` / `EventData.Image` on Security 4688 (the field is `NewProcessName`), `TargetProcessName` on Sysmon 10 (it's `TargetImage`). |
+| Compares a number to text | 53 | 3 | 0 | VQL never treats `3` and `'3'` as equal. `GrantedAccess`, `LogonType`, `DestinationPort`, event IDs are numbers; `GrantedAccess IN ('0x1410')` is always false. |
+| Returns every event of a type, with no content filter | 47 | 70 | 65 | e.g. every 4688 process creation. Not an indicator; analysts must sift everything. |
+| Reads a whole log with no event-type filter | 22 | 23 | 24 | Slow and noisy. |
+| Regex uses lookahead/lookbehind | 10 | 10 | 5 | Velociraptor's regex engine (Go RE2) doesn't support `(?=`, `(?!`, `(?<=`: the pattern never matches. |
+| Velociraptor refuses to load the artifact | 8 | 6 | 0 | Invalid artifact name (a part starting with a digit), YAML syntax errors, `ORDER BY a, b` (VQL allows one column), unknown functions. |
+| Field name in the wrong case | 6 | 0 | 0 | Field names are case-sensitive; `EventData.targetimage` is always empty. |
+| Needs a running computer | 3 | 3 | 3 | process list / network connections etc.: not applicable to a disk image. |
+| Path text loses its backslashes | 2 | 0 | 0 | `'C:\Windows'` is `C:Windows` to VQL. |
+| Exact, case-sensitive path comparison | 1 | 1 | 1 | `=` is case-sensitive; Windows paths vary in case. `=~` is case-insensitive. |
 
 ### Alignment with MITRE ATT&CK (v19.2 detection analytics)
 
-| | as written | if the wrong-log errors are fixed | after repair |
-|---|---:|---:|---:|
-| aligned | 348 | 413 | 420 |
-| aligned non log | 11 | 11 | 0 |
-| same log other events | 17 | 7 | 7 |
-| misaligned | 71 | 16 | 20 |
-| not a windows technique | 121 | 121 | 121 |
-| attack needs non host telemetry | 3 | 3 | 3 |
-| orca collection item | 30 | 30 | 30 |
+| | as written | if the wrong-log errors are fixed | after repair | after hand repair |
+|---|---:|---:|---:|---:|
+| aligned | 348 | 413 | 420 | 425 |
+| aligned non log | 11 | 11 | 0 | 0 |
+| same log other events | 17 | 7 | 7 | 9 |
+| misaligned | 71 | 16 | 20 | 13 |
+| not a windows technique | 121 | 121 | 121 | 121 |
+| attack needs non host telemetry | 3 | 3 | 3 | 3 |
+| orca collection item | 30 | 30 | 30 | 30 |
 
 *Aligned*: the query reads at least one event ATT&CK's analytics use for that technique (same log, same event code). *Not a Windows technique*: ATT&CK lists the technique only for cloud/SaaS/network platforms (e.g. cloud accounts); ORCA's queries for those are host-side approximations. *ORCA collection item*: raw collections (AMCACHE, browser history, ...), not techniques. Most mismatches came from the wrong-log defect: the queries *meant* the right events.
 
@@ -121,23 +123,29 @@ The repair is applied by a migration that only replaces a row whose text is stil
 
 For 17 techniques the repaired query works, but returns thousands of rows on a normal workstation with no attack activity (2000+ from one query part, Security log limited to 24 h): the detection logic itself is too loose (e.g. *any* process opening lsass, every file under a user profile). Shipping those would mark every host *Evidence Found*, so they keep their previous text and need a real content filter first:
 
-- T1027.013 (Encrypted/Encoded File): 0 -> 5000+ rows
-- T1055.005 (Thread Local Storage): 0 -> 5000+ rows
-- T1134.002 (Create Process with Token): 0 -> 5000+ rows
-- T1561.001 (Disk Content Wipe): 0 -> 5000+ rows
-- T1620 (Reflective Code Loading): 0 -> 5000+ rows
-- T1036.005 (Match Legitimate Resource Name or Location): 384 -> 5000+ rows
-- T1553.002 (Code Signing): 0 -> 5000+ rows
-- T1588.001 (Malware): 223 -> 5000+ rows
-- T1134.001 (Token Impersonation/Theft): 0 -> 4839 rows
-- T1608.001 (Upload Malware): 0 -> 3875 rows
-- T1082 (System Information Discovery): 0 -> 3491 rows
-- T1587 (Develop Capabilities): 0 -> 2660 rows
-- T1559 (Inter-Process Communication): 0 -> 2398 rows
-- T1027.014 (Polymorphic Code): 0 -> 2238 rows
-- T1055.001 (Dynamic-link Library Injection): 0 -> 2174 rows
-- T1055 (Process Injection): 0 -> 2161 rows
-- T1055.012 (Process Hollowing): 2 -> 2102 rows
+- T1027.013 (Encrypted/Encoded File): 0 -> 5000+ rows (hand-repaired, see below)
+- T1055.005 (Thread Local Storage): 0 -> 5000+ rows (hand-repaired, see below)
+- T1134.002 (Create Process with Token): 0 -> 5000+ rows (hand-repaired, see below)
+- T1561.001 (Disk Content Wipe): 0 -> 5000+ rows (hand-repaired, see below)
+- T1620 (Reflective Code Loading): 0 -> 5000+ rows (hand-repaired, see below)
+- T1036.005 (Match Legitimate Resource Name or Location): 384 -> 5000+ rows (hand-repaired, see below)
+- T1553.002 (Code Signing): 0 -> 5000+ rows (hand-repaired, see below)
+- T1588.001 (Malware): 223 -> 5000+ rows (hand-repaired, see below)
+- T1134.001 (Token Impersonation/Theft): 0 -> 4839 rows (hand-repaired, see below)
+- T1608.001 (Upload Malware): 0 -> 3875 rows (not observable on a host)
+- T1082 (System Information Discovery): 0 -> 3491 rows (hand-repaired, see below)
+- T1587 (Develop Capabilities): 0 -> 2660 rows (not observable on a host)
+- T1559 (Inter-Process Communication): 0 -> 2398 rows (hand-repaired, see below)
+- T1027.014 (Polymorphic Code): 0 -> 2238 rows (hand-repaired, see below)
+- T1055.001 (Dynamic-link Library Injection): 0 -> 2174 rows (hand-repaired, see below)
+- T1055 (Process Injection): 0 -> 2161 rows (hand-repaired, see below)
+- T1055.012 (Process Hollowing): 2 -> 2102 rows (hand-repaired, see below)
+
+## Hand repairs (round 2)
+
+The techniques the automatic repair couldn't fix or had to hold back were rewritten by hand (70 techniques; `migrations/repair_library_queries_2.sql`). Each query part was checked with `artifacts verify`, run against the Atomic Red Team VM's disk (below) and against a normal workstation for noise. Held-back queries got a real filter (e.g. T1134.002: *any* lsass access, 558,000 rows on one workstation; now token-theft patterns only, 15). Six techniques Velociraptor refused to load at all (unknown functions or arguments) were rewritten too. Per-technique notes are in `library_scorecard.csv` (column `hand_repair`).
+
+**Not observable on a host (14)**: ATT&CK lists no host data source for these; they happen on attacker infrastructure or in public sources (buying domains, scanning, researching the victim). Their library text is left as is, and the technique's analysis steps now start with *NOT OBSERVABLE ON THE HOST*, so an empty result isn't read as evidence of absence: T1583 (Acquire Infrastructure), T1583.004 (Server), T1584.002 (DNS Server), T1584.003 (Virtual Private Server), T1587 (Develop Capabilities), T1590.002 (DNS), T1590.006 (Network Security Appliances), T1591.001 (Determine Physical Locations), T1592.003 (Firmware), T1595.002 (Vulnerability Scanning), T1596.001 (DNS/Passive DNS), T1596.005 (Scan Databases), T1597.001 (Threat Intel Vendors), T1608.001 (Upload Malware).
 
 ## Still needs a person
 
@@ -147,11 +155,32 @@ For 17 techniques the repaired query works, but returns thousands of rows on a n
 - 25 x regular expression that is invalid in every reading (needs rewriting)
 - 14 x YAML syntax error: the artifact never loaded and the shorter VQL runs instead
 
-Plus the defects left in the *after* column above, and detection *logic* (a query that runs but is too broad or too narrow), which only attack simulation can measure.
+Plus the defects left in the last column above (after the hand repair: mostly the not-observable techniques and analyzer limits, e.g. a column computed in a subquery), and detection *logic*, which the attack simulation below measures.
 
-## Next step: attack simulation
+## Attack simulation (Atomic Red Team)
 
-Run Atomic Red Team tests for each technique on an isolated Windows VM (Sysmon + full audit policy, Defender off on that VM only), collect with ORCA, and check each technique's query returns the rows the test produced. That turns *runs correctly* into *detects the technique*.
+Ground truth: the Windows Atomic Red Team tests were run technique by technique on an isolated Windows 11 Enterprise VM (no network during the tests; Sysmon with the sysmon-modular config, full audit policy incl. command lines, PowerShell script-block logging), logging each technique's start and end time. Windows Defender stayed on (Tamper Protection can't be switched off unattended; only the test folders were excluded), so some tests were blocked part-way, as they would be on a protected target. Tests that wreck the lab (shutdown, disk wipe, encryption, account lock-out, service stop, DoS) were skipped. The run covered 210 techniques in alphabetical order before the VM restarted itself; the remaining ones, mostly log clearing and defence evasion (deliberately ordered last so they couldn't wipe the earlier evidence), were not run.
+
+The VM's disk before and after the attacks was mounted on the analyst workstation and each technique's queries (original, after the automatic repair, after the hand repair) were run through the ORCA agent against both, exactly the disk-image path an analyst uses. A technique *detects* its test when its query returns a row on the attacked disk that isn't on the clean disk, timestamped inside that technique's own test window (start - 30 s to end + 2 min).
+
+- Techniques run: 210; with at least one test executed: 209; at least one test exited 0: 194
+- Scored (technique has a library query): 208
+
+| | original library | automatic repair | hand repair (shipped) |
+|---|---:|---:|---:|
+| **detects its own test** (new row inside the test window) | **31** | **112** | **123** |
+| returns new rows after the attacks (looser; another test's activity can trigger it) | 35 | 138 | 148 |
+| only fallback rows (the agent's broad event dump, not a detection) | 153 | 57 | 48 |
+
+**Detected only after the repairs (92)**: T1003, T1003.001, T1003.002, T1003.004, T1003.005, T1005, T1006, T1016.001, T1016.002, T1020, T1027, T1027.004, T1027.009, T1027.013, T1027.017, T1033, T1036.005, T1036.007, T1037.001, T1041, T1048, T1048.003, T1053.002, T1053.005, T1055, T1055.001, T1055.002, T1055.004, T1055.011, T1056.001, T1056.002, T1059.003, T1059.005, T1068, T1071.001, T1071.004, T1074.001, T1082, T1083, T1087.001, T1087.002, T1095, T1105, T1106, T1110.002, T1113, T1115, T1123, T1125, T1127, T1127.001, T1132.001, T1134.001, T1134.004, T1134.005, T1137, T1197, T1202, T1204.002, T1204.005, T1216, T1216.002, T1217, T1218.001, T1218.002, T1218.005, T1218.007, T1218.008, T1218.011, T1482, T1497.001, T1505.002, T1505.003, T1505.004, T1539, T1543.003, T1546.001, T1546.009, T1546.010, T1546.013, T1547, T1547.001, T1547.003, T1547.009, T1547.010, T1552, T1552.001, T1552.002, T1552.006, T1553.005, T1555.004, T1555.005
+
+**Not detected (85)**: the test ran but no query row falls in its window. Common reasons: Defender blocked the test, a prerequisite needed the internet, the test only works on a domain/server, or the query looks for a different variant of the technique than the Atomic test performs. 28 of them ran before 00:17 UTC, the earliest event the VM's PowerShell logs still held (the 1 GB PowerShell logs filled up during the run), so PowerShell-based detection can't show for those. Per technique: `library_scorecard.csv` (`atomic_*` columns).
+
+T1001.002*, T1003.006*, T1010*, T1018*, T1021.001*, T1021.002*, T1021.003*, T1021.004*, T1021.006*, T1025*, T1027.001*, T1027.006*, T1036.002*, T1036.003*, T1036.004*, T1039*, T1040*, T1046*, T1048.002*, T1055.015*, T1056.004*, T1059*, T1059.007*, T1069.001*, T1071*, T1072*, T1078.001*, T1078.003*, T1090.001, T1090.003, T1091, T1110.001, T1110.003, T1110.004, T1114.001, T1120, T1127.003, T1129, T1133, T1134.002, T1136.001, T1136.002, T1137.001, T1137.002, T1137.004, T1137.005, T1137.006, T1176, T1187, T1195, T1201, T1204.003, T1205.002, T1207, T1216.001, T1218, T1218.004, T1220, T1221, T1484.001, T1491.001, T1496, T1505.005, T1518.001, T1546, T1546.003, T1546.007, T1546.008, T1546.012, T1546.015, T1546.018, T1547.002, T1547.004, T1547.005, T1547.006, T1547.008, T1547.012, T1547.014, T1547.015, T1550.003, T1553.003, T1553.004, T1555, T1555.003, T1556.001
+
+(* = test ran before the PowerShell logs' earliest event)
+
+How the disks were read: the two disks are clones (same disk signature), so they were mounted with a fake signature and a throwaway write overlay (`tools/library_audit/mount_overlay.ps1`; the .vmdk files are never written). To keep 400+ collections practical, the big event logs on the overlays were cut to the attack window (attacked disk: 23:18-02:00 UTC; clean disk: emptied, so any log row on the attacked disk in the window counts as new). File, registry and other non-log evidence is compared between the two full disks.
 
 ## Rules for writing library queries (Velociraptor 0.77, verified)
 

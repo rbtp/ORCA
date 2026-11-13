@@ -14,6 +14,11 @@ from holdback import held_back
 HB = held_back(QD)
 fixes = {t: f for t, f in fixes.items() if t not in HB}   # held-back repairs don't ship
 WIN = [t for t, r in before.items() if r["platform"] == "windows"]
+# round 2: hand repairs (manual.py build), if present
+F2 = os.path.join(QD, "manual", "fixed2")
+after2 = {r["t_code"]: r for r in (J(F2, "findings.json") or {"rows": []})["rows"]}
+run_a2 = J(F2, "run_results.json") or {}
+hand = J(QD, "manual", "changed.json") or {"changed": [], "not_observable": [], "notes": {}}
 
 def sev_counts(rows):
     c = collections.Counter(r["severity"] for r in rows)
@@ -35,9 +40,13 @@ def run_summary(run, techs):
 
 b_rows = [before[t] for t in WIN]
 a_rows = [after[t] for t in WIN if t in after]
-sb, sa = sev_counts(b_rows), sev_counts(a_rows)
-cb, ca = code_counts(b_rows), code_counts(a_rows)
-rb, ra = run_summary(run_b, set(WIN)), run_summary(run_a, set(WIN))
+a2_rows = [after2[t] for t in WIN if t in after2]
+sb, sa, s2 = sev_counts(b_rows), sev_counts(a_rows), sev_counts(a2_rows)
+cb, ca, c2 = code_counts(b_rows), code_counts(a_rows), code_counts(a2_rows)
+rb, ra, r2 = run_summary(run_b, set(WIN)), run_summary(run_a, set(WIN)), run_summary(run_a2, set(WIN))
+al_2 = collections.Counter(r["alignment"] for r in a2_rows)
+H2 = bool(a2_rows)
+x2 = lambda v: f" {v} |" if H2 else ""
 al_b = collections.Counter(r["alignment"] for r in b_rows)
 al_a = collections.Counter(r["alignment"] for r in a_rows)
 al_int = collections.Counter(r["alignment_if_logs_fixed"] for r in b_rows)
@@ -104,35 +113,40 @@ w(f"Scope: {len(WIN)} Windows techniques. {sum(1 for r in before.values() if r['
 w("")
 w("## Results")
 w("")
-w("| | before | after automatic repair |")
-w("|---|---:|---:|")
+w("| | before | after automatic repair |" + (" after hand repair (shipped) |" if H2 else ""))
+w("|---|---:|---:|" + ("---:|" if H2 else ""))
 for k in ("broken", "blind", "partly_blind", "partial", "noisy", "output", "ok"):
-    w(f"| {k.replace('_', ' ')} ({SEV_TEXT[k]}) | {sb[k]} | {sa[k] if a_rows else '-'} |")
+    w(f"| {k.replace('_', ' ')} ({SEV_TEXT[k]}) | {sb[k]} | {sa[k] if a_rows else '-'} |" + x2(s2[k]))
 if rb["sources"]:
-    w(f"| query parts run on a live workstation | {rb['sources']} | {ra['sources'] or '-'} |")
-    w(f"| ... returning rows | {rb['sources_with_rows']} | {ra['sources_with_rows'] or '-'} |")
-    w(f"| techniques returning anything | {rb['techniques_with_rows']} | {ra['techniques_with_rows'] or '-'} |")
-    w(f"| ... runtime errors | {rb['errors']} | {ra['errors'] or '-'} |")
+    w(f"| query parts run on a live workstation | {rb['sources']} | {ra['sources'] or '-'} |" + x2(r2['sources']))
+    w(f"| ... returning rows | {rb['sources_with_rows']} | {ra['sources_with_rows'] or '-'} |" + x2(r2['sources_with_rows']))
+    w(f"| techniques returning anything | {rb['techniques_with_rows']} | {ra['techniques_with_rows'] or '-'} |" + x2(r2['techniques_with_rows']))
+    w(f"| ... runtime errors | {rb['errors']} | {ra['errors'] or '-'} |" + x2(r2['errors']))
+if H2:
+    nob = sum(1 for r in a2_rows if r['severity'] in ('blind', 'partly_blind') and r['t_code'] in hand['not_observable'])
+    w("")
+    w(f"Of the techniques still blind or partly blind after the hand repair, {nob} are *not observable on a host* (see below): "
+      "their old text is kept and labelled, and an empty result is expected.")
 w("")
 w("A *blind* query is not a weak query: whatever happened on the computer, it cannot return a row. "
   "A workstation with no attack activity returns few rows either way; the live run mainly proves queries run and shows noise. "
-  "Whether each query catches the technique needs attack simulation (next step below).")
+  "Whether each query catches the technique is measured by the attack simulation below.")
 w("")
 w("### Defects found (techniques affected)")
 w("")
-w("| defect | before | after | what it means |")
-w("|---|---:|---:|---|")
+w("| defect | before | after automatic repair |" + (" after hand repair |" if H2 else "") + " what it means |")
+w("|---|---:|---:|" + ("---:|" if H2 else "") + "---|")
 for code, n in cb.most_common():
     if code in ("HAS_PARAMETERS", "REGEX_CHANGED"): continue
     t, d = CODE_TEXT.get(code, (code, ""))
-    w(f"| {t} | {n} | {ca.get(code, 0) if a_rows else '-'} | {d} |")
+    w(f"| {t} | {n} | {ca.get(code, 0) if a_rows else '-'} |" + x2(c2.get(code, 0)) + f" {d} |")
 w("")
 w("### Alignment with MITRE ATT&CK (v19.2 detection analytics)")
 w("")
-w("| | as written | if the wrong-log errors are fixed | after repair |")
-w("|---|---:|---:|---:|")
+w("| | as written | if the wrong-log errors are fixed | after repair |" + (" after hand repair |" if H2 else ""))
+w("|---|---:|---:|---:|" + ("---:|" if H2 else ""))
 for k in ("ALIGNED", "ALIGNED_NON_LOG", "SAME_LOG_OTHER_EVENTS", "MISALIGNED", "NOT_A_WINDOWS_TECHNIQUE", "ATTACK_NEEDS_NON_HOST_TELEMETRY", "ORCA_COLLECTION_ITEM"):
-    w(f"| {k.replace('_', ' ').lower()} | {al_b.get(k, 0)} | {al_int.get(k, 0)} | {al_a.get(k, 0) if a_rows else '-'} |")
+    w(f"| {k.replace('_', ' ').lower()} | {al_b.get(k, 0)} | {al_int.get(k, 0)} | {al_a.get(k, 0) if a_rows else '-'} |" + x2(al_2.get(k, 0)))
 w("")
 w("*Aligned*: the query reads at least one event ATT&CK's analytics use for that technique (same log, same event code). "
   "*Not a Windows technique*: ATT&CK lists the technique only for cloud/SaaS/network platforms (e.g. cloud accounts); "
@@ -206,7 +220,22 @@ if HB:
       "previous text and need a real content filter first:")
     w("")
     for t, d in sorted(HB.items(), key=lambda x: -x[1]["rows_after"]):
-        w(f"- {t} ({before.get(t, {}).get('attack_name', '')}): {d['rows_before']} -> {d['rows_after']}{'+' if d['rows_after'] >= 5000 else ''} rows")
+        st = " (hand-repaired, see below)" if t in hand["changed"] else (" (not observable on a host)" if t in hand["not_observable"] else "")
+        w(f"- {t} ({before.get(t, {}).get('attack_name', '')}): {d['rows_before']} -> {d['rows_after']}{'+' if d['rows_after'] >= 5000 else ''} rows{st}")
+    w("")
+if H2:
+    w("## Hand repairs (round 2)")
+    w("")
+    w(f"The techniques the automatic repair couldn't fix or had to hold back were rewritten by hand ({len(hand['changed'])} techniques; "
+      "`migrations/repair_library_queries_2.sql`). Each query part was checked with `artifacts verify`, run against the Atomic Red Team "
+      "VM's disk (below) and against a normal workstation for noise. Held-back queries got a real filter (e.g. T1134.002: *any* lsass "
+      "access, 558,000 rows on one workstation; now token-theft patterns only, 15). Six techniques Velociraptor refused to load at all "
+      "(unknown functions or arguments) were rewritten too. Per-technique notes are in `library_scorecard.csv` (column `hand_repair`).")
+    w("")
+    w(f"**Not observable on a host ({len(hand['not_observable'])})**: ATT&CK lists no host data source for these; they happen on attacker "
+      "infrastructure or in public sources (buying domains, scanning, researching the victim). Their library text is left as is, and "
+      "the technique's analysis steps now start with *NOT OBSERVABLE ON THE HOST*, so an empty result isn't read as evidence of absence: "
+      + ", ".join(f"{t} ({before.get(t, {}).get('attack_name', '')})" for t in hand["not_observable"]) + ".")
     w("")
 w("## Still needs a person")
 w("")
@@ -222,8 +251,8 @@ w(f"{len(manual)} items in {len({t for t, _ in manual})} techniques the repair d
 w("")
 for k, n in mk.most_common(): w(f"- {n} x {k}")
 w("")
-w("Plus the defects left in the *after* column above, and detection *logic* (a query that runs but is too broad or too narrow), "
-  "which only attack simulation can measure.")
+w("Plus the defects left in the last column above (after the hand repair: mostly the not-observable techniques and analyzer "
+  "limits, e.g. a column computed in a subquery), and detection *logic*, which the attack simulation below measures.")
 w("")
 w("## Next step: attack simulation")
 w("")
@@ -253,7 +282,8 @@ open(os.path.join(REPO, "docs", "LIBRARY_QUALITY.md"), "w", encoding="utf-8", ne
 with open(os.path.join(REPO, "docs", "library_scorecard.csv"), "w", newline="", encoding="utf-8") as f:
     cols = ["t_code", "attack_name", "tactics", "severity_before", "severity_after", "blind_sources_before",
             "alignment_before", "alignment_after", "attack_events", "logs_after", "events_after",
-            "rows_on_workstation_before", "rows_on_workstation_after", "changes", "manual", "remaining_issues"]
+            "rows_on_workstation_before", "rows_on_workstation_after", "changes", "manual", "remaining_issues",
+            "severity_hand", "rows_on_workstation_hand", "hand_repair"]
     wr = csv.DictWriter(f, fieldnames=cols); wr.writeheader()
     for t in sorted(WIN):
         b, a = before[t], after.get(t, {})
@@ -268,5 +298,8 @@ with open(os.path.join(REPO, "docs", "library_scorecard.csv"), "w", newline="", 
                      "rows_on_workstation_before": rows_b if run_b else "", "rows_on_workstation_after": rows_a if run_a else "",
                      "changes": ("HELD BACK (repaired query too broad); proposed: " if t in HB else "") + " | ".join(c for c in ch if "MANUAL" not in c)[:4000],
                      "manual": " | ".join(c for c in ch if "MANUAL" in c)[:1000],
-                     "remaining_issues": a.get("issues", "")[:2000]})
-print("report written; windows techniques:", len(WIN), "before:", sb, "after:", sa)
+                     "remaining_issues": (after2.get(t) or a).get("issues", "")[:2000],
+                     "severity_hand": after2.get(t, {}).get("severity", ""),
+                     "rows_on_workstation_hand": sum(v.get("rows", 0) for k, v in run_a2.items() if k.split("|")[0] == t) if run_a2 else "",
+                     "hand_repair": hand["notes"].get(t, "").replace(chr(10), " ")[:1500]})
+print("report written; windows techniques:", len(WIN), "before:", sb, "after:", sa, "hand:", s2)
