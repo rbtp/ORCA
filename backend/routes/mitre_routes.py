@@ -4,6 +4,7 @@ from core.database_manager import db, get_db
 from services.mitre_service import MitreIntelService
 from sqlalchemy import text
 import collection_state
+from clam_fileinfo import threat_file_info
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Union, Any, Dict, Optional
@@ -2295,6 +2296,7 @@ class ClamResultsPayload(BaseModel):
     scanned: int = 0
     infected: int = 0
     threats: list = []
+    threat_details: dict = {}
 
 @router.post("/memory/results/save")
 async def save_memory_results(payload: MemoryResultsPayload, user: dict = Depends(get_current_user)):
@@ -2347,18 +2349,19 @@ async def save_clam_results(payload: ClamResultsPayload, user: dict = Depends(ge
     session = db.get_session()
     try:
         session.execute(text("""
-            INSERT INTO clam_results (asset_id, scan_path, scanned, infected, threats)
-            VALUES (:aid, :path, :scanned, :infected, :threats)
+            INSERT INTO clam_results (asset_id, scan_path, scanned, infected, threats, threat_details)
+            VALUES (:aid, :path, :scanned, :infected, :threats, :details)
             ON CONFLICT (asset_id) DO UPDATE
             SET scan_path = EXCLUDED.scan_path, scanned = EXCLUDED.scanned,
                 infected = EXCLUDED.infected, threats = EXCLUDED.threats,
-                scanned_at = NOW()
+                threat_details = EXCLUDED.threat_details, scanned_at = NOW()
         """), {
             "aid":      payload.asset_id,
             "path":     payload.scan_path,
             "scanned":  payload.scanned,
             "infected": payload.infected,
             "threats":  json.dumps(payload.threats),
+            "details":  json.dumps(payload.threat_details or {}),
         })
         session.commit()
         return {"status": "OK"}
@@ -2374,13 +2377,14 @@ async def load_clam_results(asset_id: int, user: dict = Depends(get_current_user
     session = db.get_session()
     try:
         row = session.execute(text("""
-            SELECT scan_path, scanned, infected, threats, scanned_at
+            SELECT scan_path, scanned, infected, threats, threat_details, scanned_at
             FROM clam_results WHERE asset_id = :aid
         """), {"aid": asset_id}).mappings().first()
         if not row:
             return None
         return {"scan_path": row["scan_path"], "scanned": row["scanned"],
                 "infected": row["infected"], "threats": row["threats"] or [],
+                "threat_details": row["threat_details"] or {},
                 "scanned_at": str(row["scanned_at"])}
     finally:
         session.close()
@@ -2448,7 +2452,9 @@ async def run_clamscan_streaming(payload: ClamScanRequest, user: dict = Depends(
                     continue
                 if " FOUND" in line:
                     threats.append(line)
-                    yield f"data: {json.dumps({'type': 'threat', 'data': line})}\n\n"
+                    # (with --remove the file is already gone: info carries the error)
+                    info = await asyncio.to_thread(threat_file_info, line)
+                    yield f"data: {json.dumps({'type': 'threat', 'data': line, 'file': info})}\n\n"
                 elif "Scanned files:" in line:
                     try:
                         scanned = int(line.split(":")[1].strip())

@@ -282,6 +282,16 @@ Results stream back in real time. Any malware hits are logged per asset with the
 - Closing the Evidence Window or reloading the page doesn't stop the scan; reopening the tab re-attaches to it. Results are saved by the server when the agent finishes, even if nobody has the window open. "No update from the agent for ..." in red means the agent stopped reporting (computer asleep, offline, agent restarted).
 - Files ClamAV could not read (locked, access denied, blocked by Defender) are counted as **UNREADABLE** and listed after the scan.
 
+### File hashes of detections
+
+Each detected file is hashed right after ClamAV flags it (agent scans and RUN ON SERVER scans):
+
+- The threat list shows the file path, the signature name and the first characters of its **SHA-256**. Hovering a row shows the full SHA-256 and MD5.
+- Clicking a row opens **FILE INFORMATION**: path, signature, SHA-256, SHA-1, MD5, size, and modified/created times (UTC), with **COPY** buttons for the hashes and the path (for VirusTotal, IOC lists or a report).
+- The **FILTER** box also matches hashes, so a pasted SHA-256 or MD5 finds its file.
+- Hashes are saved with the results and shown again when the tab is reopened.
+- **NO HASH (unreadable)**: the file couldn't be read to hash it, for example because Windows Defender blocked or quarantined it first. **NO HASH**: the detection was saved before ORCA collected hashes, or the scan ran on an older agent. Run the scan again to get the hashes. With **REMOVE_THREATS** (RUN ON SERVER) the file is deleted as it's found, so there is nothing left to hash.
+
 ### Update Signatures
 
 Click **Update ClamAV Signatures** to trigger a `freshclam` run. ClamAV signatures are also updated automatically on each container start. For air-gapped deployments, copy the `.cvd`/`.cld` files into `backend/bin/clamav/` manually.

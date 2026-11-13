@@ -421,13 +421,15 @@ def _persist_scan_result(job_id: str, line: str):
     with db.engine.begin() as conn:
         if row[0] == "clamav":
             conn.execute(text("""
-                INSERT INTO clam_results (asset_id, scan_path, scanned, infected, threats)
-                VALUES (:aid, :path, :scanned, :infected, CAST(:threats AS jsonb))
+                INSERT INTO clam_results (asset_id, scan_path, scanned, infected, threats, threat_details)
+                VALUES (:aid, :path, :scanned, :infected, CAST(:threats AS jsonb), CAST(:details AS jsonb))
                 ON CONFLICT (asset_id) DO UPDATE
                 SET scan_path = EXCLUDED.scan_path, scanned = EXCLUDED.scanned,
-                    infected = EXCLUDED.infected, threats = EXCLUDED.threats, scanned_at = NOW()
+                    infected = EXCLUDED.infected, threats = EXCLUDED.threats,
+                    threat_details = EXCLUDED.threat_details, scanned_at = NOW()
             """), {"aid": int(asset_id), "path": params.get("scan_path"), "scanned": int(data.get("scanned_files") or 0),
-                   "infected": int(data.get("infected_files") or 0), "threats": json.dumps(data.get("threats") or [])})
+                   "infected": int(data.get("infected_files") or 0), "threats": json.dumps(data.get("threats") or []),
+                   "details": json.dumps(data.get("threat_details") or {})})
         else:
             conn.execute(text("DELETE FROM vuln_results WHERE asset_id = :id"), {"id": int(asset_id)})
             rows = []

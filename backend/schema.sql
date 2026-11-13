@@ -530,7 +530,8 @@ CREATE TABLE public.clam_results (
     scanned integer DEFAULT 0,
     infected integer DEFAULT 0,
     threats jsonb DEFAULT '[]'::jsonb,
-    scanned_at timestamp without time zone DEFAULT now()
+    scanned_at timestamp without time zone DEFAULT now(),
+    threat_details jsonb DEFAULT '{}'::jsonb
 );
 
 

@@ -1037,6 +1037,8 @@ Trigger a freshclam signature update. Returns SSE stream.
 
 Retrieve stored ClamAV scan results for an asset.
 
+Response: `{scan_path, scanned, infected, threats: ["<path>: <signature> FOUND", ...], threat_details: {"<threat line>": {path, signature, md5, sha1, sha256, size, modified, created} or {path, signature, error}}, scanned_at}`. `POST /api/mitre/scan/clam/results/save` accepts the same `threat_details` (optional). The `/api/mitre/scan/clam` stream's `threat` events carry the same object as `file`; agent ClamAV jobs send it on `THREAT:` log events (`file`) and in the `done` payload (`threat_details`).
+
 ---
 
 ### GET /api/mitre/assets/{asset_id}/net-config

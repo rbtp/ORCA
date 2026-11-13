@@ -3375,6 +3375,57 @@ const fmtSecs = s => {
 };
 
 // Opens the agent job's event stream; returns the EventSource.
+// One ClamAV detection: path + signature, short SHA-256 inline (full on hover),
+// click opens the file information box (hashes, size, times, copy buttons).
+const ThreatRow = ({ line, info }) => {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState('');
+  const body = line.endsWith(' FOUND') ? line.slice(0, -6) : line;
+  const cut = body.lastIndexOf(': ');
+  const path = info?.path || (cut > 0 ? body.slice(0, cut) : body);
+  const sig = info?.signature || (cut > 0 ? body.slice(cut + 2) : '');
+  const copy = (k, v) => { try { navigator.clipboard.writeText(v); setCopied(k); setTimeout(() => setCopied(''), 1200); } catch {} };
+  const tip = !info ? 'No file hashes recorded for this detection (saved before ORCA collected them, or by an older agent). Click for details.'
+    : info.error ? info.error : `SHA-256 ${info.sha256}\nMD5 ${info.md5}\nClick for file information`;
+  const fields = info && !info.error ? [['SHA-256', info.sha256], ['SHA-1', info.sha1], ['MD5', info.md5],
+    ['SIZE', info.size != null ? `${fmtBytes(info.size)} (${info.size.toLocaleString()} bytes)` : null],
+    ['MODIFIED', info.modified], ['CREATED', info.created]] : [];
+  return (
+    <div data-testid="threat-row" style={{ borderBottom: '1px solid #0a0a0a' }}>
+      <div onClick={() => setOpen(o => !o)} title={tip}
+        style={{ padding: '6px 10px', display: 'flex', alignItems: 'flex-start', cursor: 'pointer', gap: 8 }}>
+        <span style={{ color: C.red, flexShrink: 0 }}>{open ? '▾' : '⚠'}</span>
+        <span style={{ flex: 1, minWidth: 0, fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}>
+          <span style={{ color: C.amber }}>{path}</span>
+          {sig && <span style={{ color: C.red }}>{'  '}{sig}</span>}
+        </span>
+        <span data-testid="threat-hash" style={{ flexShrink: 0, fontFamily: 'monospace', fontSize: 10, color: info?.sha256 ? C.grey : C.greyDim }}>
+          {info?.sha256 ? `SHA256 ${info.sha256.slice(0, 12)}…` : info?.error ? 'NO HASH (unreadable)' : 'NO HASH'}
+        </span>
+      </div>
+      {open && (
+        <div data-testid="threat-info" style={{ margin: '0 10px 8px 28px', padding: '8px 10px', border: `1px solid ${C.border}`, background: '#050505', fontFamily: 'monospace', fontSize: 10 }}>
+          <div style={{ color: C.grey, letterSpacing: 1, marginBottom: 6 }}>FILE INFORMATION</div>
+          {[['PATH', path], ['SIGNATURE', sig], ...fields].filter(([, v]) => v).map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '2px 0' }}>
+              <span style={{ color: C.greyDim, width: 70, flexShrink: 0 }}>{k}</span>
+              <span style={{ color: C.white, flex: 1, wordBreak: 'break-all', userSelect: 'all' }}>{v}</span>
+              {['SHA-256', 'SHA-1', 'MD5', 'PATH'].includes(k) && (
+                <button onClick={e => { e.stopPropagation(); copy(k, v); }}
+                  style={{ background: 'transparent', border: `1px solid ${C.border}`, color: copied === k ? C.green : C.grey, fontSize: 9, padding: '1px 6px', cursor: 'pointer', fontFamily: 'monospace' }}>
+                  {copied === k ? 'COPIED' : 'COPY'}
+                </button>
+              )}
+            </div>
+          ))}
+          {info?.error && <div style={{ color: C.amber, marginTop: 4 }}>{info.error}</div>}
+          {!info && <div style={{ color: C.greyDim, marginTop: 4 }}>No hashes were recorded for this detection: it was saved before ORCA collected them (or by an older agent). Run the scan again to get them.</div>}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const attachAgentJob = (jobId, onEvt, onLost) => {
   const es = new EventSource(`${import.meta.env.VITE_API_URL}/api/agent/jobs/${jobId}/stream`);
   es.onmessage = e => { try { onEvt(JSON.parse(e.data)); } catch {} };
@@ -3481,6 +3532,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
   const [isUpdating, setIsUpdating] = useState(false);
   const [updateResult, setUpdateResult] = useState(null);
   const [threats, setThreats]       = useState([]);
+  const [details, setDetails]       = useState({});   // threat line -> hashes / file facts
   const [scanned, setScanned]       = useState(null);
   const [infected, setInfected]     = useState(null);
   const [logs, setLogs]             = useState([]);
@@ -3503,6 +3555,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
         if (!data) return;
         setScanned(data.scanned || 0);
         setThreats(data.threats || []);
+        setDetails(data.threat_details || {});
         if (data.scan_path) setScanPath(data.scan_path);
         if (onSummaryUpdate) onSummaryUpdate('av', { scanned: data.scanned, infected: data.infected });
       }).catch(() => {});
@@ -3543,6 +3596,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
           if (m.startsWith('THREAT: ')) {
             const t = m.slice(8);
             setThreats(prev => prev.includes(t) ? prev : [...prev, t]);
+            if (evt.data.file) setDetails(prev => ({ ...prev, [t]: evt.data.file }));
             addLog(m, 'error');
           } else addLog(m);
         } else if (evt.type === 'error') {
@@ -3552,6 +3606,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
         } else if (evt.type === 'done') {
           const d = evt.data;
           setScanned(d.scanned_files); setInfected(d.infected_files); setThreats(d.threats || []);
+          if (d.threat_details) setDetails(prev => ({ ...prev, ...d.threat_details }));
           setScanInfo({ errors: d.errors || 0, samples: d.error_samples || [], elapsed: d.elapsed, engine: d.engine, data: d.data_scanned, folders: d.unreadable_folders || 0, hardlinks: d.hardlinks_skipped || 0, hardlinkBytes: d.hardlink_bytes_skipped || 0 });
           addLog(`SCAN COMPLETE — Scanned: ${d.scanned_files}, Infected: ${d.infected_files}${d.errors ? `, unreadable: ${d.errors}` : ''}${d.elapsed != null ? `, ${fmtSecs(d.elapsed)}` : ''}`,
             d.infected_files > 0 ? 'error' : 'success');
@@ -3577,7 +3632,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
       .then(j => {
         if (!j || !j.job_id || evtSourceRef.current) return;
         setSelectedAgent(j.agent_id); if (j.scan_path) setScanPath(j.scan_path);
-        setThreats([]); followAgentJob(j.job_id, true);
+        setThreats([]); setDetails({}); followAgentJob(j.job_id, true);
       }).catch(() => {});
     return () => { try { evtSourceRef.current?.close(); } catch {} evtSourceRef.current = null; };
   }, [assetId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -3593,7 +3648,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
 
   const handleDispatchToAgent = async () => {
     if (!scanPath.trim()) { addLog('Scan path required.', 'error'); return; }
-    setIsScanning(true); setThreats([]); setScanned(null); setInfected(null); setLogs([]); setProgress(null); setScanInfo(null);
+    setIsScanning(true); setThreats([]); setDetails({}); setScanned(null); setInfected(null); setLogs([]); setProgress(null); setScanInfo(null);
     try {
       const r = await fetch(`${import.meta.env.VITE_API_URL}/api/agent/dispatch`, {
         method: 'POST', headers: getAuth(),
@@ -3636,13 +3691,14 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
   // ── END TOOL LOCK ──
 
     stopScan();
-    setIsScanning(true); setThreats([]); setScanned(null); setInfected(null); setLogs([]);
+    setIsScanning(true); setThreats([]); setDetails({}); setScanned(null); setInfected(null); setLogs([]);
     addLog(`Starting ClamAV scan: ${scanPath}`);
     // Mirrors the `threats` state locally -- the 'done' handler below runs
     // inside this same closure, so `threats` there would still be the `[]`
     // it was reset to above, not what setThreats accumulated via SSE. This
     // is what actually gets persisted to the DB.
     let scannedThreats = [];
+    const scannedDetails = {};
     try {
       const resp = await fetch(`${import.meta.env.VITE_API_URL}/api/mitre/scan/clam`, {
         method: 'POST', headers: getAuth(),
@@ -3661,7 +3717,10 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
           try {
             const evt = JSON.parse(line.slice(6));
             if (evt.type === 'log') addLog(evt.data);
-            else if (evt.type === 'threat') { scannedThreats = [...scannedThreats, evt.data]; setThreats(scannedThreats); addLog(evt.data, 'error'); }
+            else if (evt.type === 'threat') {
+              scannedThreats = [...scannedThreats, evt.data]; setThreats(scannedThreats); addLog(evt.data, 'error');
+              if (evt.file) { scannedDetails[evt.data] = evt.file; setDetails({ ...scannedDetails }); }
+            }
             else if (evt.type === 'summary') addLog(evt.data);
             else if (evt.type === 'done') {
               setScanned(evt.data.scanned_files); setInfected(evt.data.infected_files);
@@ -3669,7 +3728,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
                 evt.data.infected_files > 0 ? 'error' : 'success');
               setIsScanning(false);
               if (onSummaryUpdate) onSummaryUpdate('av', { scanned: evt.data.scanned_files, infected: evt.data.infected_files });
-              fetch(`${import.meta.env.VITE_API_URL}/api/mitre/scan/clam/results/save`, { method: 'POST', headers: getAuth(), body: JSON.stringify({ asset_id: Number(assetId), scan_path: scanPath, scanned: evt.data.scanned_files, infected: evt.data.infected_files, threats: scannedThreats }) }).catch(() => {});
+              fetch(`${import.meta.env.VITE_API_URL}/api/mitre/scan/clam/results/save`, { method: 'POST', headers: getAuth(), body: JSON.stringify({ asset_id: Number(assetId), scan_path: scanPath, scanned: evt.data.scanned_files, infected: evt.data.infected_files, threats: scannedThreats, threat_details: scannedDetails }) }).catch(() => {});
             }
             else if (evt.type === 'error') { addLog(evt.data, 'error'); setIsScanning(false); }
           } catch {}
@@ -3679,7 +3738,11 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
     finally { if (collab) collab.releaseToolLock(assetId, 'clamav'); }
   };
 
-  const filteredThreats = threats.filter(t => t.toLowerCase().includes(filter.toLowerCase()));
+  // the filter also matches hashes, so a pasted SHA-256 / MD5 finds its file
+  const filteredThreats = threats.filter(t => {
+    const f = filter.toLowerCase(), d = details[t] || {};
+    return t.toLowerCase().includes(f) || [d.sha256, d.sha1, d.md5].some(h => h && h.includes(f));
+  });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
@@ -3786,12 +3849,7 @@ const MalwareSignaturesTab = ({ assetId, onSummaryUpdate, collab, analysisMode =
               <div style={{ color: C.greyDim, fontSize: 12, padding: 10 }}>
                 {isScanning ? (agentJob ? 'SCANNING — no threats found so far (progress above).' : 'SCANNING IN PROGRESS...') : scanned !== null ? 'NO_THREATS_DETECTED — System clean.' : 'AWAITING_SCAN_EXECUTION — Configure target and press RUN_CLAMSCAN.'}
               </div>
-            ) : filteredThreats.map((t, i) => (
-              <div key={i} style={{ padding: '6px 10px', borderBottom: `1px solid #0a0a0a`, display: 'flex', alignItems: 'flex-start' }}>
-                <span style={{ color: C.red, marginRight: 8, flexShrink: 0 }}>⚠</span>
-                <span style={{ color: C.amber, fontSize: 11, wordBreak: 'break-all', fontFamily: 'monospace' }}>{t}</span>
-              </div>
-            ))}
+            ) : filteredThreats.map(t => <ThreatRow key={t} line={t} info={details[t]} />)}
           </div>
         </div>
         <LogCol logs={logs} width={300} />

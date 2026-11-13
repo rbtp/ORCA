@@ -1,3 +1,5 @@
+import datetime
+import hashlib
 import json
 import os
 import re
@@ -706,6 +708,31 @@ class OrcaAgent:
         finally:
             s.close()
 
+    @staticmethod
+    def _threat_file_info(threat_line):
+        """Hashes and file facts of a file ClamAV flagged ("<path>: <signature> FOUND"),
+        read straight after detection so the analyst can pivot on them (VirusTotal,
+        IOC lists) without pulling the file. A file Defender quarantines or blocks in
+        the meantime gets an error instead of hashes."""
+        body = threat_line[:-len(" FOUND")] if threat_line.endswith(" FOUND") else threat_line
+        path, _, sig = body.rpartition(": ")
+        info = {"path": path or body, "signature": sig}
+        def ts(x):
+            return datetime.datetime.fromtimestamp(x, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        try:
+            stt = os.stat(info["path"])
+            info.update(size=stt.st_size, modified=ts(stt.st_mtime), created=ts(stt.st_ctime))
+            h = {"md5": hashlib.md5(), "sha1": hashlib.sha1(), "sha256": hashlib.sha256()}
+            with open(info["path"], "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    for x in h.values():
+                        x.update(chunk)
+            info.update({k: x.hexdigest() for k, x in h.items()})
+        except OSError as e:
+            info["error"] = (f"could not read the file to hash it ({e.strerror or e}); "
+                             "Windows Defender may have blocked or quarantined it")
+        return info
+
     def _clamav_clamd(self, job_id, clamav_dir, path, threads):
         import queue as _queue
         t0 = time.time()
@@ -717,7 +744,7 @@ class OrcaAgent:
         except _ScanCancelled:
             raise RuntimeError("CANCELLED: scan stopped by the analyst")
         st = {"found": 0, "found_bytes": 0, "walk_done": False, "scanned": 0, "scanned_bytes": 0,
-              "infected": 0, "errors": 0, "error_samples": [], "threats": [], "new_threats": []}
+              "infected": 0, "errors": 0, "error_samples": [], "threats": [], "new_threats": [], "details": {}}
         errs = {}
         current = {}
         lock = threading.Lock()
@@ -755,11 +782,13 @@ class OrcaAgent:
                     r = self._clamd_cmd(port, "SCAN " + p)
                 except OSError as e:
                     r = f"{p}: {e} ERROR"
+                info = self._threat_file_info(r) if r.endswith(" FOUND") else None
                 with lock:
                     current.pop(me, None)
                     st["scanned"] += 1; st["scanned_bytes"] += size
-                    if r.endswith(" FOUND"):
+                    if info:
                         st["infected"] += 1; st["threats"].append(r); st["new_threats"].append(r)
+                        st["details"][r] = info
                     elif r.endswith("ERROR"):
                         st["errors"] += 1
                         if len(st["error_samples"]) < 20:
@@ -783,7 +812,7 @@ class OrcaAgent:
                     snap["hardlinks"] = errs.get("hardlinks", 0)
                     cur = sorted(((round(now - t), p) for p, t in current.values()), reverse=True)[:threads]
                 for t in new:
-                    self._stream_line(job_id, "log", {"message": "THREAT: " + t})
+                    self._stream_line(job_id, "log", {"message": "THREAT: " + t, "file": st["details"].get(t)})
                 self._stream_line(job_id, "progress", {"phase": "scanning", "elapsed": round(now - t0), "threads": threads,
                                                        "defender": defender,
                                                        "current": [{"path": p, "secs": s} for s, p in cur], **snap})
@@ -806,13 +835,13 @@ class OrcaAgent:
             log.close()
             shutil.rmtree(work, ignore_errors=True)
         for t in st["new_threats"]:
-            self._stream_line(job_id, "log", {"message": "THREAT: " + t})
+            self._stream_line(job_id, "log", {"message": "THREAT: " + t, "file": st["details"].get(t)})
         if cancelled:
             raise RuntimeError(f"CANCELLED: scan stopped by the analyst after {st['scanned']} files "
                                f"({st['infected']} threats found so far: {'; '.join(st['threats'][:5])})")
         self._stream_line(job_id, "done", {
             "scanned_files": st["scanned"], "infected_files": st["infected"], "threats": st["threats"],
-            "errors": st["errors"], "error_samples": st["error_samples"], "unreadable_folders": errs.get("dirs", 0),
+            "threat_details": st["details"], "errors": st["errors"], "error_samples": st["error_samples"], "unreadable_folders": errs.get("dirs", 0),
             "hardlinks_skipped": errs.get("hardlinks", 0), "hardlink_bytes_skipped": errs.get("hardlink_bytes", 0),
             "data_scanned": st["scanned_bytes"], "elapsed": round(time.time() - t0), "engine": f"clamd x{threads}",
         })
@@ -829,6 +858,7 @@ class OrcaAgent:
                                 text=True, encoding="utf-8", errors="replace",
                                 creationflags=0x08000000 if os.name == "nt" else 0)
         scanned, infected, errors, threats, last, cur = 0, 0, 0, [], 0, ""
+        details = {}
         summary = False
         for line in proc.stdout:
             line = line.strip()
@@ -842,7 +872,8 @@ class OrcaAgent:
                 continue
             if line.endswith(" FOUND"):
                 infected += 1; threats.append(line)
-                self._stream_line(job_id, "log", {"message": "THREAT: " + line})
+                details[line] = self._threat_file_info(line)
+                self._stream_line(job_id, "log", {"message": "THREAT: " + line, "file": details[line]})
             elif line.endswith(": OK") or line.endswith(": Empty file"):
                 cur = line.rsplit(":", 1)[0]
             elif line.endswith("ERROR") or "Can't" in line:
@@ -861,7 +892,7 @@ class OrcaAgent:
                     raise RuntimeError(f"CANCELLED: scan stopped by the analyst after {scanned} files")
         proc.wait()
         self._stream_line(job_id, "done", {"scanned_files": scanned, "infected_files": infected, "threats": threats,
-                                           "errors": errors, "elapsed": round(time.time() - t0), "engine": "clamscan"})
+                                           "threat_details": details, "errors": errors, "elapsed": round(time.time() - t0), "engine": "clamscan"})
 
     # ── Disk image mounting (Arsenal Image Mounter CLI) ──────────────────────
     # aim_cli without --background keeps the virtual disk only while that
