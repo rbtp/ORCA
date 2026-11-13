@@ -1,50 +1,52 @@
 name: Forensic.Windows.SRUM
 description: |
-  Per-application and per-network resource usage from the System
-  Resource Usage Monitor database (C:/Windows/System32/sru/SRUDB.dat)
-  on a mounted Windows disk image (dead disk). SRUM keeps ~30-60 days of
-  history of which application ran, when, and how many bytes it sent and
-  received over each network - useful for proving execution and data
-  movement.
+  Per-application and per-network resource usage from the System Resource Usage
+  Monitor database (Windows/System32/sru/SRUDB.dat) on a mounted dead disk. SRUM
+  keeps ~30-60 days of which application ran, when, and how many bytes it moved
+  over each network - evidence of execution and data movement.
 
-  Wraps the built-in Windows.Forensics.SRUM (one source per SRUM table).
-  NOTE: SRUDB.dat is an ESE database; if the image was captured while the
-  system was running, the on-disk copy can be in a dirty (unflushed)
-  state that Velociraptor's parse_ese refuses - on such an image these
-  sources return no rows until the database is recovered (esentutl /r).
+  SRUDB.dat is an ESE database. When the image was captured from a running system
+  the on-disk copy is in a dirty (unflushed) state that the ESE parser refuses, so
+  this collection first copies the database and its transaction logs to a temp
+  folder and recovers them with the workstation's own esentutl (/r log replay,
+  then /p repair). Recovery succeeds when the analyst workstation's Windows is the
+  same version as, or newer than, the image's; a newer image (e.g. a Windows 11
+  image on a Windows 10 workstation) cannot be recovered with the older esentutl -
+  the RecoveryStatus source then says so instead of returning a silent empty
+  result. The workstation's own esentutl is used, never a binary from the image.
+
+  Runs off the raw mounted volume (:rawdrive), outside the dead-disk remap, because
+  recovery needs to execute esentutl (the remap sandbox disables process execution).
 reference:
   - https://github.com/libyal/esedb-kb/blob/main/documentation/System%20Resource%20Usage%20Monitor%20(SRUM).asciidoc
 sources:
-  - name: ApplicationResourceUsage
+  - name: ResourceUsage
     query: |
-      SELECT TimeStamp,
-             App AS Application,
-             User,
-             UserSid,
-             ForegroundBytesRead,
-             ForegroundBytesWritten,
-             BackgroundBytesRead,
-             BackgroundBytesWritten,
-             SRUMId
-      FROM Artifact.Windows.Forensics.SRUM(source="Application Resource Usage")
-  - name: NetworkUsage
+      LET tmp <= tempdir()
+      LET copied <= SELECT copy(filename=OSPath, dest=tmp + "/" + Name) AS Dest
+         FROM glob(globs=":rawdrive/Windows/System32/sru/SRU*", accessor="auto")
+      LET db <= tmp + "/SRUDB.dat"
+      -- recover the dirty ESE DB with the host esentutl (no-op on a clean DB)
+      LET _r <= SELECT ReturnCode FROM execve(argv=["esentutl.exe", "/r", "sru", "/l", tmp, "/s", tmp, "/i"])
+      LET _p <= SELECT ReturnCode FROM execve(argv=["esentutl.exe", "/p", db, "/o"])
+      -- SELECT * so the exact table columns (which vary by SRUM table) can't throw
+      -- "Symbol not found" and abort; empty when the database is still dirty.
+      SELECT * FROM Artifact.Windows.Forensics.SRUM(SRUMLocation=db, accessor="file")
+      WHERE _Source =~ "Usage|Connect|Execution"
+  - name: RecoveryStatus
     query: |
-      SELECT TimeStamp,
-             App AS Application,
-             User,
-             UserSid,
-             BytesSent,
-             BytesRecvd,
-             InterfaceLuid,
-             L2ProfileId
-      FROM Artifact.Windows.Forensics.SRUM(source="Network Usage")
-  - name: ExecutionStats
-    query: |
-      SELECT TimeStamp,
-             App AS Application,
-             User,
-             UserSid,
-             EndTime,
-             DurationMS,
-             NetworkBytesRaw
-      FROM Artifact.Windows.Forensics.SRUM(source="Execution Stats")
+      LET tmp <= tempdir()
+      LET copied <= SELECT copy(filename=OSPath, dest=tmp + "/" + Name) AS Dest
+         FROM glob(globs=":rawdrive/Windows/System32/sru/SRU*", accessor="auto")
+      LET db <= tmp + "/SRUDB.dat"
+      LET rec <= SELECT ReturnCode, Stdout + Stderr AS Out FROM execve(argv=["esentutl.exe", "/r", "sru", "/l", tmp, "/s", tmp, "/i"])
+      LET rep <= SELECT ReturnCode, Stdout + Stderr AS Out FROM execve(argv=["esentutl.exe", "/p", db, "/o"])
+      LET state = SELECT ReturnCode, Stdout FROM execve(argv=["esentutl.exe", "/mh", db])
+      SELECT db AS RecoveredDatabase,
+             len(list=copied) AS FilesCopied,
+             if(condition=state[0].Stdout =~ "State: *Clean", then="Clean (recovered)", else="Dirty (not recovered)") AS DatabaseState,
+             if(condition=state[0].Stdout =~ "State: *Clean", then="SRUM parsed from the recovered database.",
+                else="Could not recover the SRUM database on this workstation. It is a dirty ESE database, "
+                   + "most likely from a newer Windows version than this workstation (esentutl cannot recover "
+                   + "a newer database). Recover it on a matching-or-newer Windows host (esentutl /r sru), then re-run.") AS Note
+      FROM scope()

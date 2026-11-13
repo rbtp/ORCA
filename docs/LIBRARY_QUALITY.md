@@ -224,8 +224,12 @@ techniques a query happens to cover:
 | Recycle Bin | $Recycle.Bin $I files | 0 ** |
 
 Every collection passes `artifacts verify` and was run through the agent against a mounted Windows 11 image.
-\* SRUM's `SRUDB.dat` was a dirty ESE database on this image (it was captured while the VM was running), which
-`parse_ese` won't open; it returns rows on a cleanly-acquired or `esentutl`-recovered image. \** empty only
+\* SRUM's `SRUDB.dat` was a dirty ESE database on this image (it was captured while the VM was running).
+The SRUM collection copies the database and its logs out and **recovers them automatically with the
+workstation's own `esentutl`** (`/r` log replay, then `/p` repair) before parsing -- which succeeds when the
+workstation's Windows is the same or newer than the image's. This test workstation is Windows 10 and the image
+is Windows 11, so the older `esentutl` can't recover it; the collection's RecoveryStatus row says so instead
+of returning nothing. (It never runs a binary from the evidence image.) \** empty only
 because the freshly-installed test image has no browsing history, opened documents or deleted files; the query
 is correct and returns rows on a real image. The collection definitions are in `tools/library_audit/forensic/`.
 

@@ -52,7 +52,7 @@ def run_one(t, yaml_text):
 #   SHELLBAGS   - no Explorer folder navigation on a fresh install
 #   RECENTDOCS  - no documents opened
 #   RECYCLEBIN  - nothing deleted
-EXPECTED_EMPTY = {"FORENSIC_SRUM", "FORENSIC_SHELLBAGS", "FORENSIC_RECENTDOCS", "FORENSIC_RECYCLEBIN"}
+EXPECTED_EMPTY = {"FORENSIC_SHELLBAGS", "FORENSIC_RECENTDOCS", "FORENSIC_RECYCLEBIN"}  # SRUM now returns a RecoveryStatus row
 
 ok = bad = 0
 for t, yaml_text in items:
